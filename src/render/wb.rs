@@ -139,6 +139,50 @@ pub(super) fn colour_gain_luts(g: [f32; 3]) -> [Vec<f32>; 3] {
     })
 }
 
+/// A channel at or above this is at the white clip (254/255 and 255/255 of an
+/// 8-bit side both count: a JPEG's clipped white decodes as either): the
+/// range's ceiling, not a measurement. ONE number for the two sides that
+/// read it — the reverse fit's rule for what testifies (`fit::tone`'s
+/// ceiling; RULING-1180-joint-r2 §4, "a channel at the white clip is not a
+/// value") and, since 2026-11-10, the develop's rule for what an ESTIMATED
+/// colour correction may scale ([`keep_blown_white`]).
+pub(crate) const WHITE_CLIP: f32 = 0.995;
+
+/// A pixel that reaches an estimated colour correction with EVERY channel at
+/// the white clip carries no ratio between its channels — each one says only
+/// "at least the ceiling" — so a correction read from measured pixels has
+/// nothing of it to scale: the pixel leaves the stage neutral, at the
+/// brightest of the values the stage gave it (each is a lower bound of what
+/// that channel would read, and the highest bound is the one every channel
+/// meets). Any other pixel is returned as the stage rendered it, bit for bit
+/// — a pixel with one or two channels at the clip keeps its measured
+/// channels' say.
+///
+/// The stages are the two the reverse fit ESTIMATES and no slider sets: a
+/// mask's colour gains (`LocalAdjustment::color_gains`, `masks`) and the
+/// colour field (`develop`). An estimate speaks for the pixels it was read
+/// from, and a channel at the white clip never testifies (`fit::tone`,
+/// `fit_field`). The white balance and a mask's own Temp and Tint are the
+/// photographer's instruction and apply to every pixel they are set on,
+/// white included (a cooler mask over a blown sky is how that sky is given
+/// colour); the curves, the wheels, the mixer and a mask's Color tint map the
+/// rendered value itself. None of those is touched.
+///
+/// Until 2026-11-10 a blown pixel was scaled like a measurement: on the
+/// night pair the brightest stars' cores, white in the base and white under
+/// the recipe's global controls, rendered (0.73, 1.00, 1.00) under the sky
+/// zone's gains (R ×0.52) — cyan cores the correction had never been read
+/// from; with the rule they read (0.96, 1.00, 1.00) over the pixels that
+/// moved, 0.005 % of the frame, and the seven daylight pairs move by at most
+/// 6 codes on at most 0.16 % of their pixels (rel1180/star).
+#[inline]
+pub(super) fn keep_blown_white(before: &[f32; 3], after: [f32; 3]) -> [f32; 3] {
+    if before[0].min(before[1]).min(before[2]) < WHITE_CLIP {
+        return after;
+    }
+    [after[0].max(after[1]).max(after[2]); 3]
+}
+
 /// Apply white-balance gains in linear light. No-op when gains are ~neutral.
 /// Uses [`colour_gain_luts`] so preview cost scales with pixels, not with six
 /// transcendental operations per pixel.

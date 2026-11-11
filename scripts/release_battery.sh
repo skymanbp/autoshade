@@ -26,6 +26,7 @@
 #   AUTOSHADE_CORRESPOND_SCRIPT    defaulted to <repo>/python/correspond.py
 #   BATTERY_TARGET_ROOT            parent of the three CARGO_TARGET_DIRs
 #   BATTERY_DATA_ROOT              parent of the three AUTOSHADE_DATA_DIRs
+#   BATTERY_SERIAL                 1 = the three lanes one after another (GPU note)
 #
 # scripts/roundtrip_gate.py is a developer instrument (it needs Photoshop with
 # Camera Raw) and is not part of this battery; run it by hand when wanted.
@@ -39,8 +40,13 @@
 # model at the same time. Measured on an 8 GB card with the v1.2.4 suite: both
 # lanes completed, twice, the calibration lane taking 822 s and 842 s against the
 # default lane's 446 s and 486 s, because its corpus-gated tests actually run
-# instead of printing a skip line. On a smaller card, run the lanes one at a
-# time by passing a different --out per lane rather than by editing this script.
+# instead of printing a skip line. A process keeps one model on the card at a
+# time (`with_model_slot`), so the lanes are what can put two there. Where the
+# card cannot hold two — a smaller card, or an 8 GB card another program is
+# using (2026-11-11: four model helpers beside a game holding five to eight of
+# the 8 GB, and the driver logged 22 errors in a minute) — set BATTERY_SERIAL=1:
+# the same three lanes, one after another, so the battery has one model
+# resident at a time.
 
 set -u
 set -o pipefail
@@ -55,7 +61,7 @@ while [ $# -gt 0 ]; do
         --out) OUT=$2; shift 2 ;;
         --baseline) BASELINE=$2; shift 2 ;;
         --save-baseline) SAVE_BASELINE=1; shift ;;
-        -h|--help) sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "release_battery: unknown argument $1" >&2; exit 2 ;;
     esac
 done
@@ -187,10 +193,17 @@ lane() {
 # alone; the calibration lane runs the library a second time with the corpus
 # in reach and --nocapture, which is the only way a skip line reaches the
 # transcript at all (libtest swallows a passing test's stderr).
+# Under BATTERY_SERIAL=1 each lane is waited for before the next starts.
+serial_wait() {
+    if [ "${BATTERY_SERIAL:-0}" = 1 ]; then wait "$1"; fi
+    return 0
+}
 lane default &
 PID_DEFAULT=$!
+serial_wait $PID_DEFAULT
 lane gui --features gui --bin autoshade-gui &
 PID_GUI=$!
+serial_wait $PID_GUI
 lane calib --lib -- --nocapture &
 PID_CALIB=$!
 wait $PID_DEFAULT $PID_GUI $PID_CALIB

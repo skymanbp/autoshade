@@ -19,8 +19,9 @@
 //! `pNN.arw` RAWs beside it); with the corpus absent each test is skipped.
 //!
 //! Every test here failed when the gate was built (rel1180 msg2 lists the
-//! readings); each is `#[ignore]`d until the fix that makes it pass lands
-//! with it, so the list of ignores IS the list of open defects.
+//! readings) and was `#[ignore]`d until the fix that makes it pass landed
+//! with it, so the list of ignored gates IS the list of open defects: none
+//! at v1.18.0 (the ignores left below are measurements that print readings).
 
 use super::*;
 use crate::recipe::{CurvePoint, GradeStrength};
@@ -220,7 +221,6 @@ fn the_fit_recovers_a_tint_it_rendered() {
 }
 
 #[test]
-#[ignore = "self-consistency gate: fails at v1.18.0 start, a defect this version fixes (rel1180 msg2); run with --ignored"]
 fn the_fit_recovers_a_band_hue_it_rendered() {
     let Some(raw) = corpus_raw("p39.arw") else { return };
     let (base, rep) = round_trip(&raw, 0.85, |r| r.hsl.hue[5] = 20.0);
@@ -228,19 +228,19 @@ fn the_fit_recovers_a_band_hue_it_rendered() {
 }
 
 #[test]
-#[ignore = "self-consistency gate: fails at v1.18.0 start, a defect this version fixes (rel1180 msg2); run with --ignored"]
 fn the_fit_recovers_a_band_saturation_it_rendered() {
     let Some(raw) = corpus_raw("p39.arw") else { return };
     let (base, rep) = round_trip(&raw, 0.85, |r| r.hsl.saturation[5] = 30.0);
     gate("hsl saturation (blue)", &base, &rep, rep.recipe.hsl.saturation[5], 30.0, &["hsl.saturation"]);
 }
 
-/// The mixer's amounts are solved jointly on each band's population reach
-/// (`fit_band_populations`, `band_population_reach`) and attributed to the
-/// band before the frame-domain tone sliders and saturation (the attribution
-/// law at the mixer, `solve.rs` 4a): the tone stage read this Orange-only
-/// move as exposure −0.2 / saturation +6.6, and the ratio chase split what
-/// the mixer kept into Red −10.7 / Orange −14.5 (rel1180 msg-sc case 2).
+/// The mixer's amounts are solved jointly and attributed to the band before
+/// the frame-domain tone sliders and saturation (the attribution law at the
+/// mixer, `solve.rs` 4a): the tone stage read this Orange-only move as
+/// exposure −0.2 / saturation +6.6, and the ratio chase split what the mixer
+/// kept into Red −10.7 / Orange −14.5 (rel1180 msg-sc case 2). Since J134
+/// (v1.18.0) the joint solve on a paired frame reads the paired pixels
+/// through the engine's own reach (`fit::hsl::fit_band_amounts`).
 #[test]
 fn the_fit_recovers_a_band_luminance_it_rendered() {
     let Some(raw) = corpus_raw("p40.arw") else { return };
@@ -249,7 +249,6 @@ fn the_fit_recovers_a_band_luminance_it_rendered() {
 }
 
 #[test]
-#[ignore = "self-consistency gate: fails at v1.18.0 start, a defect this version fixes (rel1180 msg2); run with --ignored"]
 fn the_fit_recovers_a_grade_wheel_it_rendered() {
     let Some(raw) = corpus_raw("p41.arw") else { return };
     let (base, rep) = round_trip(&raw, 0.85, |r| {
@@ -260,7 +259,6 @@ fn the_fit_recovers_a_grade_wheel_it_rendered() {
 }
 
 #[test]
-#[ignore = "self-consistency gate: fails at v1.18.0 start, a defect this version fixes (rel1180 msg2); run with --ignored"]
 fn the_fit_recovers_a_cast_curve_it_rendered() {
     let Some(raw) = corpus_raw("p38.arw") else { return };
     let curve = vec![

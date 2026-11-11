@@ -218,7 +218,7 @@ pub(super) fn attach_zones(
 /// their tone verdict. The detail stage reads sky/land zones only from a
 /// partition that held (a 0% sky once handed it a "land" of the whole frame
 /// and the anchor raster outlived the failed partition, 2026-10-21).
-#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(super) fn attach_zones_with_divergence(
     src: &DynamicImage,
     target: &DynamicImage,
@@ -227,6 +227,25 @@ pub(super) fn attach_zones_with_divergence(
     tgt_mask: &GrayImage,
     mask_path: &crate::store::OwnedRaster,
     divergence: ZoneDivergences,
+) -> bool {
+    attach_zones_scoped(src, target, report, src_mask, tgt_mask, mask_path, divergence, true)
+}
+
+/// [`attach_zones_with_divergence`] with the band trials the caller's to
+/// leave out: `bands` false attaches the two semantic zones as single zones
+/// only (`entry::zone_alone_check`'s probe, which asks whether the zones
+/// could carry the frame at all — a question their band partitions refine
+/// and do not decide).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn attach_zones_scoped(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    report: &mut FitReport,
+    src_mask: &GrayImage,
+    tgt_mask: &GrayImage,
+    mask_path: &crate::store::OwnedRaster,
+    divergence: ZoneDivergences,
+    bands: bool,
 ) -> bool {
     let (s_img, t_img) = fit::analysis_pair(src, target);
     let tgt_px = fit::pixels_of(&t_img);
@@ -394,7 +413,7 @@ pub(super) fn attach_zones_with_divergence(
     let zones = (&sky_attachment, &land_attachment);
     let divergences = (divergence.sky.divergence, divergence.land.divergence);
     if accepted.is_empty() {
-        return finish_with_bands_only(&s_img, &tgt_px, report, zones, divergences, mask_path);
+        return finish_with_bands_only(&s_img, &tgt_px, report, zones, divergences, mask_path, bands);
     }
     let first_zone = report.recipe.masks.len() - accepted.len();
     debug_assert_eq!(
@@ -433,7 +452,7 @@ pub(super) fn attach_zones_with_divergence(
                 (k, pixels)
             }
             BoundaryGateResult::Dropped => {
-                return finish_with_bands_only(&s_img, &tgt_px, report, zones, divergences, mask_path);
+                return finish_with_bands_only(&s_img, &tgt_px, report, zones, divergences, mask_path, bands);
             }
         };
         // A LOCAL correction's do-no-harm reads the one objective as the frame
@@ -449,7 +468,7 @@ pub(super) fn attach_zones_with_divergence(
         }
         report.recipe.masks.truncate(first_zone);
         if accepted.is_empty() {
-            return finish_with_bands_only(&s_img, &tgt_px, report, zones, divergences, mask_path);
+            return finish_with_bands_only(&s_img, &tgt_px, report, zones, divergences, mask_path, bands);
         }
         report.recipe.masks.extend(originals.iter().cloned());
         for (j, zone) in accepted.iter_mut().enumerate() {
@@ -472,8 +491,10 @@ pub(super) fn attach_zones_with_divergence(
     // what every printout pairs it with. What changes is that it no longer
     // doubles as the zone stage's verdict.
     report.err_after = frame_err;
-    subzones::replace_zone(&s_img, &tgt_px, report, &sky_attachment, divergence.sky.divergence);
-    subzones::replace_zone(&s_img, &tgt_px, report, &land_attachment, divergence.land.divergence);
+    if bands {
+        subzones::replace_zone(&s_img, &tgt_px, report, &sky_attachment, divergence.sky.divergence);
+        subzones::replace_zone(&s_img, &tgt_px, report, &land_attachment, divergence.land.divergence);
+    }
     let final_px = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
     // CONFIDENCE, on the other hand, is a verdict, and it now comes from what
     // was actually judged: the WORST accepted zone's own residual, on the
@@ -540,10 +561,15 @@ pub(super) fn finish_with_bands_only(
     (sky, land): (&ZoneAttachment, &ZoneAttachment),
     (sky_divergence, land_divergence): (Option<fit::Divergence>, Option<fit::Divergence>),
     mask_path: &crate::store::OwnedRaster,
+    bands: bool,
 ) -> bool {
     let before = report.recipe.masks.len();
-    subzones::replace_zone(s_img, tgt_px, report, sky, sky_divergence);
-    subzones::replace_zone(s_img, tgt_px, report, land, land_divergence);
+    // `bands` false (`attach_zones_scoped`): the exit keeps its shape, with
+    // nothing tried.
+    if bands {
+        subzones::replace_zone(s_img, tgt_px, report, sky, sky_divergence);
+        subzones::replace_zone(s_img, tgt_px, report, land, land_divergence);
+    }
     if report.recipe.masks.len() == before {
         mask_path.remove();
     }

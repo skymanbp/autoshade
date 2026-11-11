@@ -115,28 +115,24 @@ pub(super) fn fit_atmosphere_from_parts(
         },
         None => AtmosphereReference::WholeFrame,
     };
-    // Borrowed, never cloned, on the unrestricted path: with no field the two
-    // solves below read the very slices they always read — and that now
-    // covers the PAIRED TARGET ARRAY as well, since `atmosphere_wb_pairing`
-    // hands back `tp` itself when there is no readable field, and hands back
-    // `c.tp` when there is. `c.tp` is pinned identical to `tp` under an
-    // identity field, so the remap is a provable no-op on every
-    // same-composition pair and the only arrays that differ belong to pairs
-    // whose content actually moved.
-    let readable = shared.as_ref().filter(|p| p.readable());
-    let (pair_tp, pair_w) = atmosphere_wb_pairing(tp, evidence, correspondence, readable);
     // One report has one ruler: the caller's structural `err_before` belongs
     // to the mode-selection model, while every Atmosphere measurement below
     // is read on ONE population model — the structure-blind frame model,
     // which keeps the structural pairing (2026-11-07), or, with a readable
-    // field, that model scoped to the shared-content population (presence =
-    // the field's confident matches, the pairing the field's remap). The
-    // same model judges J*, the base candidate, the law's cells and the
-    // report's identifiability (RULING-1180-int-r2: what the restriction
-    // excludes, no guard reads).
-    let judged_scoped = readable.map(|p| evidence.scoped(pair_tp, &p.source, &p.target));
+    // field, the same construction on the field's own pairing
+    // (`shared_content_pairing`: the remapped target, the structural
+    // instrument read on that pair, scoped to the field's confident
+    // matches). The same model judges J*, the base candidate, the law's
+    // cells, the white balance's pair weight and the report's
+    // identifiability (RULING-1180-int-r2: what the restriction excludes, no
+    // guard reads). With no field the slices are the frame's own, borrowed;
+    // under an identity field the model is the frame's field for field, so
+    // a restriction that drops nothing moves nothing.
+    let readable = shared.as_ref().filter(|p| p.readable());
+    let (pair_tp, judged_scoped) = shared_content_pairing(sp, tp, structural, correspondence, readable);
     let judged: &EvidenceModel = judged_scoped.as_ref().unwrap_or(evidence);
-    let judged_tp: &[[f32; 3]] = if readable.is_some() { pair_tp } else { tp };
+    let judged_tp: &[[f32; 3]] = pair_tp;
+    let pair_w = atmosphere_wb_pairing(judged);
     let err_before = look_err_with_evidence(sp, judged_tp, judged);
     let mut recipe = base.clone();
 
@@ -157,7 +153,7 @@ pub(super) fn fit_atmosphere_from_parts(
     //
     // The paired form — a weighted median of the per-pixel log2 luminance
     // ratio over exactly the population and pairing
-    // `atmosphere_wb_pairing` hands the white balance — buys NOTHING on the
+    // `shared_content_pairing` hands the white balance — buys NOTHING on the
     // real pairs and costs a synthetic one its whole fit. Measured on this
     // tree: the generated-cloud calibration pair reads 0.188686 -> 0.099869
     // either way, `p37` reads 0.247107 -> 0.161220 either way, and no other
@@ -188,7 +184,7 @@ pub(super) fn fit_atmosphere_from_parts(
     recipe.exposure_ev = round2(exposure);
 
     // The white balance is solved on ONE population of per-pixel colour
-    // changes — see `atmosphere_wb_pairing` for why the field that chose the
+    // changes — see `shared_content_pairing` for why the field that chose the
     // population must also choose the pairing, and
     // `atmosphere_wb_from_populations` for why the statistic is a per-pixel
     // median rather than three independent marginal ones.
@@ -212,6 +208,44 @@ pub(super) fn fit_atmosphere_from_parts(
         budget.slope.0,
         budget.slope.1,
     );
+    // The tone's OTHER carrier (2026-11-10). Where brightness ranges are
+    // withheld the stage has two ways to state one tone: the exposure with a
+    // curve that undoes it over the withheld ranges (above), or the curve
+    // alone — no exposure, the withheld ranges pinned where they stand, the
+    // rest matched by the same quantile knots. They are not the same
+    // proposal once the exposure meets a limit the curve cannot undo: a
+    // withheld range near white is pushed into clipping, many source levels
+    // land on one, and no knot inside the slope budget maps them back; the
+    // bounded solve can only scale the shape it is given, so the law refused
+    // that tone at every fraction and nothing shipped (the withheld-top toy,
+    // gates/j120–j121: 0.0467 either way). Which carrier serves a pair is
+    // read, not assumed, by the alone check's law (`solve::alone_check`):
+    // the curve-carried start is repaired into the law, and where it
+    // already reads a lower F or a lower J* than the exposure's solve
+    // FINISHED on, it is solved the same way and the lower finished F ships
+    // (below). Offered wherever the stage's exposure is off the base. Until
+    // J142 (2026-11-11) it was offered only where a range was withheld, on
+    // the reading that the two carriers differ only there; they also differ
+    // at the frame's two ends, which the exposure moves and the curve keeps.
+    // On the different-photo pair, whose brightest ranges ask nothing, the
+    // exposure's solve finished at J* 0.15871 and the curve's at 0.12427
+    // (the diagnostic build `probe5`, rel1180 j142/p5-both, 2026-11-11).
+    let curve_carried = (recipe.exposure_ev != base.exposure_ev).then(|| {
+        let mut unexposed = recipe.clone();
+        unexposed.exposure_ev = base.exposure_ev;
+        unexposed.tone_curve = base.tone_curve.clone();
+        let at_base = pixels_of(&render::develop_preview(s_img, &unexposed));
+        let pins = withheld_identity_pins(sp, &at_base, structural);
+        atmosphere_tone_curve_weighted(
+            &at_base,
+            tp,
+            &evidence.source_weights,
+            &evidence.target_weights,
+            &pins,
+            budget.slope.0,
+            budget.slope.1,
+        )
+    });
 
     let target_chroma = weighted_mean_chroma(tp, &evidence.target_weights).unwrap_or_else(|| mean_chroma(tp));
     let mut sat_pegged = false;
@@ -269,11 +303,44 @@ pub(super) fn fit_atmosphere_from_parts(
         strength,
         budget,
         law,
-        pair_w.to_vec(),
-        pair_tp,
-        readable.map(|p| p.source.as_slice()),
+        pair_w,
     );
     let started = std::time::Instant::now();
+    // The starts beside the stage's own: each is the same recipe with its
+    // tone stated another way.
+    let mut alternatives: Vec<(&'static str, EditRecipe)> = Vec::new();
+    if let Some(curve) = curve_carried {
+        let mut alt = recipe.clone();
+        alt.exposure_ev = base.exposure_ev;
+        alt.tone_curve = curve;
+        alternatives.push(("the curve carries the tone", alt));
+    }
+    // The tone's THIRD carrier (J142, 2026-11-11): the law's own asks, as the
+    // curve (`asks_curve::asks_tone_curve`, where the construction and its
+    // readings are). The asks are the tone class's, read as G will read them
+    // — on the frame the other classes leave (`joint::without_class`) — so
+    // the shape proposes, range by range, what the law will admit, as far as
+    // the slope budget lets one curve say it. The exposure and three quantile
+    // knots cannot say "the ground down 2.6 ln, the sky's top where it is";
+    // this can, and which carrier serves a pair is read on the finished F
+    // like the other one's (below).
+    {
+        let toneless = super::joint::without_class(base, &recipe, super::joint::Refusal::Tone);
+        let before = pixels_of(&render::develop_preview(s_img, &toneless));
+        let cell_asks = ctx.validity.luma_asks(&ctx.validity.asks(super::validity::Class::Tone, &before));
+        let curve = super::asks_curve::asks_tone_curve(&cell_asks, budget.slope.0, budget.slope.1);
+        if crate::config::live_env_os("AUTOSHADE_FIT_TRACE").is_some() {
+            eprintln!(
+                "fit: the asks' tone, cells (level, ask, mass) {cell_asks:?} -> {:?}",
+                curve.iter().map(|k| (k.input, k.output)).collect::<Vec<_>>()
+            );
+        }
+        if !curve.is_empty() {
+            let mut alt = toneless;
+            alt.tone_curve = curve;
+            alternatives.push(("the asks carry the tone", alt));
+        }
+    }
     // A BOUNDED point: this mode's evidence is the population's
     // distribution, which cannot say which pixel goes where, so each curve
     // keeps the stages' shape and carries one coordinate, its strength
@@ -282,23 +349,37 @@ pub(super) fn fit_atmosphere_from_parts(
     let mut joint = super::joint::Joint::with_pinned(&ctx, super::joint::Coord::atmosphere_pinned(&point));
     joint.trace_start(&point);
     let start = joint.repair(&mut point);
-    joint.mark("repair");
-    joint.trace("repair", &point, &start);
-    // The stages' proposal as it entered the descent (see `stage_joint`).
-    let proposed = point.recipe.clone();
-    let best = joint.descend(&mut point, start, &super::joint::STEP_MULTIPLIERS);
-    joint.mark("descend");
-    joint.trace("descend", &point, &best);
-    let mut best = joint.polish(&mut point, best, &super::joint::STEP_MULTIPLIERS);
-    joint.mark("polish");
-    joint.trace("polish", &point, &best);
-    let mut unearned = joint.eliminate(&mut point, &mut best);
-    joint.mark("eliminate");
-    joint.trace("eliminate", &point, &best);
-    let best = joint.polish(&mut point, best, &super::joint::STEP_MULTIPLIERS[2..]);
-    joint.mark("polish");
-    joint.trace("final polish", &point, &best);
-    super::joint::walked_back(&proposed, &point.recipe, base, &mut unearned);
+    let (mut point, mut best, mut unearned) = solve_bounded(&mut joint, point, start, base);
+    // The other carriers (see `curve_carried` and the asks' tone above), one
+    // after the other against the best so far. A finished F is the only F
+    // two starts can be compared on — a repaired start still carries every
+    // control the elimination has not priced, and until 2026-11-10 the two
+    // were compared there: on the night RAW pair the exposure's start had
+    // fallen to the base (F 0.17560 at price 0) and beat the curve's J*
+    // 0.16520 under nine controls (F 0.18230), so the global solve shipped
+    // nothing (legs/V1).
+    for (carrier, alt) in alternatives {
+        let mut alt_point = super::joint::Point::bounded(alt);
+        let mut alt_joint =
+            super::joint::Joint::with_pinned(&ctx, super::joint::Coord::atmosphere_pinned(&alt_point));
+        let alt_start = alt_joint.repair(&mut alt_point);
+        let mut shipped = false;
+        if alt_start.f() < best.f() || alt_start.j < best.j {
+            let (alt_point, alt_best, alt_unearned) = solve_bounded(&mut alt_joint, alt_point, alt_start, base);
+            if alt_best.f() < best.f() {
+                (point, best, unearned) = (alt_point, alt_best, alt_unearned);
+                shipped = true;
+            }
+        } else {
+            alt_joint.trace(&format!("repair ({carrier})"), &alt_point, &alt_start);
+        }
+        if shipped {
+            alt_joint.absorb(&joint);
+            joint = alt_joint;
+        } else {
+            joint.absorb(&alt_joint);
+        }
+    }
     let mut recipe = point.recipe;
     let f = best.f();
     let mut err_after = best.j;
@@ -382,6 +463,36 @@ pub(super) fn fit_atmosphere_from_parts(
     )
 }
 
+/// One bounded solve from its repaired start: descended, polished, the
+/// controls that do not earn their price eliminated, polished again at the
+/// fine steps. Returns the point, its reading and the controls the solve
+/// dropped or walked back to the base.
+fn solve_bounded(
+    joint: &mut super::joint::Joint<'_, '_>,
+    mut point: super::joint::Point,
+    start: super::joint::Eval,
+    base: &EditRecipe,
+) -> (super::joint::Point, super::joint::Eval, Vec<Control>) {
+    joint.mark("repair");
+    joint.trace("repair", &point, &start);
+    // The stages' proposal as it entered the descent (see `stage_joint`).
+    let proposed = point.recipe.clone();
+    let best = joint.descend(&mut point, start, &super::joint::STEP_MULTIPLIERS);
+    joint.mark("descend");
+    joint.trace("descend", &point, &best);
+    let mut best = joint.polish(&mut point, best, &super::joint::STEP_MULTIPLIERS);
+    joint.mark("polish");
+    joint.trace("polish", &point, &best);
+    let mut unearned = joint.eliminate(&mut point, &mut best);
+    joint.mark("eliminate");
+    joint.trace("eliminate", &point, &best);
+    let best = joint.polish(&mut point, best, &super::joint::STEP_MULTIPLIERS[2..]);
+    joint.mark("polish");
+    joint.trace("final polish", &point, &best);
+    super::joint::walked_back(&proposed, &point.recipe, base, &mut unearned);
+    (point, best, unearned)
+}
+
 /// The identity a withheld luma range keeps in the OVERALL tone: the Full
 /// stage pins its `tone_map` to the identity there (a populated range with
 /// no evidence weight is refused, not extrapolated); this mode's curve sits
@@ -394,9 +505,24 @@ pub(super) fn fit_atmosphere_from_parts(
 /// stage gives it, so the shape carries the identification (gates/j120: the
 /// exposure alone brightened the withheld top against its asks and the
 /// whole tone was refused).
-fn withheld_identity_pins(sp: &[[f32; 3]], provisional: &[[f32; 3]], evidence: &EvidenceModel) -> Vec<CurvePoint> {
+///
+/// A frame nothing pairs on has no withheld range (J142, 2026-11-11). A
+/// range is withheld FROM a pairing — its pairs disagree, so the paired
+/// reading of it is not trusted and the tone leaves it where it stands. On
+/// two photographs ([`EvidenceModel::pairs_a_population`], the reading the
+/// colour field is refused on) the structural model gives no range any
+/// weight, every populated range was pinned, and the stage's curve undid
+/// its own exposure everywhere: the proposal was the identity on the one
+/// kind of pair this mode's doctrine fits by distribution alone, while the
+/// law read those same ranges on the population's quantile asks (user
+/// ruling 2026-11-07) — on the different-photo pair, −2.0 to −2.6 ln for
+/// the ground (rel1180 j142/p5-both).
+pub(super) fn withheld_identity_pins(sp: &[[f32; 3]], provisional: &[[f32; 3]], evidence: &EvidenceModel) -> Vec<CurvePoint> {
     let n = sp.len().min(provisional.len());
     let mut pins = Vec::new();
+    if !evidence.pairs_a_population() {
+        return pins;
+    }
     for (bin, range) in evidence.luma.iter().enumerate() {
         if range.weight > 0.0 || range.source_share < EVIDENCE_MIN_SHARE {
             continue;

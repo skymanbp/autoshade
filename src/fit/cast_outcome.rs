@@ -402,9 +402,10 @@ pub(super) fn unrepresented_note(
     let mut names: Vec<&str> = Vec::new();
 
     if residual_is_colour_shaped(after_px, tp, evidence) {
-        // `hsl` here means what stage 4a left: it fits a band's saturation
-        // and luminance from that band's own population and, on paired fits,
-        // its hue from the pixels' own rotation, and this note is read on the
+        // `hsl` here means what stage 4a left: on paired fits it fits a
+        // band's saturation, luminance and hue from the pixels' own changes
+        // (from the band's population, and no hue, where the pixels do not
+        // pair), and this note is read on the
         // residual those moves left behind, so a per-band gap the mixer
         // closed never reaches this line. What survives it is a band
         // rotation the paired solve could not ship (no pairing, past the

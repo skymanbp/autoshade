@@ -350,21 +350,20 @@ pub(super) struct Cells {
 }
 
 impl Cells {
-    /// The cells of a pair: every present pixel has standing, the pairing
-    /// is the evidence model's.
+    /// The cells of a pair: every pixel the evidence model holds PRESENT has
+    /// standing, at its presence weight, and the pairing is the evidence
+    /// model's. A scoped model's presence is its population's membership, so
+    /// on an Atmosphere solve judged on a readable shared-content population
+    /// (R30 R2, `evidence::shared_content_pairing`: `tp` the
+    /// correspondence-remapped target) the pixels outside it are SILENT — no
+    /// standing, no ask — the replaced content the robust controls were
+    /// never solved from (an invented half asks for a scene, not an edit,
+    /// and no global control can be judged on it). ONE construction for both
+    /// (2026-11-10): the restricted cells used to take membership for
+    /// pairing while J* read the model's flags, and a field that dropped
+    /// nothing moved a dial.
     pub(super) fn new(sp: &[[f32; 3]], tp: &[[f32; 3]], evidence: &EvidenceModel) -> Self {
-        Self::build(sp, tp, evidence, None)
-    }
-
-    /// The cells of an Atmosphere solve whose reference is a readable
-    /// shared-content population (R30 R2): `pair_tp` is the
-    /// correspondence-remapped target, `shared` the field's confident
-    /// matches (zero elsewhere), and the pixels outside that population are
-    /// SILENT — no standing, no ask — the replaced content the robust
-    /// controls were never solved from (an invented half asks for a scene,
-    /// not an edit, and no global control can be judged on it).
-    pub(super) fn restricted(sp: &[[f32; 3]], pair_tp: &[[f32; 3]], evidence: &EvidenceModel, shared: &[f32]) -> Self {
-        Self::build(sp, pair_tp, evidence, Some(shared))
+        Self::build(sp, tp, evidence)
     }
 
     /// The class's cells.
@@ -378,15 +377,11 @@ impl Cells {
         self.grids.iter().map(Vec::len).sum()
     }
 
-    fn build(sp: &[[f32; 3]], tp: &[[f32; 3]], evidence: &EvidenceModel, shared: Option<&[f32]>) -> Self {
+    fn build(sp: &[[f32; 3]], tp: &[[f32; 3]], evidence: &EvidenceModel) -> Self {
         let n = sp.len().min(tp.len());
-        let in_shared = |i: usize| shared.is_none_or(|s| s.get(i).copied().unwrap_or(0.0) > 0.0);
-        let w: Vec<f32> = (0..n)
-            .map(|i| if in_shared(i) { evidence.source_presence_weights.get(i).copied().unwrap_or(0.0).max(0.0) } else { 0.0 })
-            .collect();
-        let paired: Vec<bool> = (0..n)
-            .map(|i| if shared.is_some() { in_shared(i) } else { evidence.paired.get(i).copied().unwrap_or(false) })
-            .collect();
+        let w: Vec<f32> =
+            (0..n).map(|i| evidence.source_presence_weights.get(i).copied().unwrap_or(0.0).max(0.0)).collect();
+        let paired: Vec<bool> = (0..n).map(|i| evidence.paired.get(i).copied().unwrap_or(false)).collect();
         let total: f64 = w.iter().map(|&x| x as f64).sum();
         // The fine partition: brightness range × (achromatic + 8 hue bands).
         let mut fine: Vec<Vec<u32>> = vec![Vec::new(); EVIDENCE_LUMA_BINS * 9];
@@ -584,6 +579,21 @@ impl Cells {
             })
             .collect();
         ClassAsks { class, before_px: before.to_vec(), before: cb, per_cell }
+    }
+
+    /// The brightness asks of `asks`' cells, for the stage that states them as
+    /// a curve (`asks_curve::asks_tone_curve`): per cell with a brightness
+    /// ask, its display level on the asks' frame, the ask (ln linear luma)
+    /// and the cell's mass.
+    pub(super) fn luma_asks(&self, asks: &ClassAsks) -> Vec<(f32, f32, f32)> {
+        self.grid(asks.class)
+            .iter()
+            .zip(&asks.per_cell)
+            .filter_map(|(cell, axes)| {
+                let luma = axes.iter().find(|a| a.axis == Axis::Luma)?;
+                Some((cell_level(&asks.before, &self.w, &cell.members), luma.asks[0].0, cell.mass))
+            })
+            .collect()
     }
 
     /// The moves of `after` from the asks' before frame, per slot of `axis` in

@@ -205,4 +205,71 @@ mod tests {
         m.color_gains = None;
         assert!(gains_as_white(&r, &m).is_none());
     }
+
+    /// A pixel at the white clip in every channel leaves the two ESTIMATED
+    /// colour corrections — a mask's colour gains and the colour field —
+    /// neutral, at the brightest value the stage gave it; a measured pixel —
+    /// one step under the clip, or with a single channel at it — takes them
+    /// as before. The photographer's own white balance and a mask's own Temp
+    /// are instructions and colour a blown pixel like any other.
+    ///
+    /// MUTATION: drop `keep_blown_white` from either stage, read the clip on
+    /// the brightest channel instead of the darkest, or guard a mask that
+    /// carries a Temp and no gains.
+    #[test]
+    fn a_blown_pixel_takes_no_hue_from_an_estimated_colour_correction() {
+        let develop = |r: &EditRecipe, px: [f32; 3]| {
+            let mut data = vec![px; 16];
+            apply_recipe_wb(&mut data, r);
+            apply_develop_with_rasters(
+                &mut data, 4, 4, r, &MaskRasterSnapshot::default(), MaskFrame::AsRendered,
+                FilmScale::NATIVE, false, false,
+            );
+            data[5]
+        };
+        let neutral = |p: [f32; 3]| (p[0] - p[1]).abs() < 1e-4 && (p[1] - p[2]).abs() < 1e-4;
+        let whole = crate::recipe::LocalAdjustment {
+            mask: crate::recipe::MaskGeometry::Linear { zero_x: 0.0, zero_y: 0.0, full_x: 0.0, full_y: 0.0 },
+            ..Default::default()
+        };
+        // A mask's gains: the night pair's sky correction.
+        let gains = crate::recipe::LocalAdjustment { color_gains: Some([0.52, 1.09, 2.26]), ..whole.clone() };
+        let masked = EditRecipe { masks: vec![gains.clone()], ..EditRecipe::default() };
+        let (blown, under, one) =
+            (develop(&masked, [1.0; 3]), develop(&masked, [0.98; 3]), develop(&masked, [1.0, 0.6, 0.3]));
+        assert!(neutral(blown) && blown[0] > 0.99, "a blown pixel under R x0.52 stays white: {blown:?}");
+        assert!(under[0] < under[1] - 0.1, "a pixel under the clip takes the gains: {under:?}");
+        assert!(one[0] < 0.8, "one channel at the clip beside two measurements is scaled: {one:?}");
+        // A mask's own Temp is an instruction: it cools a blown pixel.
+        let cooler = EditRecipe { masks: vec![crate::recipe::LocalAdjustment { temperature: -60.0, ..whole.clone() }], ..EditRecipe::default() };
+        let blown = develop(&cooler, [1.0; 3]);
+        assert!(blown[0] < blown[2] - 0.02, "a mask's Temp colours a blown pixel: {blown:?}");
+        // With both, the gains read the pixel as the Temp left it: no longer
+        // blown in every channel, so they scale it.
+        let both = EditRecipe { masks: vec![crate::recipe::LocalAdjustment { temperature: -60.0, ..gains }], ..EditRecipe::default() };
+        let (with_gains, temp_only) = (develop(&both, [1.0; 3]), blown);
+        assert!(with_gains[0] < temp_only[0] - 0.05, "{with_gains:?} against {temp_only:?}");
+        // The photographer's white balance, cooled from 6500 K to 3500 K.
+        let cooled = EditRecipe { as_shot_k: Some(6500.0), temperature_k: Some(3500.0), ..EditRecipe::default() };
+        let blown = develop(&cooled, [1.0; 3]);
+        assert!(blown[0] < blown[2] - 0.02, "the white balance colours a blown pixel: {blown:?}");
+        // The colour field: red down 30 %, blue up 30 %, everywhere.
+        let field = crate::recipe::ColourField {
+            x: 2,
+            y: 2,
+            b: 2,
+            grid: vec![[0.0, -0.3, 0.0, 0.3, 0.0]; 8],
+            owners: Vec::new(),
+            amount: 1.0,
+            enabled: true,
+        };
+        let fielded = |px: [f32; 3]| {
+            let mut data = vec![px; 16];
+            apply_colour_field(&mut data, 4, 4, Some(&field), &crate::render::FieldFrame::default(), None);
+            data[5]
+        };
+        let (blown, under) = (fielded([1.0; 3]), fielded([0.9; 3]));
+        assert!(neutral(blown) && blown[0] > 0.99, "a blown pixel takes no hue from the field: {blown:?}");
+        assert!(under[0] < under[2] - 0.2, "a measured pixel takes the field: {under:?}");
+    }
 }

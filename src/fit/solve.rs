@@ -289,8 +289,13 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
 
     // Already matched: the base reads within the objective's own rounding of
     // the target, so there is nothing a rounded recipe could correct
-    // (FIT_QUANT, v1.18.0; a bare 0.001 with no record before).
-    if err_before <= FIT_QUANT {
+    // (FIT_QUANT, v1.18.0; a bare 0.001 with no record before) — on the
+    // frame AND on every population a priced control answers for
+    // (`priced_populations_matched`, 2026-11-10: a band that reaches 4 % of
+    // the frame reads its whole ask divided by 25 on the frame, and a +20
+    // band hue the fit itself had rendered returned here at 0.0008,
+    // gates/j125).
+    if err_before <= FIT_QUANT && priced_populations_matched(&sp, &tp, &evidence, base) {
         return compose_report(
             base.clone(),
             Measured {
@@ -389,7 +394,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // joint objective decides what ships (`stage_joint`).
     let ctx = SolveCtx::new(&s_img, &sp, &tp, &evidence, &cells, base, &options, pairing);
     let started = std::time::Instant::now();
-    let state = run_from(&ctx, Stage::Tone, SolveState::at(base));
+    let state = alone_check(&ctx, run_from(&ctx, Stage::Tone, SolveState::at(base)));
     let SolveState { wb_facts, sat_pegged, grade_held, detail, detail_supported, finished, .. } = state;
     let finished = finished.expect("run_from runs the joint stage");
     let (budget, paired) = (ctx.budget, ctx.paired);
@@ -513,14 +518,16 @@ enum Stage {
     Grade,
     /// The detail controls.
     Detail,
-    /// 4: the per-band mixer and the cast curves, as fitted.
+    /// 4a: the per-band mixer, as fitted.
     Mixer,
+    /// 4: the cast curves, as fitted.
+    Cast,
     /// The joint objective: repair, polish, eliminate.
     Joint,
 }
 
 impl Stage {
-    const ALL: [Stage; 8] = [
+    const ALL: [Stage; 9] = [
         Stage::Tone,
         Stage::MasterCurve,
         Stage::WhiteBalance,
@@ -528,6 +535,7 @@ impl Stage {
         Stage::Grade,
         Stage::Detail,
         Stage::Mixer,
+        Stage::Cast,
         Stage::Joint,
     ];
 
@@ -540,8 +548,110 @@ impl Stage {
             Stage::Grade => stage_grade(ctx, st),
             Stage::Detail => stage_detail(ctx, st),
             Stage::Mixer => stage_mixer(ctx, st),
+            Stage::Cast => stage_cast(ctx, st),
             Stage::Joint => stage_joint(ctx, st),
         }
+    }
+}
+
+/// The base matched on every population a priced control answers for: each
+/// mixer band and each grade region with standing (a share of at least
+/// [`EVIDENCE_MIN_SHARE`]) reads within FIT_QUANT on ITS OWN pixels — the
+/// objective scoped to the population's membership, as a local correction is
+/// read ([`crate::fit::ships_local`]'s own-population form). The frame-wide
+/// reading alone cannot say this: it divides a band's ask by its share.
+fn priced_populations_matched(sp: &[[f32; 3]], tp: &[[f32; 3]], evidence: &EvidenceModel, base: &EditRecipe) -> bool {
+    let n = sp.len().max(1) as f64;
+    joint::Reach::populations(sp, &base.color_grade).iter().all(|members| {
+        let share = (members.iter().map(|w| *w as f64).sum::<f64>() / n) as f32;
+        share < EVIDENCE_MIN_SHARE
+            || look_err_with_evidence(sp, tp, &evidence.scoped(tp, members, members)) <= FIT_QUANT
+    })
+}
+
+/// The classes each proposed ALONE from the base, in the stages' own order
+/// (the detail controls ride every start: they are outside J* and F).
+const ALONE_STARTS: [(&str, &[Stage]); 6] = [
+    ("tone", &[Stage::Tone, Stage::MasterCurve, Stage::Detail]),
+    ("white balance", &[Stage::WhiteBalance, Stage::Detail]),
+    ("saturation", &[Stage::Saturation, Stage::Detail]),
+    ("grade", &[Stage::Grade, Stage::Detail]),
+    ("mixer", &[Stage::Detail, Stage::Mixer]),
+    ("cast", &[Stage::Detail, Stage::Cast]),
+];
+
+/// The alone check (RULING-1180-joint-r2, addendum 2026-11-10; RULING-1180-sc
+/// Q-SC-5 and Q-SC-6 at the class's granularity). The stages run in sequence
+/// and each one estimates on the frame the ones before it left, so a target
+/// that ONE class explains reaches the joint solve as a start every earlier
+/// stage has already spent on — the white balance the fit itself had
+/// rendered entered at 17 controls, and the solve kept the wheels and band
+/// dials that rationalised them and dropped the temperature (gates/j126; the
+/// cast curve, the grade wheel and the band toys read the same, gates/j125).
+/// The law (Q-SC-5): a control is judged against its absence with the stages
+/// after it re-fitted. Read from the other side it is cheap: each class is
+/// proposed ALONE from the base and repaired into G; a start that already
+/// reads a lower F, or a lower J*, than the whole solve finished on is a
+/// basin the sequence never visited, and the solve is run again from the
+/// best such start — every coordinate free, as in the first — and the lower
+/// F ships. No start beats the finished solve on a pair the sequence served
+/// (the starts cost their estimates and one repair each); class granularity,
+/// not control granularity, is what this reads.
+fn alone_check(ctx: &SolveCtx<'_>, mut main: SolveState) -> SolveState {
+    let (j_main, f_main) = {
+        let done = main.finished.as_ref().expect("run_from runs the joint stage");
+        (done.err_after, done.f)
+    };
+    let trace = crate::config::live_env_os("AUTOSHADE_G_TRACE").is_some();
+    let mut renders = 0u32;
+    let mut triggered: Option<(f32, &'static str, SolveState)> = None;
+    for (name, stages) in ALONE_STARTS {
+        let mut state = SolveState::at(ctx.base);
+        for stage in stages {
+            stage.run(ctx, &mut state);
+        }
+        if joint::dof_of(&state.recipe, ctx.base, ctx.law) == 0 {
+            continue;
+        }
+        let sub = joint::Joint::new(ctx);
+        let mut point = joint::Point::new(state.recipe.clone());
+        let e = sub.repair(&mut point);
+        renders += sub.renders.get();
+        if trace {
+            eprintln!(
+                "alone {name}: repaired J* {:.5} price {:.3} F {:.5} (the solve: J* {j_main:.5} F {f_main:.5})",
+                e.j,
+                e.price,
+                e.f()
+            );
+        }
+        if (e.f() < f_main || e.j < j_main) && triggered.as_ref().is_none_or(|(f, _, _)| e.f() < *f) {
+            triggered = Some((e.f(), name, state));
+        }
+    }
+    let read = |state: &mut SolveState, tail: String| {
+        if let Some(done) = state.finished.as_mut() {
+            done.spent = format!("{}; alone check {renders} renders{tail}", done.spent);
+        }
+    };
+    let Some((_, name, mut alt)) = triggered else {
+        read(&mut main, String::new());
+        return main;
+    };
+    stage_joint(ctx, &mut alt);
+    let (f_alt, spent_alt) = {
+        let done = alt.finished.as_ref().expect("stage_joint finishes");
+        (done.f, done.spent.clone())
+    };
+    if trace {
+        eprintln!("alone {name}: solved F {f_alt:.5} against the sequence's {f_main:.5}");
+    }
+    if f_alt < f_main {
+        read(&mut alt, format!(", solved again from the {name} alone and shipped (the sequence: F {f_main:.5})"));
+        alt
+    } else {
+        read(&mut main, format!(", solved again from the {name} alone: F {f_alt:.5}, {spent_alt}"));
+        main
     }
 }
 
@@ -631,6 +741,9 @@ pub(super) struct SolveCtx<'a> {
     pub(super) law: render::WbLaw,
     pub(super) wb_weights: Vec<f32>,
     t_chroma: f32,
+    /// The share of the frame each priced control reaches, read once on the
+    /// base render ([`joint::Reach`]).
+    pub(super) reach: joint::Reach,
 }
 
 impl<'a> SolveCtx<'a> {
@@ -776,6 +889,7 @@ impl<'a> SolveCtx<'a> {
             law,
             wb_weights,
             t_chroma,
+            reach: joint::Reach::of(sp, &base.color_grade),
         };
         ctx.tone_deliverable = {
             let tone_map = |x: f32| ctx.tone_map(x);
@@ -804,8 +918,6 @@ impl<'a> SolveCtx<'a> {
         budget: FitBudget,
         law: render::WbLaw,
         wb_weights: Vec<f32>,
-        pair_tp: &'a [[f32; 3]],
-        shared: Option<&[f32]>,
     ) -> Self {
         static NO_CELLS: Option<crate::fit_cells::PairedCells> = None;
         let (s_cdf, t_cdf) = tone_cdf_pair_weighted(sp, tp, evidence);
@@ -821,10 +933,7 @@ impl<'a> SolveCtx<'a> {
             budget,
             full_sat_limit: budget.sat,
             ev_limit: budget.ev,
-            validity: match shared {
-                Some(s) => super::validity::Cells::restricted(sp, pair_tp, evidence, s),
-                None => super::validity::Cells::new(sp, tp, evidence),
-            },
+            validity: super::validity::Cells::new(sp, tp, evidence),
             full_slope: budget.slope,
             s_cdf,
             t_cdf,
@@ -840,6 +949,7 @@ impl<'a> SolveCtx<'a> {
             law,
             wb_weights,
             t_chroma: weighted_mean_chroma(tp, &evidence.target_weights).unwrap_or_else(|| mean_chroma(tp)),
+            reach: joint::Reach::of(sp, &base.color_grade),
         }
     }
 
@@ -1166,10 +1276,11 @@ fn stage_detail(ctx: &SolveCtx<'_>, st: &mut SolveState) {
     // hue damage the metric's hue term partially sees. Marginal gain does
     // not earn regional risk: keep the recipe clean instead.
     //
-    // Per-band HSL is fitted in stage 4a above: its SATURATION and LUMINANCE
-    // axes from each band's population, on bands the two-sided population
-    // gate can measure, and since 2026-11-02 its HUE axis from the paired
-    // pixels only (`fit_band_hues`). The 2026-07-07 failure this comment used
+    // Per-band HSL is fitted in stage 4a above, on bands the two-sided
+    // population gate can measure: where the pixels pair, all three axes
+    // from the paired pixels (`fit_band_amounts`, v1.18.0; `fit_band_hues`,
+    // 2026-11-02), and where they do not, SATURATION and LUMINANCE from each
+    // band's population and no hue. The 2026-07-07 failure this comment used
     // to record was the hue axis read from POPULATIONS: a band's centroid hue
     // delta conflates CONTENT difference with style, and an honest-looking
     // 13° in-gate delta applied as a whole-band rotation turns brown rock
@@ -1183,11 +1294,8 @@ fn stage_detail(ctx: &SolveCtx<'_>, st: &mut SolveState) {
     st.detail_supported = detail_supported;
 }
 
-/// Stage 4: the per-band mixer and the cast curves, as fitted — the
-/// estimate. One mixer solve on the frame the stages before left, one cast
-/// fit on it refined on the finished frame; the validity law (G) judges the
-/// curves on every candidate the descent tries, and a refused start is
-/// scaled, not emptied (`Joint::repair`).
+/// Stage 4a: the per-band mixer, as fitted — the estimate. One mixer solve on
+/// the frame the stages before left.
 fn stage_mixer(ctx: &SolveCtx<'_>, st: &mut SolveState) {
     let (s_img, sp, tp, evidence, cells, budget) = (ctx.s_img, ctx.sp, ctx.tp, ctx.evidence, ctx.cells, ctx.budget);
     let hue_vouch = ctx.hue_vouch();
@@ -1195,14 +1303,24 @@ fn stage_mixer(ctx: &SolveCtx<'_>, st: &mut SolveState) {
     // --- 4a) per-band colour mixer, BEFORE the cast curves ------------------
     // Ordering follows the stage-3 argument one level down: the mixer is the
     // SPECIFIC colour move (one band at a time, from that band's own
-    // population), the channel curves are the catch-all, and the catch-all
+    // pixels), the channel curves are the catch-all, and the catch-all
     // must close its loop on everything the specific stages already did.
     let hsl_facts = fit_hsl_stage(s_img, sp, tp, evidence, hue_vouch, cells.as_ref(), budget, &mut recipe);
-    // --- 4) per-channel colour-cast curves — the catch-all, LAST so its
-    // closed-loop residual sees every earlier stage's composed output.
-    fit_cast_curves(ctx, &mut recipe);
     st.recipe = recipe;
     st.hsl_facts = hsl_facts;
+}
+
+/// Stage 4: the per-channel colour-cast curves, as fitted — the catch-all,
+/// LAST so its closed-loop residual sees every earlier stage's composed
+/// output: one cast fit on the frame the stages before left, refined on the
+/// finished frame; the validity law (G) judges the curves on every candidate
+/// the descent tries, and a refused start is scaled, not emptied
+/// (`Joint::repair`). Its own stage since 2026-11-10 so the alone check can
+/// propose the curves without the mixer ([`alone_check`]).
+fn stage_cast(ctx: &SolveCtx<'_>, st: &mut SolveState) {
+    let mut recipe = std::mem::take(&mut st.recipe);
+    fit_cast_curves(ctx, &mut recipe);
+    st.recipe = recipe;
 }
 
 /// The joint objective (RULING-1180-joint-r1): the start repaired into G

@@ -728,23 +728,34 @@ fn parent_band_anchor(band: &LocalAdjustment, parent: &LocalAdjustment) -> Local
 fn shrink_to_parent(
     masks: &mut [LocalAdjustment], originals: &[LocalAdjustment], parent: &LocalAdjustment, k: f32,
 ) {
+    shrink_to_parent_axes(masks, originals, parent, (k, k));
+}
+
+/// [`shrink_to_parent`] with one scalar per AXIS (2026-11-10, the boundary
+/// gate's release): the six tone dials at `k.0`; the colour dials
+/// (saturation, hue, temperature, tint, the toning amount, the gains) at
+/// `k.1`; the dials that are neither at the smaller of the two.
+fn shrink_to_parent_axes(
+    masks: &mut [LocalAdjustment], originals: &[LocalAdjustment], parent: &LocalAdjustment, k: (f32, f32),
+) {
+    let (tone, colour) = k;
     for (dst, original) in masks.iter_mut().zip(originals) {
         let anchor = parent_band_anchor(original, parent);
-        if k == 0.0 { *dst = anchor; continue; }
+        if tone == 0.0 && colour == 0.0 { *dst = anchor; continue; }
         *dst = original.clone();
-        if k == 1.0 { continue; }
+        if tone == 1.0 && colour == 1.0 { continue; }
         macro_rules! blend {
-            ($($field:ident),+ $(,)?) => { $(dst.$field = anchor.$field + k * (original.$field - anchor.$field);)+ };
+            ($k:expr; $($field:ident),+ $(,)?) => { $(dst.$field = anchor.$field + $k * (original.$field - anchor.$field);)+ };
         }
-        blend!(exposure_ev, contrast, highlights, shadows, whites, blacks, saturation,
-            clarity, dehaze, texture, sharpness, hue, temperature, tint, noise_reduction, amount,
-            toning_amount);
+        blend!(tone; exposure_ev, contrast, highlights, shadows, whites, blacks);
+        blend!(colour; saturation, hue, temperature, tint, toning_amount);
+        blend!(tone.min(colour); clarity, dehaze, texture, sharpness, noise_reduction, amount);
         // A tint's hue is a direction, not a level: it is the band's own
         // wherever the band carries a tint, and the parent's where only it does.
         dst.toning_hue = if original.toning_amount > 0.0 { original.toning_hue } else { anchor.toning_hue };
         let a = anchor.color_gains.unwrap_or([1.0; 3]);
         let b = original.color_gains.unwrap_or([1.0; 3]);
-        dst.color_gains = Some(std::array::from_fn(|c| a[c] + k * (b[c] - a[c])));
+        dst.color_gains = Some(std::array::from_fn(|c| a[c] + colour * (b[c] - a[c])));
     }
 }
 
@@ -874,28 +885,93 @@ fn replace_zone_with(
         }
         let mut pixels = fit::pixels_of(&render::develop_preview(image, &report.recipe));
         let mut boundary_passed = solved;
+        // R19 at the band's own granularity (RULING-1180-joint-r2, addendum
+        // 2026-11-10). A band that REPLACES part of a zone competes with the
+        // zone's own correction on the band's pixels: that correction is the
+        // band's absence, not "no correction" (which is what `attach_one_zone`
+        // admitted it against). A band that does not bring its own pixels
+        // closer by FIT_QUANT than the zone's correction leaves them keeps
+        // the zone's controls there — the geometry stays, the difference
+        // goes — and the set ships on the bands that do earn. Until then the
+        // set was read as one on the parent's whole population: on the night
+        // pair the sky's upper band (0.72 of the frame) solved a colour of
+        // its own that read 0.061 on its pixels against the zone's 0.058,
+        // the foot band (0.08) gained 0.009 on its own, and the whole-sky
+        // distribution reading — which cannot say where in the sky a tone
+        // belongs — refused all seven trials (legs/T2).
+        let mut earns = vec![true; attachments.len()];
         if solved {
             let shares: Vec<f32> = attachments
                 .iter()
                 .map(|(a, _)| a.source_weights.iter().sum::<f32>() / a.source_weights.len().max(1) as f32)
                 .collect();
             let boundaries: Vec<&[f32]> = rims.iter().map(Vec::as_slice).collect();
-            let verdict = if let Some(index) = parent_index {
+            if let Some(index) = parent_index {
                 let control = &saved_recipe.masks[index];
-                let originals = report.recipe.masks[first_band..].to_vec();
-                shrink_to_parent(&mut report.recipe.masks[first_band..], &originals, control, 0.0);
-                let anchor_px = fit::pixels_of(&render::develop_preview(image, &report.recipe));
-                report.recipe.masks[first_band..].clone_from_slice(&originals);
-                enforce_boundary_gates_with_shrink(Some(target), image, report, &boundaries, &shares, first_band,
-                    (&anchor_px, pixels), |masks, originals, _, k| shrink_to_parent(masks, originals, control, k))
+                let anchor_px = {
+                    let originals = report.recipe.masks[first_band..].to_vec();
+                    shrink_to_parent(&mut report.recipe.masks[first_band..], &originals, control, 0.0);
+                    let anchored = fit::pixels_of(&render::develop_preview(image, &report.recipe));
+                    report.recipe.masks[first_band..].clone_from_slice(&originals);
+                    anchored
+                };
+                let trial_notes = saved_notes.len();
+                // Each band is read as solved, the earning set is gated, and
+                // each band is read again as the gate left it; a band that
+                // stops earning under the gate's shrink goes back to the
+                // zone's controls and the rest are gated once more.
+                let mut gate_due = true;
+                loop {
+                    let mut reverted = false;
+                    for (i, (a, _)) in attachments.iter().enumerate() {
+                        if !earns[i] { continue; }
+                        let with = super::accept::own_reading(report, &pixels, target, &a.source_weights, &a.target_weights);
+                        let without = super::accept::own_reading(report, &single_px, target, &a.source_weights, &a.target_weights);
+                        if fit::ships(with, without) { continue; }
+                        let anchored = parent_band_anchor(&report.recipe.masks[first_band + i], control);
+                        report.recipe.masks[first_band + i] = anchored;
+                        earns[i] = false;
+                        reverted = true;
+                        // The band's own account goes with its controls.
+                        take_back_notes(report, |at, note| {
+                            at >= trial_notes && note.args.iter().any(|(k, v)| *k == "label" && *v == a.label)
+                        });
+                        crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes,
+                            crate::rationale::Note::new(crate::rationale::keys::ZONE_BAND_KEEPS_PARENT, vec![
+                                ("label", a.label.clone()), ("with", format!("{with:.5}")),
+                                ("without", format!("{without:.5}")), ("quant", format!("{:.4}", fit::FIT_QUANT)),
+                            ]));
+                    }
+                    if reverted {
+                        pixels = fit::pixels_of(&render::develop_preview(image, &report.recipe));
+                        gate_due = true;
+                    }
+                    if !gate_due || !earns.iter().any(|e| *e) { break; }
+                    // A second gating replaces the first one's sentences.
+                    take_back_notes(report, |at, note| {
+                        at >= trial_notes
+                            && (note.key == crate::rationale::keys::ZONE_BOUNDARY_PASSED
+                                || note.key == crate::rationale::keys::ZONE_BOUNDARY_AXES)
+                    });
+                    match enforce_boundary_gates_with_shrink(Some(target), image, report, &boundaries, &shares, first_band,
+                        (&anchor_px, pixels.clone()), |masks, originals, _, k| shrink_to_parent_axes(masks, originals, control, k), None)
+                    {
+                        BoundaryGateResult::Kept { pixels: kept, .. } => pixels = kept,
+                        BoundaryGateResult::Dropped => {
+                            boundary_passed = false;
+                            pixels = uncorrected.clone();
+                            break;
+                        }
+                    }
+                    gate_due = false;
+                }
             } else {
-                enforce_boundary_gates(Some(target), image, report, &boundaries, &shares, first_band, &uncorrected, pixels)
-            };
-            match verdict {
-                BoundaryGateResult::Kept { pixels: kept, .. } => pixels = kept,
-                BoundaryGateResult::Dropped => {
-                    boundary_passed = false;
-                    pixels = uncorrected.clone();
+                match enforce_boundary_gates(Some(target), image, report, &boundaries, &shares, first_band, &uncorrected, pixels) {
+                    BoundaryGateResult::Kept { pixels: kept, .. } => pixels = kept,
+                    BoundaryGateResult::Dropped => {
+                        boundary_passed = false;
+                        pixels = uncorrected.clone();
+                    }
                 }
             }
         }
@@ -926,9 +1002,18 @@ fn replace_zone_with(
         // stay with the boundary / ramp rulers and its structural gate is the
         // existing D threshold only.
         let frame_after = fit::look_err_with_evidence(&pixels, target, &report.evidence);
+        let replacing = parent_index.is_some();
         let reason = if !solved { values::BAND_ESTIMATOR }
             else if !boundary_passed { values::BOUNDARY_BUDGET }
             else if after >= before - ZONE_DELTA_E_MARGIN { values::DELTA_E_MARGIN }
+            // A REPLACEMENT ships on its bands' own pixels (`earns`, above):
+            // at least one band earned FIT_QUANT over the zone's correction
+            // there; the zone's whole population and the frame are guards
+            // only — neither may rise by more than FIT_QUANT.
+            else if replacing && (!earns.iter().any(|e| *e) || own_after - own_before > fit::FIT_QUANT) {
+                values::ZONE_DO_NO_HARM
+            }
+            else if replacing && frame_after - saved_error > fit::FIT_QUANT { values::FRAME_DO_NO_HARM }
             // ONE check (RULING-1180-int-r7 Q-int6-1): the band set ships on
             // its own population, the frame a guard (`fit::ships_local`). A
             // separate zone do-no-harm read the same own-pixel pair at
@@ -938,11 +1023,37 @@ fn replace_zone_with(
             // zone's own pixels lost (own_after > own_before), "frame
             // do-no-harm" where the bands gained too little on them or the
             // frame guard refused.
-            else if !fit::ships_local(own_after, own_before, frame_after, saved_error) {
+            else if !replacing && !fit::ships_local(own_after, own_before, frame_after, saved_error) {
                 if own_after > own_before { values::ZONE_DO_NO_HARM } else { values::FRAME_DO_NO_HARM }
             }
             else if !no_seam_regression { values::BOUNDARY_REGRESSION }
             else if !ramps_follow { values::RAMP_STEEPER } else { "accepted" };
+        if crate::config::live_env_os("AUTOSHADE_FIT_TRACE").is_some() {
+            let (w, h) = (image.width() as usize, image.height() as usize);
+            eprintln!(
+                "band trial {} k{} breaks {:?} widths {:?}: {reason}; earns {earns:?}; own {own_before:.5} -> {own_after:.5}; frame {saved_error:.5} -> {frame_after:.5}; deltaE {before:.4} -> {after:.4}",
+                parent.label, model.breaks.len() + 1, model.breaks, model.widths
+            );
+            for (i, (a, lift)) in attachments.iter().enumerate() {
+                let single = super::accept::own_reading(report, &single_px, target, &a.source_weights, &a.target_weights);
+                let banded = super::accept::own_reading(report, &pixels, target, &a.source_weights, &a.target_weights);
+                let share = a.source_weights.iter().sum::<f32>() / a.source_weights.len().max(1) as f32;
+                let m = report.recipe.masks.get(first_band + i).map(|m| {
+                    (m.exposure_ev, m.contrast, m.highlights, m.shadows, m.whites, m.blacks, m.saturation, m.color_gains)
+                });
+                eprintln!("  band {} share {share:.4} lift {lift:.2}: own single {single:.5} banded {banded:.5}; mask {m:?}", i + 1);
+            }
+            let banded_rows = profile_rows(&pixels, target, &parent.source_weights, w, h);
+            for (s, b) in rows.iter().zip(&banded_rows).filter(|(s, _)| s.mass >= w as f64 / 8.0) {
+                eprintln!(
+                    "  row {:.4} mass {:.0}: single [{:+.2} {:+.2} {:+.2}] banded [{:+.2} {:+.2} {:+.2}]",
+                    s.y, s.mass, s.delta[0], s.delta[1], s.delta[2], b.delta[0], b.delta[1], b.delta[2]
+                );
+            }
+            for n in report.notes.iter().skip(saved_notes.len()) {
+                eprintln!("  note {}: {:?}", n.key, n.args);
+            }
+        }
         let complete = solved && boundary_passed;
         let args = vec![
             ("label", parent.label.clone()), ("k", (model.breaks.len() + 1).to_string()),
@@ -1003,10 +1114,15 @@ fn replace_zone_with(
 /// when the bands were tried) and labelled exactly `label` go; the bands'
 /// own notes carry their band labels, and every other zone keeps its own.
 fn drop_replaced_zone_notes(report: &mut FitReport, label: &str, replaced: usize) {
+    take_back_notes(report, |i, note| i < replaced && note.args.iter().any(|(k, v)| *k == "label" && v == label));
+}
+
+/// The notes `goes` names (by position and note) taken back: out of the
+/// report's notes and out of the persisted rationale.
+fn take_back_notes(report: &mut FitReport, mut goes: impl FnMut(usize, &crate::rationale::Note) -> bool) {
     let mut kept = Vec::with_capacity(report.notes.len());
     for (i, note) in std::mem::take(&mut report.notes).into_iter().enumerate() {
-        let parents = i < replaced && note.args.iter().any(|(k, v)| *k == "label" && v == label);
-        if parents {
+        if goes(i, &note) {
             let text = crate::rationale::render_one(&note);
             if let Some(at) = report.recipe.rationale.find(&text) {
                 report.recipe.rationale.replace_range(at..at + text.len(), "");
@@ -1460,7 +1576,7 @@ mod tests {
             std::fs::write(&owned, b"").unwrap();
             let raster = crate::store::OwnedRaster::scratch(owned.clone());
             assert!(super::super::attach::finish_with_bands_only(
-                &source, &target, &mut report, (&parent, &land), (None, None), &raster,
+                &source, &target, &mut report, (&parent, &land), (None, None), &raster, true,
             ));
             let bands = report.recipe.masks.iter()
                 .filter(|m| m.role == MaskRole::ZoneSky && !m.components.is_empty()).count();

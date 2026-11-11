@@ -596,11 +596,13 @@ pub mod keys {
     pub const FIT_NOTE_DETAIL_WITHHELD: &str =
         " Detail controls were withheld: two-sided structural and luma-range evidence did not support a safe global detail move, so clarity and texture were not moved.";
 
-    /// Stage 4a: the per-band colour mixer solved from population statistics.
-    /// Both halves matter — what moved, and which bands were left alone
-    /// because neither frame's population could speak for them.
+    /// Stage 4a: the per-band colour mixer. Both halves matter — what moved,
+    /// and which bands were left alone because neither frame's population
+    /// could speak for them. Since v1.18.0 (J134) a paired frame's saturation
+    /// and luminance read the pairs as its hue does; the sentence says which
+    /// evidence each kind of frame is read on.
     pub const FIT_NOTE_HSL_BANDS: &str =
-        " Per-band colour mixer: saturation and luminance solved from each band's own population, hue from the paired pixels' own rotation where the target's cells vouch it: [{moved}]. Bands left neutral for want of two-sided population evidence: [{refused}].";
+        " Per-band colour mixer (saturation, luminance and hue from the paired pixels' own changes where the frame pairs; saturation and luminance from each band's own population, and no hue, where it does not): [{moved}]. Bands left neutral for want of two-sided population evidence: [{refused}].";
     /// R33 §E: bands the pair's FROZEN evidence called one-sided that the
     /// render in front of the stage carries on both sides, whose members the
     /// target's own cells then vouched. The band stops being unmeasurable
@@ -816,6 +818,14 @@ pub mod keys {
         " Zoned {label} kept the current recipe: the residual did not earn bands (R2={r2}).";
     pub const ZONE_SUBZONES_REGRESSED: &str =
         " Zoned {label} kept the current recipe: {k} trial bands regressed or failed a gate ({reason}, {trials} trials); R2={r2}, breaks={breaks}, overlap={overlap}, deltaE {before} -> {after}, seam {seam_before} -> {seam_after}, target steps {step_before} -> {step_after}, worst cell regression {regression}.";
+    /// 2026-11-10: R19 at the band's own granularity
+    /// (`fit_zoned::subzones::replace_zone_with`).
+    pub const ZONE_BAND_KEEPS_PARENT: &str =
+        " Zoned {label} keeps the correction of the zone it divides: its own solve read {with} on its own pixels against {without} under that correction, short of a gain of FIT_QUANT {quant}.";
+    /// 2026-11-10: the alone check at the zone layer
+    /// (`fit_zoned::entry::zone_alone_check`).
+    pub const ZONE_ALONE_SHIPPED: &str =
+        " The zones were fitted again with the global controls held at their starting values, and that recipe ships: the frame reads {alone} against {solved} with the global solve. Where a zone's own correction explains what a frame-wide control was moved for, the smaller domain keeps it.";
     pub const ZONE_PAIRING_SCALE: &str =
         " Zoned {label} tone was solved at CELL scale: this zone's own structural reading is {d}, past the {line} pairing line, so its pixels are not each other's counterparts — the tone came from the zone's own luma distribution rather than from a per-pixel regression, which reads a re-synthesised texture's contrast low.";
     /// The dilution guard (2026-10-22, `fit_zoned::limits::ZONE_PAIRED_SPREAD_FLOOR`):
@@ -860,6 +870,10 @@ pub mod keys {
          the target's own boundary asks {asked}; the unasked part context-charged \
          {charged}, colour {colour} charged {colour_charged} \
          (ceiling {max}, {transitions} measured transitions).";
+    /// 2026-11-10: the shared shrink released per axis
+    /// (`fit_zoned::accept::enforce_boundary_gates_with_shrink`).
+    pub const ZONE_BOUNDARY_AXES: &str =
+        " The shared shrink was then released on each axis in turn: the tone dials stand at {tone} of the solved move and the colour dials at {colour} — the gate reads the luma rim and the colour rim separately, and a seam on one axis is not evidence against the other.";
     /// Step 9. Distinct from [`ZONE_BOUNDARY_DROPPED`], which says the k=0
     /// render was itself over budget (an engine invariant failure). THIS one
     /// says the gate found a shrink inside the budget and that shrink moves
@@ -977,10 +991,16 @@ pub mod keys {
     pub const FIT_TERMINAL_FULL_SIZE_BASE: &str =
         " Read again as the export renders it (full size, then resampled), the finished recipe ({full}) did not come closer \
          than the calibration-only base ({base}) by the objective's own rounding, so the base ships.";
+    /// [`crate::pipeline::reread_at_full_size`] (v1.18.0, J135): the controls
+    /// priced by their reach, each read against its own absence as the export
+    /// renders both (`fit::confirm_at_export`).
+    pub const FIT_TERMINAL_UNEARNED: &str =
+        " Read as the export renders it, these controls did not earn their price against their own absence and were set back to zero: {controls}.";
     pub const TARGET_GEOMETRY_AMBIGUOUS: &str =
         " Target geometry: undecided (alignment {corrected} corrected vs \
-         {as_shot} as shot, no clear margin); the target was paired as it \
-         stands and the lens profile was left as it was.";
+         {as_shot} as shot, no clear margin); the lens profile was left as it \
+         was, and the target was paired as it stands with the source in the \
+         frame that profile renders.";
     pub const ZONE_ALREADY_MATCHED: &str =
         " The {label} zone already matches the target (zone residual \
          {before}) — no correction needed.";

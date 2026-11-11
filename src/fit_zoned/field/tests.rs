@@ -17,6 +17,7 @@ fn synthetic_field(width: u32, height: u32, remainder: Vec<f32>) -> LocalField {
         width,
         height,
         zones: None,
+        frame: crate::render::FieldFrame::default(),
     }
 }
 
@@ -384,4 +385,172 @@ fn a_cell_the_pixel_evidence_cannot_read_is_read_on_its_region_pairing() {
         );
         assert!(after < before, "channel {ch}: the smoothed ninth moved toward its target ({before:.4} -> {after:.4})");
     }
+}
+
+/// J141's displaced-contour toy at analysis size: a flat sky over a flat land
+/// with one butte whose left edge is at `x0`, and its sky raster. Two of these
+/// 12 pixels apart are the same picture with the butte moved — nothing else
+/// changed, so the only residual is the two bands the contour moved over.
+fn displaced_butte(x0: u32) -> (image::DynamicImage, image::GrayImage) {
+    let (w, h) = (384u32, 256u32);
+    let land = move |x: u32, y: u32| y >= 128 || ((x0..x0 + 64).contains(&x) && y >= 64);
+    let picture = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, y| {
+        let v = if land(x, y) { 0.20 } else { 0.62 } + 0.03 * ((x * 7 + y * 13) % 5) as f32 / 4.0;
+        image::Rgb([(v * 255.0).round() as u8; 3])
+    }));
+    let sky = image::GrayImage::from_fn(w, h, |x, y| image::Luma([if land(x, y) { 0 } else { 255 }]));
+    (picture, sky)
+}
+
+/// The toy's pair and the layout the zoned entry reads off its two sky
+/// rasters: (current, target, the layout, the source's sky coverage, w, h).
+#[allow(clippy::type_complexity)]
+fn displaced_pair() -> (Vec<[f32; 3]>, Vec<[f32; 3]>, PairedLayout, Vec<f32>, u32, u32) {
+    let ((src, sky_s), (tgt, sky_t)) = (displaced_butte(160), displaced_butte(172));
+    let layout = super::super::entry::paired_layout(&src, &tgt, &[(&sky_s, &sky_t)]);
+    let (s_img, t_img) = fit::analysis_pair(&src, &tgt);
+    let (w, h) = (s_img.width(), s_img.height());
+    assert_eq!((w, h), (384, 256), "premise: the toy is at analysis size");
+    let sky = super::super::rasters::mask_weights(&sky_s, w, h);
+    (fit::pixels_of(&s_img), fit::pixels_of(&t_img), layout, sky, w, h)
+}
+
+/// J141. The layout reads a displaced contour as SPLIT: the band of source
+/// rock whose target pixel is sky and the band of source sky whose target
+/// pixel is rock, and nothing else — a pixel both frames give the same region
+/// is not split, the sky both hold is paired, and the land ("not sky" on both
+/// sides) is neither. MUTATION: in `paired_layout`, take `split` as zero —
+/// the two bands read as agreed.
+#[test]
+fn the_layout_reads_a_displaced_contour_as_split() {
+    let (_, _, layout, _, w, h) = displaced_pair();
+    let band = |x: u32, y: u32| (64..128).contains(&y) && ((160..172).contains(&x) || (224..236).contains(&x));
+    let (mut wrong, mut split) = (0usize, 0usize);
+    for i in 0..(w * h) as usize {
+        let (x, y) = (i as u32 % w, i as u32 / w);
+        let expected = f32::from(band(x, y));
+        split += usize::from(layout.split[i] > 0.5);
+        wrong += usize::from((layout.split[i] - expected).abs() > 1e-3);
+        let sky_on_both = !(y >= 128 || ((160..236).contains(&x) && y >= 64));
+        wrong += usize::from((layout.paired[i] - f32::from(sky_on_both)).abs() > 1e-3);
+    }
+    assert_eq!(split, 2 * 12 * 64, "the two displaced bands, 12 px wide over the butte's 64 rows");
+    assert_eq!(wrong, 0, "…and every other pixel agreed, the sky both frames hold paired");
+}
+
+/// J141. A pair split across the two frames' zones does not testify. Weighed
+/// like any other, the band of source sky whose target is rock pulls the
+/// sky-owned vertices beside the butte down, and the sky NEXT to the band —
+/// sky on both sides, its target its own pixel — darkens: the smudge the
+/// reference pair carried beside its buttes. On the testimony that sky does
+/// not move. MUTATION: in `field_testimony`, drop the `*weight *=
+/// together(i)` scaling — the sky beside the butte darkens as on the plain
+/// weights.
+#[test]
+fn a_pair_split_across_the_two_frames_zones_does_not_testify() {
+    let (current, target, layout, sky, w, h) = displaced_pair();
+    let evidence = fit::evidence_model_for(&current, &target, w, h);
+    let (testimony, paired) = field_testimony(&evidence, &layout);
+    let n = current.len();
+    let split: Vec<usize> = (0..n).filter(|i| layout.split[*i] > 0.5).collect();
+    assert!(
+        split.iter().all(|&i| evidence.source_weights[i] > 0.0),
+        "premise: the split pixels carry evidence weight like their neighbours"
+    );
+    assert!(
+        split.iter().all(|&i| testimony.source_weights[i] == 0.0 && paired[i] == 0.0),
+        "a split pixel weighs nothing, in the model and in the layout plane"
+    );
+    assert!(
+        (0..n).filter(|i| layout.split[*i] == 0.0).all(|i| {
+            testimony.source_weights[i] == evidence.source_weights[i] && paired[i] == layout.paired[i]
+        }),
+        "…and every other pixel weighs what it weighed"
+    );
+    // The shipped solve's form: zone-owned, support-free, refined, pass B's gain.
+    let solve = |model: &fit::EvidenceModel| {
+        LocalField::solve_zoned(
+            &current, &target, w, h, model, crate::fit_field::TIKHONOV, crate::fit_field::SMOOTH,
+            crate::fit_field::ITERATIONS, FieldSolveOpts { gain: 0.607, local_support: false, refine: true },
+            Some(&sky),
+        )
+        .expect("the toy solves")
+        .render(&current)
+    };
+    // The sky just right of the band the butte moved onto: sky on both sides.
+    let beside = |out: &[[f32; 3]]| -> f32 {
+        let picked: Vec<f32> = (0..n)
+            .filter(|i| (238..250).contains(&(*i as u32 % w)) && (72..120).contains(&(*i as u32 / w)))
+            .map(|i| fit::luma601(&out[i]) - fit::luma601(&current[i]))
+            .collect();
+        picked.iter().sum::<f32>() / picked.len() as f32
+    };
+    let (plain, lawful) = (beside(&solve(&evidence)), beside(&solve(&testimony)));
+    assert!(plain < -0.008, "premise: weighed like a pair, the split band darkens the sky beside it ({plain:+.4})");
+    assert!(lawful.abs() < 0.002, "on the testimony the sky beside the butte does not move ({lawful:+.4})");
+}
+
+/// J141. Two photographs get no colour field. The repainted fixture's target
+/// turned upside down shares no place with its source, and the structural
+/// reading of two photographs is imposed on the model — every cell past the
+/// zone line, no pixel paired (the instrument reads two draws of one noise as
+/// the same texture, so a synthetic pair cannot earn that reading; the
+/// different-photo pair of the calibration corpus does, at D 0.78 and up).
+/// The population model an Atmosphere report carries still weighs the whole
+/// frame — its ranges are populated on both sides — and a field solved from
+/// it draws the target's layout onto the source while the frame objective,
+/// which reads unpaired pixels as a distribution, improves. The testimony is
+/// empty, the solver finds nothing to fit, and the report says so. MUTATION:
+/// in `field_testimony`, drop the `pairs_a_population` refusal — the field is
+/// solved, ships, and the recipe carries it.
+#[test]
+fn two_photographs_get_no_colour_field() {
+    let src = repainted_right_half(false);
+    let tgt = repainted_right_half(true).rotate180();
+    let (current, target, _, _, mut report) = field_probe(&src, &tgt);
+    let mut ingredients = report.evidence.clone();
+    ingredients.spatial_weights.fill(0.0);
+    ingredients.spatial_divergence.fill(1.2);
+    ingredients.spatial_supported.fill(false);
+    ingredients.paired.fill(false);
+    ingredients.globally_same_content = false;
+    let ones = vec![1.0; current.len()];
+    let structural = ingredients.scoped(&target, &ones, &ones);
+    assert_eq!(structural.paired_share(), 0.0, "premise: no cell of the frame pairs");
+    // The Atmosphere report's form: the structure-blind population model,
+    // which keeps the structural pairing, beside the structural model.
+    report.evidence = structural.structure_blind(&target);
+    report.structural_evidence = Some(structural);
+    report.mode = fit::FitMode::Atmosphere;
+    assert!(!report.evidence.pairs_a_population(), "the population model keeps the structural pairing");
+    let err = fit::look_err_with_evidence(&current, &target, &report.evidence);
+    (report.err_before, report.err_after) = (err, err);
+    let weights = &report.evidence.source_weights;
+    let weighed = weights.iter().sum::<f32>() / weights.len() as f32;
+    assert!(weighed > 0.5, "premise: the population model weighs the frame (mean {weighed:.3})");
+    let (testimony, layout) = field_testimony(&report.evidence, &PairedLayout::default());
+    assert!(
+        testimony.source_weights.iter().all(|w| *w == 0.0) && layout.is_empty(),
+        "nothing pairs, so nothing testifies"
+    );
+    attach_colour_field(
+        &src, &tgt, &mut report, crate::recipe::GradeStrength::new(0.85), &PairedLayout::default(),
+    );
+    assert!(report.recipe.colour_field.is_none(), "no field is attached: {}", report.recipe.rationale);
+    let unsolved = report.notes.iter().find(|n| n.key == crate::rationale::keys::FIELD_UNSOLVED)
+        .expect("the abstention is a note");
+    assert_eq!(unsolved.args, vec![("stage", "attach".to_string())]);
+}
+
+/// …and a frame that pairs somewhere is one scene: the repainted fixture as
+/// it is — its left half byte-identical on both sides — keeps every weight
+/// the report gave it, with no segmentation to say any pair is split.
+#[test]
+fn a_frame_that_pairs_somewhere_testifies_as_it_did() {
+    let (src, tgt) = (repainted_right_half(false), repainted_right_half(true));
+    let (_, _, _, _, report) = field_probe(&src, &tgt);
+    assert!(report.evidence.pairs_a_population(), "premise: the untouched half pairs");
+    let (testimony, layout) = field_testimony(&report.evidence, &PairedLayout::default());
+    assert_eq!(testimony.source_weights, report.evidence.source_weights);
+    assert!(layout.is_empty(), "no segmentation, no layout");
 }

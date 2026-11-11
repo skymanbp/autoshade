@@ -221,6 +221,7 @@ pub struct FitReport {
 /// how much that match can be trusted. Derived once from the sidecar's 48x48
 /// field ([`correspondence_for_pair`]); consumed by the zone estimators as a
 /// pair-weight factor and a remapped target.
+#[derive(Clone)]
 pub(crate) struct PairCorrespondence {
     /// Per-source-index confidence in [0, 1] (cyclic x smoothness).
     pub(crate) conf: Vec<f32>,
@@ -400,6 +401,15 @@ pub(crate) enum AtmosphereReference {
 pub(crate) struct SharedPopulation {
     pub(super) source: Vec<f32>,
     pub(super) target: Vec<f32>,
+    /// The shared content's MEMBERSHIP, in the source frame: 1 where the
+    /// field's match is confident ([`CONFIDENT_MATCH`]), 0 elsewhere — the
+    /// same binary cut as `source`, without the evidence weights. A
+    /// membership is what an evidence model is scoped by
+    /// (`EvidenceModel::scoped` multiplies the estimation weights in itself);
+    /// `source` / `target` are estimation weights already, and handing them
+    /// to `scoped` weighed every pixel twice (2026-11-10,
+    /// `evidence::shared_content_pairing`).
+    pub(super) members: Vec<f32>,
     pub(super) source_retained: f32,
     pub(super) target_retained: f32,
 }
@@ -463,6 +473,7 @@ pub(super) fn shared_content_population(
         .min(c.target_answered.len());
     let mut source = vec![0.0f32; n];
     let mut target = vec![0.0f32; n];
+    let mut members = vec![0.0f32; n];
     let (mut kept_s, mut kept_t) = (0.0f64, 0.0f64);
     let (mut all_s, mut all_t) = (0.0f64, 0.0f64);
     for i in 0..n {
@@ -472,6 +483,7 @@ pub(super) fn shared_content_population(
         all_t += wt as f64;
         if c.conf[i] >= CONFIDENT_MATCH {
             source[i] = evidence.source_weights[i];
+            members[i] = 1.0;
             kept_s += ws as f64;
         }
         if c.target_answered[i] > 0.0 {
@@ -482,6 +494,7 @@ pub(super) fn shared_content_population(
     (all_s > 0.0 && all_t > 0.0).then(|| SharedPopulation {
         source,
         target,
+        members,
         source_retained: (kept_s / all_s) as f32,
         target_retained: (kept_t / all_t) as f32,
     })

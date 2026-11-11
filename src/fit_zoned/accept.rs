@@ -216,7 +216,11 @@ fn boundary_note_args(
 /// at analysis size; no full-resolution render is introduced.
 ///
 /// Since R37 the production sky/land path calls [`enforce_boundary_gate_toward`]
-/// with its target; this no-target form is what the context-budget pins measure.
+/// with its target; this no-target form is what the context-budget pins
+/// measure, and it reads the settled sides' median multipliers: several of
+/// those pins hand the gate a candidate frame built by hand — a planted rim
+/// beside a recipe that does not render it — which the exact form
+/// ([`super::boundary::Owed`]) has no recipe to render for.
 #[cfg(test)]
 pub(super) fn enforce_boundary_gate(
     s_img: &DynamicImage,
@@ -227,13 +231,16 @@ pub(super) fn enforce_boundary_gate(
     reference_px: &[[f32; 3]],
     initial_px: Vec<[f32; 3]>,
 ) -> BoundaryGateResult {
-    enforce_boundary_gate_toward(None, s_img, report, sky_weights, correction_shares,
+    enforce_boundary_gates(None, s_img, report, &[sky_weights], correction_shares,
         first_zone, reference_px, initial_px)
 }
 
 /// [`enforce_boundary_gate`] toward a paired `target` (R37): the horizon the
 /// target itself carries is not charged. The production sky/land path hands
-/// its analysis target here; `None` is the context rule alone.
+/// its analysis target here; `None` is the context rule alone. `initial_px`
+/// must be the render of `report`'s recipe as handed in: this entry reads the
+/// soft ruler's exact owed treatment ([`semantic_full_sides`]), rendered from
+/// that recipe.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn enforce_boundary_gate_toward(
     target: Option<&[[f32; 3]]>,
@@ -245,9 +252,52 @@ pub(super) fn enforce_boundary_gate_toward(
     reference_px: &[[f32; 3]],
     initial_px: Vec<[f32; 3]>,
 ) -> BoundaryGateResult {
-    enforce_boundary_gates(target, s_img, report, &[sky_weights], correction_shares,
-        first_zone, reference_px, initial_px)
+    enforce_boundary_gates_with_shrink(target, s_img, report, &[sky_weights], correction_shares,
+        first_zone, (reference_px, initial_px), shrink_zone_axes, Some(&semantic_full_sides))
 }
+
+/// The semantic pair's two FULL treatments, for the exact form of the soft
+/// ruler ([`super::boundary::Owed`]): `recipe` with its gated zones
+/// (`first_zone..`) of one side at full weight over the whole frame and the
+/// other side's absent — `[sky, land]`, `None` for a side no gated zone
+/// stands on (its treatment is the reference). `None` altogether unless every
+/// gated zone is one of the pair, so a caller that gates anything else keeps
+/// the multiplier transport.
+fn semantic_full_sides(
+    recipe: &crate::recipe::EditRecipe,
+    first_zone: usize,
+) -> Option<[Option<crate::recipe::EditRecipe>; 2]> {
+    let gated = recipe.masks.get(first_zone..)?;
+    if !gated.iter().all(|m| matches!(m.role, MaskRole::ZoneSky | MaskRole::ZoneLand)) {
+        return None;
+    }
+    Some([MaskRole::ZoneSky, MaskRole::ZoneLand].map(|role| {
+        let mut side = recipe.clone();
+        side.masks.truncate(first_zone);
+        side.masks.extend(gated.iter().filter(|m| m.role == role).cloned().map(over_the_whole_frame));
+        (side.masks.len() > first_zone).then_some(side)
+    }))
+}
+
+/// `zone` acting at its full weight on every pixel of the frame: its own
+/// dials, its own amount, and a geometry that covers everything — a linear
+/// gradient whose two handles coincide, which the renderer reads as full
+/// coverage (`render::mask_weight`), with no component, range or inversion
+/// left to cut it.
+fn over_the_whole_frame(mut zone: LocalAdjustment) -> LocalAdjustment {
+    zone.mask = MaskGeometry::Linear { zero_x: 0.0, zero_y: 0.0, full_x: 0.0, full_y: 0.0 };
+    zone.components.clear();
+    zone.range = None;
+    zone.inverted = false;
+    zone
+}
+
+/// What a gate's caller hands [`enforce_boundary_gates_with_shrink`] when it
+/// can name the sides its corrections stand on: the two full-treatment
+/// recipes of a recipe whose gated corrections start at the given index
+/// ([`semantic_full_sides`]).
+pub(super) type FullSides<'a> =
+    &'a dyn Fn(&crate::recipe::EditRecipe, usize) -> Option<[Option<crate::recipe::EditRecipe>; 2]>;
 
 /// The same budget and shrink for one semantic horizon or all the horizons
 /// and breaks of a sub-zone set. One bisection owns the complete correction
@@ -264,12 +314,35 @@ pub(super) fn enforce_boundary_gates(
     initial_px: Vec<[f32; 3]>,
 ) -> BoundaryGateResult {
     enforce_boundary_gates_with_shrink(target, s_img, report, boundaries, correction_shares,
-        first_zone, (reference_px, initial_px), shrink_zone_corrections)
+        first_zone, (reference_px, initial_px), shrink_zone_axes, None)
 }
 
 /// The same measured gate also handles replacement deltas. Its zero render
 /// is supplied by the caller; ordinary new zones use zero controls, while a
 /// native band replacement retains its accepted parent's controls at zero.
+///
+/// The shrink is found shared and then RELEASED PER AXIS (2026-11-10). The
+/// gate reads two rims — the luma step and the colour step, each charged for
+/// the part the target's own boundary does not ask ([`BoundaryReading`]) —
+/// and the corrections move on two axes, the tone dials and the colour
+/// dials. One scalar over both let a seam on one axis take the other with
+/// it: on the night pair the sky's foot band solved +1.14 EV, the target's
+/// own boundary asked a luma step of 0.290 and none of it was charged, the
+/// COLOUR rim read 0.025 against the ceiling 0.012, and the one scalar took
+/// the whole band to k 0.205 — the lift to +0.20 EV — leaving the colour
+/// field to deliver the rest past its own bound (legs/T2: three vertices
+/// saturated at the horizon, the sky's foot 1.1 L* short). So after the
+/// shared bisection each axis is tried back at the full solved move, the
+/// axis the shared shrink did not bind on first, and bisected between the
+/// shared k and 1 where the full move does not pass; the gate's verdict is
+/// the same `gated()` on every candidate, so nothing ships that the shared
+/// form would have refused on a rim.
+///
+/// `full` (2026-11-10) is the caller's naming of the sides its corrections
+/// stand on. With it every reading takes the soft ruler's EXACT owed
+/// treatment — two more renders per candidate, each side's corrections at
+/// full weight over the whole frame ([`super::boundary::Owed`]) — and
+/// without it the settled sides' median multipliers, as before.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn enforce_boundary_gates_with_shrink(
     target: Option<&[[f32; 3]]>,
@@ -279,12 +352,28 @@ pub(super) fn enforce_boundary_gates_with_shrink(
     correction_shares: &[f32],
     first_zone: usize,
     (reference_px, initial_px): (&[[f32; 3]], Vec<[f32; 3]>),
-    shrink: impl Fn(&mut [LocalAdjustment], &[LocalAdjustment], &[f32], f32),
+    shrink: impl Fn(&mut [LocalAdjustment], &[LocalAdjustment], &[f32], (f32, f32)),
+    full: Option<FullSides<'_>>,
 ) -> BoundaryGateResult {
     let presence = report.evidence.presence.clone();
-    let read = |pixels: &[[f32; 3]], frozen: &[[f32; 3]]| {
+    // `[inside, outside]` at full weight for one recipe; a side no gated
+    // correction stands on owes the reference itself.
+    let owed_frames = |recipe: &crate::recipe::EditRecipe| -> Option<[Vec<[f32; 3]>; 2]> {
+        let sides = full?(recipe, first_zone)?;
+        Some(sides.map(|side| match side {
+            Some(side) => fit::pixels_of(&render::develop_preview(s_img, &side)),
+            None => reference_px.to_vec(),
+        }))
+    };
+    // The frozen k=1 candidate's, rendered once.
+    let frozen_owed = owed_frames(&report.recipe);
+    let read = |pixels: &[[f32; 3]], owed: Option<&[Vec<[f32; 3]>; 2]>, frozen: &[[f32; 3]]| {
+        let owed = owed.zip(frozen_owed.as_ref()).map(|(of_rendered, of_frozen)| super::boundary::Owed {
+            rendered: [&of_rendered[0][..], &of_rendered[1][..]],
+            frozen: [&of_frozen[0][..], &of_frozen[1][..]],
+        });
         boundaries.iter().fold(BoundaryReading::nothing_measured(), |mut all, weights| {
-            let next = boundary_rim_toward(target, reference_px, pixels, frozen, weights, s_img.width(), s_img.height(), presence.as_deref());
+            let next = super::boundary::boundary_rim_owed(target, reference_px, pixels, frozen, weights, s_img.width(), s_img.height(), presence.as_deref(), owed);
             all.rim = all.rim.max(next.rim);
             all.charged = all.charged.max(next.charged);
             all.colour = all.colour.max(next.colour);
@@ -297,7 +386,7 @@ pub(super) fn enforce_boundary_gates_with_shrink(
     // `initial_px` is the k=1 candidate, so it is also this gate's FROZEN
     // frame: the correction's own slope is a property of the correction and
     // must never chase the bisection (see [`crossing_slope`]).
-    let initial = read(&initial_px, &initial_px);
+    let initial = read(&initial_px, frozen_owed.as_ref(), &initial_px);
     let zone_count = report.recipe.masks.len().saturating_sub(first_zone);
     // A correction that survives this gate must MOVE something. Step 9 made
     // that worth checking: under the transported differential a `k=0` render
@@ -344,7 +433,7 @@ pub(super) fn enforce_boundary_gates_with_shrink(
     let originals = report.recipe.masks[first_zone..].to_vec();
     let shares = correction_shares.to_vec();
     debug_assert_eq!(shares.len(), originals.len());
-    let render_at = |report: &mut FitReport, k: f32| -> (BoundaryReading, Vec<[f32; 3]>) {
+    let render_at = |report: &mut FitReport, k: (f32, f32)| -> (BoundaryReading, Vec<[f32; 3]>) {
         shrink(
             &mut report.recipe.masks[first_zone..],
             &originals,
@@ -352,7 +441,8 @@ pub(super) fn enforce_boundary_gates_with_shrink(
             k,
         );
         let pixels = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
-        let reading = read(&pixels, &initial_px);
+        let owed = owed_frames(&report.recipe);
+        let reading = read(&pixels, owed.as_ref(), &initial_px);
         (reading, pixels)
     };
 
@@ -362,7 +452,7 @@ pub(super) fn enforce_boundary_gates_with_shrink(
     // controls for replacement bands). It MUST render back to that baseline
     // and read exactly 0.0. A non-zero reading is an invariant failure,
     // not permission to spend a different boundary budget.
-    let (zero, zero_px) = render_at(report, 0.0);
+    let (zero, zero_px) = render_at(report, (0.0, 0.0));
     if zero.gated() > ZONE_BOUNDARY_RIM_MAX {
         report.recipe.masks.truncate(first_zone);
         crate::rationale::push_note(
@@ -383,13 +473,39 @@ pub(super) fn enforce_boundary_gates_with_shrink(
     let mut best = (zero, zero_px);
     for _ in 0..12 {
         let mid = (lo + hi) * 0.5;
-        let measured = render_at(report, mid);
+        let measured = render_at(report, (mid, mid));
         if measured.0.gated() <= ZONE_BOUNDARY_RIM_MAX {
             lo = mid;
             best = measured;
         } else {
             hi = mid;
         }
+    }
+    // The release, per axis (see the doc): `k` is (tone, colour), `best` the
+    // reading and render of `k` throughout.
+    let mut k = (lo, lo);
+    let colour_binds = best.0.colour_charged >= best.0.charged;
+    for tone_axis in if colour_binds { [true, false] } else { [false, true] } {
+        let held = k;
+        let at = move |v: f32| if tone_axis { (v, held.1) } else { (held.0, v) };
+        let whole = render_at(report, at(1.0));
+        if whole.0.gated() <= ZONE_BOUNDARY_RIM_MAX {
+            k = at(1.0);
+            best = whole;
+            continue;
+        }
+        let (mut passes, mut fails) = (lo, 1.0f32);
+        for _ in 0..AXIS_RELEASE_BISECTIONS {
+            let mid = (passes + fails) * 0.5;
+            let measured = render_at(report, at(mid));
+            if measured.0.gated() <= ZONE_BOUNDARY_RIM_MAX {
+                passes = mid;
+                best = measured;
+            } else {
+                fails = mid;
+            }
+        }
+        k = at(passes);
     }
     if best.1.as_slice() == reference_px {
         refuse_inert(report, best.0, lo);
@@ -399,7 +515,7 @@ pub(super) fn enforce_boundary_gates_with_shrink(
         &mut report.recipe.masks[first_zone..],
         &originals,
         &shares,
-        lo,
+        k,
     );
     crate::rationale::push_note(
         &mut report.recipe.rationale,
@@ -409,8 +525,24 @@ pub(super) fn enforce_boundary_gates_with_shrink(
             boundary_note_args(zone_count, lo, initial, best.0),
         ),
     );
+    if k != (lo, lo) {
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_BOUNDARY_AXES,
+                vec![("tone", format!("{:.3}", k.0)), ("colour", format!("{:.3}", k.1))],
+            ),
+        );
+    }
     BoundaryGateResult::Kept { k: lo, before: initial, after: best.0, pixels: best.1 }
 }
+
+/// Bisections of one axis's release between the shared shrink and the full
+/// solved move: six halvings resolve it to 1/64 of that span, the
+/// resolution the zone's own vouched-share search works to
+/// ([`ZONE_VOUCH_SHRINK_STEPS`]).
+const AXIS_RELEASE_BISECTIONS: usize = 6;
 
 pub(super) fn push_zone_attached_note(report: &mut FitReport, zone: &AcceptedZone) {
     let label = zone.label.as_str();

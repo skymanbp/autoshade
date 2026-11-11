@@ -387,7 +387,7 @@ fn the_engine_renders_the_colour_field_after_the_masks_it_reads() {
 
     let masked = pixels_of(&develop_preview(&img, &with_mask));
     let mut expected = masked.clone();
-    apply_colour_field(&mut expected, w as usize, h as usize, Some(&field), None);
+    apply_colour_field(&mut expected, w as usize, h as usize, Some(&field), &crate::render::FieldFrame::default(), None);
     let actual = pixels_of(&develop_preview(&img, &both));
     assert_ne!(actual, masked, "premise: this field is not the identity here");
     let worst = actual

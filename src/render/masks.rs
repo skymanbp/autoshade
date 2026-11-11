@@ -148,12 +148,21 @@ pub(super) fn apply_masks(
         // then compile the exact linear-light formula into channel LUTs.
         // None when neutral, so tone-only masks pay no colour-stage cost.
         let local_wb = m.temperature != 0.0 || m.tint != 0.0;
+        let local_wb_gains = if local_wb { wb_gains(5500.0, local_temp_to_kelvin(m.temperature), m.tint) } else { [1.0; 3] };
         let colour_luts =
             (local_wb || m.color_gains.is_some()).then(|| {
-                let g = if local_wb { wb_gains(5500.0, local_temp_to_kelvin(m.temperature), m.tint) } else { [1.0; 3] };
+                let g = local_wb_gains;
                 let cg = m.color_gains.unwrap_or([1.0; 3]);
                 colour_gain_luts([g[0] * cg[0], g[1] * cg[1], g[2] * cg[2]])
             });
+        // The colour gains are the reverse fit's ESTIMATE and take no hue to a
+        // pixel that reaches them blown in every channel (`keep_blown_white`);
+        // the mask's own Temp and Tint are an instruction and do. `Some` where
+        // the mask carries gains: the Temp/Tint stage alone where it sets one
+        // too (the gains then read the pixel as that stage leaves it), `None`
+        // inside where the gains read the mask's input itself.
+        let gains_read: Option<Option<[Vec<f32>; 3]>> =
+            m.color_gains.is_some().then(|| local_wb.then(|| colour_gain_luts(local_wb_gains)));
         // The mask Color tint, compiled ONCE per mask like the LUTs above:
         // the swatch's Oklab push and its amount at full mask weight.
         // `None` at amount 0, so an untinted mask pays nothing and renders to
@@ -265,6 +274,13 @@ pub(super) fn apply_masks(
                 if let Some(luts) = &colour_luts {
                     for c in 0..3 {
                         t[c] = sample_lut(&luts[c], t[c]);
+                    }
+                    if let Some(own_wb) = &gains_read {
+                        let read = match own_wb {
+                            Some(wb) => std::array::from_fn(|c| sample_lut(&wb[c], p[c])),
+                            None => p,
+                        };
+                        t = keep_blown_white(&read, t);
                     }
                 }
                 let l_old = luma601(&t);

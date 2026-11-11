@@ -114,8 +114,9 @@ const ACTIVE_SET_PASSES: usize = 40;
 const IDENTIFIABILITY_MIN: f32 = 1e-5;
 const LN2: f64 = std::f64::consts::LN_2;
 
-/// R34 §D4. The two things the SHIPPED colour field solves differently from
-/// the ANALYSIS instrument, and nothing else.
+/// R34 §D4. The things the SHIPPED colour field solves differently from the
+/// ANALYSIS instrument — two since R34, the refinement since v1.18.0 — and
+/// nothing else.
 ///
 /// They are parameters rather than a second solver because the field the user
 /// exports and the field the sequencer measures its ceiling against must be
@@ -138,11 +139,17 @@ pub(crate) struct FieldSolveOpts {
     /// per-cell admission (`fit_cells`), which is what
     /// `fit_zoned::field::attach_colour_field` puts in front of it.
     pub local_support: bool,
+    /// Solve a second time with the regulariser centred on the first answer
+    /// (v1.18.0, [`System::solve`]). FALSE is the analysis solve, byte for
+    /// byte: the ceiling the sequencer stops on stays the single smooth it
+    /// has always been, and the field that SHIPS — both passes of
+    /// `fit_zoned::field::attach_colour_field` — is the refined one.
+    pub refine: bool,
 }
 
 impl Default for FieldSolveOpts {
     fn default() -> Self {
-        Self { gain: BOUNDS_HIGH[1], local_support: true }
+        Self { gain: BOUNDS_HIGH[1], local_support: true, refine: false }
     }
 }
 
@@ -218,6 +225,10 @@ pub(crate) struct LocalField {
     /// the vertex owners counted on it — `None` for the plain read (every
     /// analysis solve). See [`Self::solve_zoned`].
     pub zones: Option<FieldZones>,
+    /// v1.18.0: where the frame's pixels read the grid — the pixel's own
+    /// place for every analysis solve, the lens-corrected plate's map for a
+    /// shipped field solved on one ([`Self::solve_framed`]).
+    pub frame: crate::render::FieldFrame,
 }
 
 /// The zone-owned read a SHIPPED field is solved for ([`LocalField::solve_zoned`]).
@@ -305,6 +316,26 @@ impl LocalField {
         evidence: &fit::EvidenceModel, tikhonov: f32, smooth: [f32; 3], iterations: usize,
         opts: FieldSolveOpts, sky: Option<&[f32]>,
     ) -> Option<LocalField> {
+        Self::solve_framed(
+            current, target, width, height, evidence, tikhonov, smooth, iterations, opts, sky,
+            &crate::render::FieldFrame::default(),
+        )
+    }
+
+    /// [`Self::solve_zoned`] on a frame that states where its pixels read the
+    /// grid (v1.18.0, J133; [`crate::render::FieldFrame`]). A stored field's
+    /// grid spans the original frame and every develop of the recipe reads it
+    /// there, so the field that ships is solved there: the splat puts each
+    /// pixel on the vertices the engine will read it on — its own place on
+    /// pixels nothing moved, the original-frame point it shows on a
+    /// lens-corrected plate — and [`Self::render`] reads the same way. The
+    /// default frame is [`Self::solve_zoned`] byte for byte.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn solve_framed(
+        current: &[[f32; 3]], target: &[[f32; 3]], width: u32, height: u32,
+        evidence: &fit::EvidenceModel, tikhonov: f32, smooth: [f32; 3], iterations: usize,
+        opts: FieldSolveOpts, sky: Option<&[f32]>, frame: &crate::render::FieldFrame,
+    ) -> Option<LocalField> {
         let (w, h) = (width as usize, height as usize);
         let n = w.checked_mul(h)?;
         if n == 0 || current.len() != n || target.len() != n { return None; }
@@ -327,12 +358,12 @@ impl LocalField {
         }
         if !mass.is_finite() || mass <= 0.0 { return None; }
         let guide = smooth_3tap_luma(current, w, h);
-        let mut splat = splat_table(&guide, w, h);
+        let mut splat = splat_table(&guide, w, h, frame);
         let zones = sky.filter(|s| s.len() == n).map(|sky| own_splat(&mut splat, sky));
         let system = System::with_splat(
             current, target, &guide, &fit_weight, splat, zones.as_ref().map(|z| z.owners.clone()),
         );
-        let (raw, solve, limited) = system.solve(tikhonov, smooth, iterations, |p| opts.bounds(p));
+        let (raw, solve, limited) = system.solve(tikhonov, smooth, iterations, opts.refine, |p| opts.bounds(p));
         if raw.iter().any(|value| !value.is_finite()) { return None; }
 
         let mut flat = vec![0.0f32; VERTICES * PARAMS];
@@ -356,7 +387,7 @@ impl LocalField {
         let occupancy = system.occupancy.clone();
         Some(LocalField {
             grid, occupancy, ceiling, global, band_marginal, band_dispersion, remainder,
-            weight: fit_weight, saturated, solve, width, height, zones,
+            weight: fit_weight, saturated, solve, width, height, zones, frame: frame.clone(),
         })
     }
 
@@ -365,7 +396,8 @@ impl LocalField {
     /// Since R33 §G this is a CALL into the engine's own renderer rather than
     /// a second copy of it: the analyzer's measured field and the field the
     /// user's export carries are the same function of the same pixels, and
-    /// `the_engine_renders_the_analyzers_field_bit_for_bit` holds them to it.
+    /// `the_engine_renders_the_analyzers_field_bit_for_bit` holds them to it —
+    /// in the frame the field was solved on ([`Self::frame`]).
     pub(crate) fn render(&self, current: &[[f32; 3]]) -> Vec<[f32; 3]> {
         let mut out = current.to_vec();
         crate::render::apply_colour_field(
@@ -373,6 +405,7 @@ impl LocalField {
             self.width as usize,
             self.height as usize,
             Some(&self.as_recipe_field()),
+            &self.frame,
             self.zones.as_ref().map(|z| z.sky.as_slice()),
         );
         out
@@ -553,17 +586,18 @@ pub(crate) use crate::render::field_guide_luma as smooth_3tap_luma;
 struct Splat { ids: Vec<[u32; 8]>, tri: Vec<[f32; 8]> }
 
 /// `grid_experiment.splat_table`, slot for slot: x-major then y then b, high index
-/// `min(low + 1, limit - 1)` so the last column/row/bin folds onto itself.
-fn splat_table(guide: &[f32], width: usize, height: usize) -> Splat {
-    let (xs, ys) = (
-        crate::render::field_axis(width, FIELD_X),
-        crate::render::field_axis(height, FIELD_Y),
-    );
+/// `min(low + 1, limit - 1)` so the last column/row/bin folds onto itself. Each
+/// pixel's place on the two spatial axes is the engine's own read of `frame`
+/// ([`crate::render::FieldFrame::axes`]) — one implementation, so the vertices a
+/// pixel is solved on are the vertices it is rendered from.
+fn splat_table(guide: &[f32], width: usize, height: usize, frame: &crate::render::FieldFrame) -> Splat {
+    let axes = frame.axes(width, height, FIELD_X, FIELD_Y);
     let limits = [FIELD_X, FIELD_Y, FIELD_B];
     let mut ids = Vec::with_capacity(guide.len());
     let mut tri = Vec::with_capacity(guide.len());
     for (i, &value) in guide.iter().enumerate() {
-        let coords = [xs[i % width], ys[i / width], value.clamp(0.0, 1.0) * (FIELD_B - 1) as f32];
+        let (gx, gy) = axes.at(i);
+        let coords = [gx, gy, value.clamp(0.0, 1.0) * (FIELD_B - 1) as f32];
         let (mut low, mut high, mut frac) = ([0usize; 3], [0usize; 3], [0.0f32; 3]);
         for (axis, &limit) in limits.iter().enumerate() {
             let floor = (coords[axis].floor() as i64).clamp(0, limit as i64 - 1) as usize;
@@ -710,7 +744,8 @@ impl<'a> System<'a> {
         current: &'a [[f32; 3]], target: &[[f32; 3]], guide: &'a [f32], fit_weight: &'a [f32],
         width: usize, height: usize,
     ) -> Self {
-        Self::with_splat(current, target, guide, fit_weight, splat_table(guide, width, height), None)
+        let own_place = crate::render::FieldFrame::default();
+        Self::with_splat(current, target, guide, fit_weight, splat_table(guide, width, height, &own_place), None)
     }
 
     /// [`Self::new`] on a splat the caller built: the zone-owned one
@@ -868,14 +903,51 @@ impl<'a> System<'a> {
     /// The slope is a contrast, not a colour, and keeps the per-parameter
     /// active set: pinned on its bound while its gradient points outward,
     /// released when it turns inward, the colour held throughout.
+    ///
+    /// Why the shipped solve is refined (`refine`, v1.18.0). The ridge and
+    /// the smoother are constants on multiplicative parameters, and the data
+    /// term is in display units and evidence-weighted: a vertex's curvature
+    /// is `Σ w·tri²·c²`. Wherever that is small against the constants — dark
+    /// pixels, weakly evidenced ones, a vertex few pixels reach — the
+    /// regulariser has a say in the answer, and one regularised solve leaves
+    /// a FRACTION of whatever it is handed there, so what the field leaves
+    /// follows what the stages before it left: on the night pair from its master
+    /// (0.85) the zones handed the horizon rows 12-15 L* and the field left
+    /// 0.5-1.9 of them, the sky's row ripple 0.84 on the solve's own frame
+    /// (the solve's dumped inputs, rel1180 fieldproto, 2026-11-10). The
+    /// refinement solves the SAME system once more with its regulariser
+    /// centred on the first answer — `(AᵀWA + R)·v = AᵀWδ + R·v₁`, the ridge
+    /// pulling toward `v₁` and the smoother penalising differences of
+    /// `v − v₁` — which is the first answer plus the same smooth of its own
+    /// residual (a linear smoother's "twicing"). Where the data determine a
+    /// vertex the first answer already stood and nothing moves; where the
+    /// regulariser took a share, the first-order part of that share comes
+    /// back (the same rows 0.1-1.1 L*, ripple 0.61; the sky 3.87 -> 3.70 and
+    /// the ground 6.81 -> 6.59 dE on that frame). ONE refinement, not a
+    /// loop: a third solve reads the same (ripple 0.64) and each further one
+    /// gives the weakly measured vertices back to the data — the regulariser
+    /// removed by repetition. The bounds are applied once, to the refined
+    /// answer, and the slopes' active set solves the centred system.
     fn solve(
-        &self, tikhonov: f32, smooth: [f32; 3], iterations: usize, bounds: impl Fn(usize) -> (f32, f32),
+        &self, tikhonov: f32, smooth: [f32; 3], iterations: usize, refine: bool,
+        bounds: impl Fn(usize) -> (f32, f32),
     ) -> (Vec<f32>, SolveInfo, Vec<bool>) {
-        let rhs = self.adjoint(&self.weigh(&self.target_delta));
+        let mut rhs = self.adjoint(&self.weigh(&self.target_delta));
         let limits = ChangeLimits::of(&bounds);
         let all = vec![true; rhs.len()];
         let (mut vector, mut info) =
             self.conjugate_gradients(&rhs, vec![0.0f32; rhs.len()], &all, tikhonov, smooth, iterations);
+        if refine {
+            // R·v₁ = λ·v₁ + L·v₁, added to the right-hand side every later
+            // step solves; the CG starts from v₁, where its residual is the
+            // data's own gradient `AᵀW(δ − A·v₁)`.
+            let mut prior = vec![0.0f32; vector.len()];
+            laplacian(&vector, smooth, self.owners.as_deref(), &mut prior);
+            for ((slot, &v), &l) in rhs.iter_mut().zip(&vector).zip(&prior) {
+                *slot += tikhonov * v + l;
+            }
+            (vector, info) = self.conjugate_gradients(&rhs, vector, &all, tikhonov, smooth, iterations);
+        }
         let first = limit_all(&mut vector, &limits);
         let mut limited: Vec<bool> = first.iter().map(|&(scaled, slope)| scaled || slope).collect();
         // The colour is held from here; only the slopes move.

@@ -64,11 +64,11 @@ use accept::{
 #[cfg(test)]
 use accept::{enforce_boundary_gate};
 use attach::{
-    ZoneAttachment, ZoneCoverage, ZoneDivergence, attach_zones_with_divergence,
+    ZoneAttachment, ZoneCoverage, ZoneDivergence, attach_zones_scoped,
     measure_zone_divergence, segment_both, segmentation_input, sky_land_geometry,
 };
 #[cfg(test)]
-use attach::{SEGMENT_BOTH_OVERRIDE, ZoneDivergences, attach_zones};
+use attach::{SEGMENT_BOTH_OVERRIDE, ZoneDivergences, attach_zones, attach_zones_with_divergence};
 pub(super) use boundary::{BoundaryReading, rim_cell_gaps, step_cell_gaps};
 use boundary::{ZONE_BOUNDARY_HIGH, ZONE_BOUNDARY_PERCENTILE, boundary_rim_toward, boundary_step_toward, lab};
 #[cfg(test)]
@@ -116,7 +116,7 @@ pub(crate) use zone_fit::{
 };
 use zone_fit::{
     ZONE_VOUCH_SHRINK_STEPS, clamp_zone_sat, clamp_zone_sat_for_mode, local_quality,
-    scale_zone_colour, scale_zone_tone, shrink_atmosphere_gains_in, shrink_zone_corrections,
+    scale_zone_colour, scale_zone_tone, shrink_atmosphere_gains_in, shrink_zone_axes, shrink_zone_corrections,
 };
 
 /// The zoned fit's source as ONE text, for the source-text gates that read what

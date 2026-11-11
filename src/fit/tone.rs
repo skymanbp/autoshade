@@ -51,8 +51,10 @@ const ROBUST_TUKEY_C: f32 = 4.685;
 /// read anyway, those pixels were the majority of their bins, the fit
 /// followed them and rejected the honest orange band, and contrast solved
 /// −6.1 against the truth's +18. A grey pixel at the ceiling keeps its say:
-/// its luma IS the ceiling, which is what the map did there.
-const TONE_CLIP_CEILING: f32 = 0.995;
+/// its luma IS the ceiling, which is what the map did there. The number is
+/// the engine's ([`crate::render::WHITE_CLIP`]): the develop reads the same
+/// ceiling for what a colour stage may scale.
+const TONE_CLIP_CEILING: f32 = crate::render::WHITE_CLIP;
 
 /// A channel at the ceiling while the luma is not: the luma is capped, not
 /// mapped.

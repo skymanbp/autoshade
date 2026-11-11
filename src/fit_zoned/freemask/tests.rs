@@ -45,6 +45,7 @@ fn field_from(region: &[bool], value: f32) -> LocalField {
         width: EDGE,
         height: EDGE,
         zones: None,
+        frame: crate::render::FieldFrame::default(),
     }
 }
 

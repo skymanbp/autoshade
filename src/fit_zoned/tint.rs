@@ -57,6 +57,36 @@ pub(super) fn read_zone_tint(
     weights: &dyn Fn(usize) -> f32,
     coverage: &dyn Fn(usize) -> f32,
 ) -> Option<ZoneTint> {
+    read_zone_tint_over((0.0, 0.0), rendered, target, weights, coverage)
+}
+
+/// [`read_zone_tint`] of a zone that already CARRIES the tint `(hue,
+/// amount 0..1)` in `rendered`: the render is linear in the push, so what the
+/// pairs still ask adds to the push the zone carries, and the sum goes back
+/// through the wheel once. With nothing carried it is the plain read.
+pub(super) fn read_zone_tint_over(
+    carried: (f32, f32),
+    rendered: &[[f32; 3]],
+    target: &[[f32; 3]],
+    weights: &dyn Fn(usize) -> f32,
+    coverage: &dyn Fn(usize) -> f32,
+) -> Option<ZoneTint> {
+    let (v, pairs, neutral) = read_zone_push(rendered, target, weights, coverage)?;
+    let held = render::tint_push(carried.0).map(|c| c * carried.1);
+    let (hue, amount) = render::tint_from_push([held[0] + v[0], held[1] + v[1]]);
+    let amount = amount.min(1.0);
+    (amount >= TINT_MIN_AMOUNT).then_some(ZoneTint { hue, amount, pairs, neutral })
+}
+
+/// The Oklab (a, b) push per unit of ramp the zone's pairs ask
+/// ([`read_zone_tint`] says how), with the pairs and the neutral pairs it was
+/// read from; `None` where no pair has a ramp to read on.
+fn read_zone_push(
+    rendered: &[[f32; 3]],
+    target: &[[f32; 3]],
+    weights: &dyn Fn(usize) -> f32,
+    coverage: &dyn Fn(usize) -> f32,
+) -> Option<([f32; 2], usize, usize)> {
     let ok = |p: &[f32; 3]| render::linear_to_oklab(p.map(render::srgb_to_linear));
     let paired: Vec<usize> = (0..rendered.len().min(target.len()))
         .filter(|&i| weights(i) > 0.0)
@@ -109,30 +139,26 @@ pub(super) fn read_zone_tint(
         }
         v = solve(&rw);
     }
-    let (hue, amount) = render::tint_from_push(v);
-    let amount = amount.min(1.0);
-    (amount >= TINT_MIN_AMOUNT).then_some(ZoneTint {
-        hue,
-        amount,
-        pairs: samples.len() * stride,
-        neutral: neutral * stride,
-    })
+    Some((v, samples.len() * stride, neutral * stride))
 }
 
 /// A semantic zone's colour, solved three ways and kept the best.
 ///
 /// The PLAIN solve is [`attach_one_zone`]'s per-channel gains and saturation
 /// chase. Two TINT trials read one mask Color tint from every paired pixel
-/// after the tone solve ([`read_zone_tint`]) and differ only in what the
+/// ([`read_zone_tint`]) and differ in when it is read and in what the
 /// zone-mean gains are asked:
 ///
-/// * [`ZoneColour::Tint`] reads the tint FIRST, on the zone as its tone left
-///   it, and then solves the gains and the saturation on the TINTED
+/// * [`ZoneColour::Tint`] reads the tint FIRST — before the zone's tone,
+///   which then answers what the tint leaves, and once more on the toned
+///   zone for what it still asks ([`read_zone_tint_over`]) — and then solves
+///   the gains and the saturation on the TINTED
 ///   candidate — the order for a gap that is a tint and nothing else, where
 ///   gains solved first would take the mean of it and leave the tint only
 ///   the difference between the two populations;
 /// * [`ZoneColour::TintOnGains`] keeps the plain solve's gains, read before
-///   the tone as always, and reads the tint on what THEY leave — the order
+///   the tone as always, and reads the tint after the tone on what THEY
+///   leave — the order
 ///   for a gap that is a cast plus a tint. Measured on the seaside street
 ///   (2026-10-27): the fit's own global stage leaves that sky 35 b* warmer
 ///   than its target, read first the tint swallowed the cast and stopped at

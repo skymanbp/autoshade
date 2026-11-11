@@ -288,12 +288,27 @@ pub(super) fn shrink_zone_corrections(
     shares: &[f32],
     k: f32,
 ) {
+    shrink_zone_axes(masks, originals, shares, (k, k));
+}
+
+/// [`shrink_zone_corrections`] with one scalar per AXIS (2026-11-10): the
+/// six tone dials at `k.0`, the colour dials (saturation, the tint's amount,
+/// the gains) at `k.1`. The boundary gate reads the luma rim and the colour
+/// rim separately and releases its shared shrink on each in turn
+/// (`accept::enforce_boundary_gates_with_shrink`).
+pub(super) fn shrink_zone_axes(
+    masks: &mut [LocalAdjustment],
+    originals: &[LocalAdjustment],
+    shares: &[f32],
+    k: (f32, f32),
+) {
     debug_assert_eq!(masks.len(), originals.len());
     debug_assert_eq!(masks.len(), shares.len());
-    let k = k.clamp(0.0, 1.0);
+    let (tone, colour) = (k.0.clamp(0.0, 1.0), k.1.clamp(0.0, 1.0));
     let share_total = shares.iter().copied().sum::<f32>().max(1e-6);
     macro_rules! shrink_additive {
-        ($field:ident) => {{
+        ($field:ident, $k:expr) => {{
+            let k: f32 = $k;
             let common = originals
                 .iter()
                 .zip(shares)
@@ -305,14 +320,15 @@ pub(super) fn shrink_zone_corrections(
             }
         }};
     }
-    shrink_additive!(exposure_ev);
-    shrink_additive!(contrast);
-    shrink_additive!(highlights);
-    shrink_additive!(shadows);
-    shrink_additive!(whites);
-    shrink_additive!(blacks);
-    shrink_additive!(saturation);
-    shrink_additive!(toning_amount);
+    shrink_additive!(exposure_ev, tone);
+    shrink_additive!(contrast, tone);
+    shrink_additive!(highlights, tone);
+    shrink_additive!(shadows, tone);
+    shrink_additive!(whites, tone);
+    shrink_additive!(blacks, tone);
+    shrink_additive!(saturation, colour);
+    shrink_additive!(toning_amount, colour);
+    let k = colour;
     for channel in 0..3 {
         let common = originals
             .iter()

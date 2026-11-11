@@ -3012,8 +3012,24 @@ pub enum TargetGeometry {
     AsShot { corrected: f32, as_shot: f32 },
     /// Neither frame won by [`GEOMETRY_WIN_RATIO`] and [`GEOMETRY_WIN_MARGIN`]
     /// — or the target reads as shot over a lens-corrected MASTER, which has
-    /// no sensor-frame develop to go back to: paired as it stands, the
-    /// profile left as it was, and said so.
+    /// no sensor-frame develop to go back to: the profile is left as it was,
+    /// the target is paired as it stands with the source in the frame that
+    /// profile RENDERS (a source developed in the sensor frame is moved there
+    /// by the engine's own geometry stage, as for [`Self::Corrected`]), and it
+    /// is said so.
+    ///
+    /// The fit judges the frame it ships (v1.18.0, J133). Until then an
+    /// undecided target was paired with the source as it stood while the
+    /// recipe went on drawing the profile, so every candidate was read in one
+    /// frame and exported in the other. On the night pair from its master
+    /// (0.85; nothing in its repainted sky aligns either way, 0.02 against
+    /// 0.03) the export's sky rows sat half an analysis pixel off the rows the
+    /// solve had matched, and the horizon glow — up to 0.85 L* a row there —
+    /// read 0.3-0.8 L* dark against a target the solve's own frame matched:
+    /// the sky's row ripple 1.10 as exported, 0.84 on the frame the solve read
+    /// (rel1180 legs/D2 and fieldproto, 2026-11-10). Which frame the target is
+    /// really in stays unknown; what is known is the frame the recipe renders,
+    /// and a verdict about any other frame is not a verdict about the picture.
     Ambiguous { corrected: f32, as_shot: f32 },
 }
 
@@ -3088,6 +3104,12 @@ pub fn fit_target(
         base.lens_profile.ca_on = false;
         return as_exported(TargetGeometry::AsShot { corrected, as_shot });
     }
+    // Undecided. The profile stays as it was, so the recipe renders the
+    // corrected frame, and the source is put there: the frame every candidate
+    // is read in is the frame the export shows ([`TargetGeometry::Ambiguous`]).
+    if !src_corrected {
+        *src = src.lens_corrected(&geom, amount);
+    }
     as_exported(TargetGeometry::Ambiguous { corrected, as_shot })
 }
 
@@ -3103,7 +3125,12 @@ pub fn fit_target(
 /// resampled as the fit resamples the target, and read by J* on the frame's
 /// own evidence model; the finished recipe ships only when it ships against
 /// the base on THAT reading (`fit::ships`), and the report carries it as its
-/// residual. One render per side, not a search. A baked source (a master, a
+/// residual. One render per side, not a search — and one more per control
+/// priced by its reach, each read against its own absence on the same
+/// reading (J135, `fit::confirm_at_export`: a mixer band value or a regional
+/// wheel is kept for less than FIT_QUANT of the frame, which is less than
+/// this gap, so it is confirmed where it ships; what is set back is named
+/// in the report). A baked source (a master, a
 /// bare raster) renders as its export does, in the frame its marker says
 /// (review D D-5: the ship criterion does not depend on the source kind); a
 /// source with no file behind it, or an export whose frame does not match
@@ -3148,8 +3175,33 @@ pub fn reread_at_full_size(
     };
     let (Some(full), Some(full_base)) = (read(&report.recipe), read(base)) else { return };
     let three = |v: f32| format!("{v:.4}");
-    let preview = report.err_after;
-    let ships = crate::fit::ships(full, full_base);
+    let base_px = crate::fit::pixels_of(&crate::render::develop_preview(&s_img, base));
+    // The controls priced by their reach are confirmed where they ship (J135,
+    // `fit::confirm_at_export`). What is set back is named, the sentences
+    // that state the mixer and the grade are stated again from the recipe,
+    // and the preview's reading is taken again on the recipe that is left.
+    let (full, unearned) = crate::fit::confirm_at_export(&mut report.recipe, base, &base_px, full, &read);
+    let preview = if unearned.is_empty() {
+        report.err_after
+    } else {
+        report.restate_mixer_and_grade();
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            Note::new(keys::FIT_TERMINAL_UNEARNED, vec![("controls", unearned.join(", "))]),
+        );
+        crate::fit::look_err_with_evidence(
+            &crate::fit::pixels_of(&crate::render::develop_preview(&s_img, &report.recipe)),
+            &tp,
+            &report.evidence,
+        )
+    };
+    // The gain the finished recipe owes here is its own price (2026-11-10,
+    // `fit::terminal_price`): one quantum for a recipe with a full-reach
+    // control or a local layer, as it always was; the reach of its bands and
+    // wheels where it carries nothing else.
+    let owed = crate::fit::terminal_price(&report.recipe, base, &base_px);
+    let ships = full_base - full >= crate::fit::FIT_QUANT * owed;
     crate::diag::Diag::about(sink, path).emit(
         crate::diag::Mark::Bare,
         format!(
@@ -6782,6 +6834,40 @@ mod tests {
         };
         assert!(as_shot >= GEOMETRY_WIN_RATIO * corrected, "it does read as shot: {as_shot} vs {corrected}");
         assert_eq!(base, was, "the profile is left as it was");
+    }
+
+    /// A target the probe cannot place — nothing in it is the source's
+    /// structure (a repainted sky, a generated reference) — is undecided, and
+    /// the fit then judges the frame it SHIPS (v1.18.0, J133): the profile is
+    /// left on, so the recipe renders the corrected frame, and the
+    /// sensor-frame source is moved there by the engine's own geometry stage,
+    /// exactly as for a target that reads corrected. Until then the source
+    /// stayed in the sensor frame: every candidate was read in one frame and
+    /// exported in the other. A source already in the corrected frame is not
+    /// moved again.
+    #[test]
+    fn an_undecided_target_is_paired_in_the_frame_the_profile_renders() {
+        let pixels = sensor_texture(1200, 800, 47);
+        let mut base = distorting_base();
+        let was = base.clone();
+        let target = sensor_texture(1200, 800, 48);
+        let mut src = crate::render::Plate::baked(pixels.clone());
+        assert!(!src.corrected(), "premise: a sensor-frame source");
+        let fitted = fit_target(&mut src, None, &target, &mut base).expect("no RAW to develop");
+        assert!(
+            matches!(fitted.geometry, TargetGeometry::Ambiguous { .. }),
+            "another scene aligns neither way: {:?}",
+            fitted.geometry
+        );
+        assert_eq!(base, was, "the profile is left as it was");
+        assert_eq!(fitted.image.as_bytes(), target.as_bytes(), "the target is paired as it stands");
+        assert!(src.corrected(), "the source is in the frame the profile renders");
+        let moved = crate::render::apply_lens_geometry(&pixels, &crate::render::geometry_profile(&base), 0.0);
+        assert_eq!(src.as_bytes(), moved.as_bytes(), "moved there by the engine's own geometry stage");
+        let mut again = crate::render::Plate::baked_in(moved.clone(), true);
+        let refit = fit_target(&mut again, None, &target, &mut base).expect("no RAW to develop");
+        assert!(matches!(refit.geometry, TargetGeometry::Ambiguous { .. }), "{:?}", refit.geometry);
+        assert_eq!(again.as_bytes(), moved.as_bytes(), "a corrected source stays as it stands");
     }
 
     /// The other answer: a target exported with the profile OFF keeps the

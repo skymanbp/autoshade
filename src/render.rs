@@ -115,7 +115,7 @@ pub use develop::{
     retouch_spots,
 };
 pub(crate) use develop::{
-    apply_colour_field, field_axis, field_guide_luma, field_owned_weights,
+    FieldFrame, apply_colour_field, field_guide_luma, field_owned_weights,
 };
 use develop::{apply_develop_with_rasters, dehaze_airlight, dehaze_px, luma601};
 #[cfg(test)]
@@ -198,9 +198,9 @@ use mask_weight::{Bmp, combined_mask_weight};
 #[cfg(test)]
 use mask_weight::{mask_weight, mask_weight_in};
 pub use masks::{MaskFrame, corrected_raster_to_sensor, engine_active, sensor_raster_to_corrected, sensor_rgba_to_corrected};
-pub(crate) use masks::{linear_to_oklab, preview_field_sky_coverage, tint_from_push, tint_luma, tint_window};
+pub(crate) use masks::{linear_to_oklab, preview_field_sky_coverage, tint_from_push, tint_luma, tint_push, tint_window};
 #[cfg(test)]
-pub(crate) use masks::{TINT_WINDOW_CENTRE, oklab_to_linear, tint_push, tint_px};
+pub(crate) use masks::{TINT_WINDOW_CENTRE, oklab_to_linear, tint_px};
 use masks::{MaskUnwarp, apply_masks};
 #[cfg(test)]
 use masks::{LOCAL_NR_GATE, is_lr_post_correction_geometry};
@@ -239,9 +239,9 @@ pub(crate) use mask_gains::gains_as_white;
 #[cfg(test)]
 pub(crate) use tone::{limit_tone_sliders, parametric_lut};
 pub use wb::{local_temp_to_kelvin, solve_wb_for, solve_wb_from_neutral};
-pub(crate) use wb::{WbLaw, linear_to_srgb, srgb_to_linear, wb_gains};
+pub(crate) use wb::{WHITE_CLIP, WbLaw, linear_to_srgb, srgb_to_linear, wb_gains};
 use wb::{
-    apply_recipe_wb, colour_gain_luts, decode_wide, encode_wide, ramp, smoothstep, transfer_luts,
+    apply_recipe_wb, colour_gain_luts, decode_wide, encode_wide, keep_blown_white, ramp, smoothstep, transfer_luts,
 };
 #[cfg(test)]
 use wb::{kelvin_to_rgb};

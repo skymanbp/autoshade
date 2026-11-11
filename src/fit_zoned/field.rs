@@ -365,6 +365,10 @@ pub(super) fn push_realized(report: &mut FitReport, field: &LocalField, producer
 /// a smooth spatial field exists to carry, was still blue/green 1.50 against
 /// the target's 2.20.
 ///
+/// J141 (v1.18.0): every solve here — pass A, the pinned re-solve and pass B
+/// — weighs pixels by [`field_testimony`], not by the report's evidence as it
+/// stands: a field answers per place, so it is solved from pairs only.
+///
 /// Finally, do-no-harm: the attached field is kept only if the frame it
 /// renders is closer to the target than the frame without it. A field that
 /// regresses the frame is dropped and said so.
@@ -373,7 +377,7 @@ pub(super) fn attach_colour_field(
     target: &DynamicImage,
     report: &mut FitReport,
     strength: crate::recipe::GradeStrength,
-    layout: &[f32],
+    layout: &PairedLayout,
 ) {
     if strength.get() < crate::recipe::GradeStrength::DEFAULT {
         return;
@@ -391,13 +395,20 @@ pub(super) fn attach_colour_field(
     // partition: the plain read, as before.
     let sky = render::preview_field_sky_coverage(&s_img, &report.recipe);
     let sky = sky.as_deref();
+    // …and each pixel on the vertices the develop of this preview reads it on
+    // (J133): a stored grid spans the original frame, so on a lens-corrected
+    // plate the field is solved at the original-frame point each pixel shows,
+    // the place every develop of the recipe will read it.
+    let frame = render::FieldFrame::of_preview(&s_img, &report.recipe);
     let solve_on = |target: &[[f32; 3]], evidence: &fit::EvidenceModel| {
-        LocalField::solve_zoned(
+        LocalField::solve_framed(
             &current, target, w, h, evidence, crate::fit_field::TIKHONOV, crate::fit_field::SMOOTH,
-            crate::fit_field::ITERATIONS, FieldSolveOpts::default(), sky,
+            crate::fit_field::ITERATIONS, FieldSolveOpts { refine: true, ..FieldSolveOpts::default() }, sky,
+            &frame,
         )
     };
-    let Some(pass_a) = solve_on(&target_pixels, &report.evidence)
+    let (testimony, layout) = field_testimony(&report.evidence, layout);
+    let Some(pass_a) = solve_on(&target_pixels, &testimony)
     else {
         note(report, crate::rationale::keys::FIELD_UNSOLVED, vec![("stage", "attach".into())]);
         return;
@@ -436,7 +447,9 @@ pub(super) fn attach_colour_field(
         // support-free pass B `admit_cells` hands most cells to. A pin that
         // reached pass A only left every admitted cell solved on the zone's
         // old, low weight, and the re-solve barely moved the zone.
-        let mut evidence = report.evidence.clone();
+        // …over the testimony (J141): a pinned zone is its own render, a pair
+        // with itself, so the pin raises a weight the testimony took away.
+        let mut evidence = testimony.clone();
         for (weight, p) in evidence.source_weights.iter_mut().zip(&pin) {
             *weight = weight.max(*p);
         }
@@ -450,7 +463,7 @@ pub(super) fn attach_colour_field(
             pass
         };
         let (solved, admitted, read, paired) =
-            admit_cells(&current, &solve_target, w, h, &evidence, pass, budget.field_gain, layout, sky);
+            admit_cells(&current, &solve_target, w, h, &evidence, pass, budget.field_gain, &layout, sky);
         // Rendered from the field the recipe will CARRY — rounded the way
         // `ColourField::round` stores it — so the do-no-harm verdicts and
         // `FIELD_ATTACHED`'s numbers describe the render a reopen produces.
@@ -458,14 +471,16 @@ pub(super) fn attach_colour_field(
         field.round();
         let after = {
             let mut out = current.clone();
-            render::apply_colour_field(&mut out, w as usize, h as usize, Some(&field), sky);
+            render::apply_colour_field(&mut out, w as usize, h as usize, Some(&field), &frame, sky);
             out
         };
         let err_with = fit::look_err_with_evidence(&after, &target_pixels, &report.evidence);
         // A LOCAL correction's do-no-harm reads the one objective as the frame
         // does (2026-11-07: hue and structure are gates, not terms); its seams
-        // stay with the boundary / ramp rulers and its structural gate is the
-        // existing D threshold only.
+        // stay with the boundary / ramp rulers. Its structural gate is not
+        // here but in what it was solved from ([`field_testimony`], J141): the
+        // objective reads unpaired pixels as a distribution, and a field that
+        // drew the target's layout would match any distribution.
         if !fit::ships(err_with, report.err_after) {
             note(report, crate::rationale::keys::FIELD_REGRESSED, vec![
                 ("before", format!("{:.6}", report.err_after)),
@@ -607,14 +622,14 @@ fn admit_cells(
         }
         (model, blind)
     });
-    // Pass B is solved for the same zone-owned read as pass A (`sky`), on the
-    // same `current`, so the two count the same vertex owners and the merged
-    // field carries pass A's.
-    let Some(pass_b) = LocalField::solve_zoned(
+    // Pass B is solved for the same zone-owned read as pass A (`sky`), in the
+    // same frame and on the same `current`, so the two count the same vertex
+    // owners and the merged field carries pass A's.
+    let Some(pass_b) = LocalField::solve_framed(
         current, target, width, height,
         paired.as_ref().map_or(evidence, |(model, _)| model),
         crate::fit_field::TIKHONOV, crate::fit_field::SMOOTH, crate::fit_field::ITERATIONS,
-        FieldSolveOpts { gain, local_support: false }, sky,
+        FieldSolveOpts { gain, local_support: false, refine: true }, sky, &pass_a.frame,
     ) else {
         return (pass_a, 0, 0, LayoutAdmission::default());
     };
@@ -673,6 +688,90 @@ fn admit_cells(
 pub(super) struct LayoutAdmission {
     pub(super) read: usize,
     pub(super) admitted: usize,
+}
+
+/// R42's reading and J141's of the two frames' own partitions, per analysis
+/// pixel (`fit_zoned::paired_layout`). Both planes are empty when the fit has
+/// no segmentation (the range fallback): no class pairs anything there, and
+/// no pair is known to be split.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct PairedLayout {
+    /// R42: the pixel's membership in a region the segmenter found in BOTH
+    /// frames at this place.
+    pub(super) paired: Vec<f32>,
+    /// J141: how far the two partitions disagree about the pixel — 0 where
+    /// both frames hold the same region here, 1 where the source shows one
+    /// region and the target another.
+    pub(super) split: Vec<f32>,
+}
+
+/// J141 (v1.18.0). WHO TESTIFIES for the colour field: the evidence model its
+/// solves weigh pixels by and R42's layout plane, both read as PAIRS.
+///
+/// The field is the one control that answers per pixel and per place — 3840
+/// vertices, each solved from the residual of the pixels that splat on it —
+/// so a pixel may drive it only where index `i` of the source and index `i`
+/// of the target are the same scene point. The report's evidence weights do
+/// not say that. They say which RANGES the two frames both populate, which
+/// is what a distribution control is solved from, and on a structure-blind
+/// model (an Atmosphere report's) every pixel of a populated range weighs
+/// about 1 whatever the two frames show there; the cells' admission cannot
+/// refuse either, because a blind model's spatial trust is 1 in every cell
+/// (`fit_cells::PairedCells::build`), so the "tested, not trusted" pass B is
+/// trusted everywhere. Until 2026-11-07 the frame objective stood behind all
+/// of it with a structure term; since then it reads unpaired pixels as a
+/// distribution (hue and structure are gates, not terms), a field that draws
+/// the target's layout onto the source matches any distribution, and this
+/// stage had no gate of its own. Two readings say where index `i` is NOT a
+/// pair, and the testimony takes both:
+///
+/// * NOTHING PAIRS. A frame none of whose cells reads under the zone line
+///   ([`fit::EvidenceModel::pairs_a_population`]) is two photographs. Solved
+///   anyway, such a pair (D 1.195) weighed 0.95 of its frame and the field
+///   drew the target's buildings, fence and sky onto the source: whole-frame
+///   deltaE 32.75 -> 11.43, the objective better at every step. Its
+///   testimony is empty, the solver finds nothing to fit, and no field is
+///   attached (`FIELD_UNSOLVED`) — what a per-place control has to say about
+///   two frames that share no place. A frame that pairs somewhere is one
+///   scene, and what the structural reading cannot pair inside it is
+///   re-synthesis at the same place: R34's tested pass and R42's layout read
+///   it as they did.
+/// * THE PARTITIONS DISAGREE ([`PairedLayout::split`]). Beside a contour the
+///   target redrew a few pixels off, source sky sits against target rock and
+///   source rock against target sky. Those pixels testified at full weight
+///   (2.2% of the reference pair's solve weight), the sky-owned vertices
+///   beside each butte were pulled toward rock, and the render carried a
+///   dark smudge there: the sky strip beside the left butte read 13.4 L*
+///   under the open sky, against 4.9 on v1.17.1 and 1.9 with the field off.
+///   Their weight is scaled by the membership the partitions agree on, in
+///   the model and in the layout plane alike.
+///
+/// The do-no-harm readings keep the report's own ruler: what the field may be
+/// SOLVED from is this function's question, what the frame is JUDGED by is
+/// not. The analysis solve at the head of the sequencer
+/// ([`solve_local_field`]) is not changed either: it attaches nothing, and
+/// every producer it proposes for is a bounded mask control with an
+/// acceptance of its own.
+fn field_testimony(evidence: &fit::EvidenceModel, layout: &PairedLayout) -> (fit::EvidenceModel, Vec<f32>) {
+    let mut model = evidence.clone();
+    let n = model.source_weights.len();
+    if !evidence.pairs_a_population() {
+        model.source_weights.fill(0.0);
+        return (model, Vec::new());
+    }
+    if layout.split.len() != n {
+        return (model, layout.paired.clone());
+    }
+    let together = |i: usize| 1.0 - layout.split[i].clamp(0.0, 1.0);
+    for (i, weight) in model.source_weights.iter_mut().enumerate() {
+        *weight *= together(i);
+    }
+    let paired = if layout.paired.len() == n {
+        (0..n).map(|i| layout.paired[i] * together(i)).collect()
+    } else {
+        Vec::new()
+    };
+    (model, paired)
 }
 
 

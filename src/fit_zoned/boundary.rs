@@ -140,6 +140,34 @@ struct CrossingSample {
     cell: usize,
 }
 
+/// The treatment a band pixel is owed, EXACT (2026-11-10): the same recipe
+/// rendered with the gated corrections of one side at full weight over the
+/// whole frame and the other side's absent — `[inside, outside]`, for the
+/// render under measurement and for the frozen k=1 candidate. A gate that
+/// can name its corrections' sides hands them over ([`boundary_rim_owed`]);
+/// without them the soft ruler transports the reference through each side's
+/// settled median multiplier ([`boundary_line_rims`]), which is the same
+/// thing for a dial that IS one multiplier in linear light and for no other.
+///
+/// Why the multiplier was not enough. A mask Color tint moves Oklab a/b by an
+/// amount its lightness window sets from the pixel's own level
+/// (`render::tint_px`): a band pixel brighter or darker than the settled
+/// side's median is given a different move than the median's ratio predicts,
+/// at any mask weight. Measured on the app's own render of a sky tint of 30
+/// at hue 200 and nothing else, refitted with the same sky raster
+/// (`self_consistency`, 544 transitions): the candidate matched the target to
+/// 0.0001 of a channel over the settled sky and the frame read 0.0008, and
+/// the multiplier form read red steps of up to 0.075 (19 codes) in the band,
+/// either sign from one pixel to the next, so the paired target's own step —
+/// pooled as a cell MEAN ([`cell_share`]) — came out under one code in 155 of
+/// the 193 crossings charged past the ceiling and bought nothing; the gate
+/// shipped the tint's colour dials at 0.38 and the frame at 0.0155.
+#[derive(Clone, Copy)]
+pub(super) struct Owed<'a> {
+    pub(super) rendered: [&'a [[f32; 3]]; 2],
+    pub(super) frozen: [&'a [[f32; 3]]; 2],
+}
+
 /// The three frames one crossing is read from.
 #[derive(Clone, Copy)]
 struct StepFrames<'a> {
@@ -162,6 +190,8 @@ struct StepFrames<'a> {
     /// lens-corrected target leaves in the sensor frame is cropped from the
     /// delivered render, and a step measured there is a step nobody sees.
     presence: Option<&'a [f32]>,
+    /// The exact owed treatment, where the gate rendered it ([`Owed`]).
+    owed: Option<Owed<'a>>,
 }
 
 impl StepFrames<'_> {
@@ -861,6 +891,43 @@ fn boundary_line_rims(
             transport(sky_share * sky + (1.0 - sky_share) * land, v)
         }
     };
+    // What each frame OWES a band pixel. Exact where the gate rendered it
+    // ([`Owed`]): the frame's own recipe at full weight on each side, mixed by
+    // the pixel's content share in linear light — the quantity `treat` stands
+    // in for with one multiplier per side. The paired target has no recipe to
+    // render: where the candidate's exact treatment is known, it is that
+    // treatment re-levelled by the gap between the target's and the
+    // candidate's settled multipliers, so a target that carries the
+    // candidate's own law reads the very step the candidate does (the same
+    // number, bit for bit, where the two frames are one).
+    let value = |p: &[f32; 3], channel: Option<usize>| channel.map_or(luma(p), |c| p[c]);
+    let exact = |sides: [&[[f32; 3]]; 2], at: usize, channel: Option<usize>| -> f32 {
+        let (sky, land) = (value(&sides[0][at], channel), value(&sides[1][at], channel));
+        let sky_share = channel.map_or(content.share[at], |c| content.channel_share[at][c]);
+        if sky_share >= 1.0 || sky == land {
+            sky
+        } else {
+            render::linear_to_srgb(
+                sky_share * render::srgb_to_linear(sky) + (1.0 - sky_share) * render::srgb_to_linear(land),
+            )
+        }
+    };
+    let owed_rendered = |at: usize, channel: Option<usize>| match frames.owed {
+        Some(o) => exact(o.rendered, at, channel),
+        None => treat(&rendered_side, at, channel, value(&reference[at], channel)),
+    };
+    let owed_frozen = |at: usize, channel: Option<usize>| match frames.owed {
+        Some(o) => exact(o.frozen, at, channel),
+        None => treat(&frozen_side, at, channel, value(&reference[at], channel)),
+    };
+    let owed_target = |side: &SideMultipliers, at: usize, channel: Option<usize>| {
+        let v = value(&reference[at], channel);
+        let own = treat(side, at, channel, v);
+        match frames.owed {
+            Some(o) => exact(o.frozen, at, channel) + (own - treat(&frozen_side, at, channel, v)),
+            None => own,
+        }
+    };
     let inside = |i: usize| weights[i] >= ZONE_BOUNDARY_MID;
     let stand_off = ZONE_STEP_OFFSET.saturating_sub(1);
     let mut p = 0usize;
@@ -943,13 +1010,12 @@ fn boundary_line_rims(
             if weights[i] < ZONE_BOUNDARY_MID {
                 continue;
             }
-            let here = luma(&rendered[i]) - treat(&rendered_side, i, None, luma(&reference[i]));
+            let here = luma(&rendered[i]) - owed_rendered(i, None);
             introduced = Some(match introduced {
                 Some((v, at)) if v.abs() >= here.abs() => (v, at),
                 _ => (here, i),
             });
-            let transported: [f32; 3] =
-                std::array::from_fn(|c| treat(&rendered_side, i, Some(c), reference[i][c]));
+            let transported: [f32; 3] = std::array::from_fn(|c| owed_rendered(i, Some(c)));
             for c in 0..3 {
                 let moved = rendered[i][c] - transported[c];
                 coloured = Some(match coloured {
@@ -959,19 +1025,21 @@ fn boundary_line_rims(
             }
             // R37: the cell sums — this pixel's own step on each frame, each
             // through ITS settled treatment, in its own cell.
-            let shortfall = |side: &SideMultipliers, frame: &[[f32; 3]]| -> [f32; 4] {
+            let shortfall = |frame: &[[f32; 3]], owed: &dyn Fn(usize, Option<usize>) -> f32| -> [f32; 4] {
                 [
-                    luma(&frame[i]) - treat(side, i, None, luma(&reference[i])),
-                    frame[i][0] - treat(side, i, Some(0), reference[i][0]),
-                    frame[i][1] - treat(side, i, Some(1), reference[i][1]),
-                    frame[i][2] - treat(side, i, Some(2), reference[i][2]),
+                    luma(&frame[i]) - owed(i, None),
+                    frame[i][0] - owed(i, Some(0)),
+                    frame[i][1] - owed(i, Some(1)),
+                    frame[i][2] - owed(i, Some(2)),
                 ]
             };
             let (own, moved) = (lab(&rendered[i]), lab(&transported));
             cells[cell_of(i, grid)].add(
-                shortfall(&rendered_side, rendered),
-                shortfall(&frozen_side, frozen),
-                target.zip(target_side.as_ref()).map(|(t, side)| shortfall(side, t)),
+                shortfall(rendered, &owed_rendered),
+                shortfall(frozen, &owed_frozen),
+                target
+                    .zip(target_side.as_ref())
+                    .map(|(t, side)| shortfall(t, &|at, channel| owed_target(side, at, channel))),
                 [own[1] - moved[1], own[2] - moved[2]],
             );
         }
@@ -1026,12 +1094,8 @@ fn boundary_line_rims(
         );
         // The frozen candidate's own shortfall at the same pixels, through
         // ITS settled sky's transport (R37): what the cell's share is of.
-        let luma_frozen =
-            luma(&frozen[at]) - treat(&frozen_side, at, None, luma(&reference[at]));
-        let colour_frozen = std::array::from_fn(|c| {
-            frozen[colour_at][c]
-                - treat(&frozen_side, colour_at, Some(c), reference[colour_at][c])
-        });
+        let luma_frozen = luma(&frozen[at]) - owed_frozen(at, None);
+        let colour_frozen = std::array::from_fn(|c| frozen[colour_at][c] - owed_frozen(colour_at, Some(c)));
         let cell = cell_of(at, grid);
         cells[cell].crossings += 1;
         out.push(CrossingSample {
@@ -1091,13 +1155,35 @@ pub(super) fn boundary_rim_toward(
     height: u32,
     presence: Option<&[f32]>,
 ) -> BoundaryReading {
+    boundary_rim_owed(target, reference, rendered, frozen, weights, width, height, presence, None)
+}
+
+/// [`boundary_rim_toward`] with the EXACT owed treatment where the gate
+/// rendered it ([`Owed`]); `None` is the multiplier transport.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn boundary_rim_owed(
+    target: Option<&[[f32; 3]]>,
+    reference: &[[f32; 3]],
+    rendered: &[[f32; 3]],
+    frozen: &[[f32; 3]],
+    weights: &[f32],
+    width: u32,
+    height: u32,
+    presence: Option<&[f32]>,
+    owed: Option<Owed<'_>>,
+) -> BoundaryReading {
     let (w, h) = (width as usize, height as usize);
     debug_assert!(target.is_none_or(|t| t.len() == rendered.len()), "one geometry");
-    let frames = StepFrames { reference, rendered, frozen, target, presence };
+    debug_assert!(
+        owed.is_none_or(|o| o.rendered.iter().chain(&o.frozen).all(|f| f.len() == rendered.len())),
+        "one geometry"
+    );
+    let frames = StepFrames { reference, rendered, frozen, target, presence, owed };
     let (rims, cells) = rim_samples(frames, weights, (w, h));
     reading_of(&rims, &cells, ZONE_BOUNDARY_RIM_MAX)
 }
 
+/// Rank one ruler's samples into the numbers a gate and its disclosure need.
 /// Rank one ruler's samples into the numbers a gate and its disclosure need.
 /// Separate ORDERINGS on purpose — see [`CrossingSample`]. `ceiling` is the
 /// family's own constant, handed in rather than read from a shared one so the
@@ -1394,7 +1480,7 @@ pub(super) fn boundary_step_toward(
 ) -> BoundaryReading {
     let (w, h) = (width as usize, height as usize);
     debug_assert!(target.is_none_or(|t| t.len() == rendered.len()), "one geometry");
-    let frames = StepFrames { reference, rendered, frozen, target, presence };
+    let frames = StepFrames { reference, rendered, frozen, target, presence, owed: None };
     let (mut steps, mut cells) = (Vec::new(), cells_grid());
     for y in 0..h {
         boundary_line_steps(frames, geometry, ScanLine::row(y, (w, h)), &mut steps, &mut cells);
@@ -1421,7 +1507,7 @@ pub(crate) fn rim_cell_gaps(
     presence: Option<&[f32]>,
 ) -> Vec<[f32; 3]> {
     let (w, h) = (width as usize, height as usize);
-    let frames = StepFrames { reference, rendered, frozen: rendered, target: None, presence };
+    let frames = StepFrames { reference, rendered, frozen: rendered, target: None, presence, owed: None };
     let (_, cells) = rim_samples(frames, weights, (w, h));
     cell_gaps(&cells)
 }
@@ -1439,7 +1525,7 @@ pub(crate) fn step_cell_gaps(
     presence: Option<&[f32]>,
 ) -> Vec<[f32; 3]> {
     let (w, h) = (width as usize, height as usize);
-    let frames = StepFrames { reference, rendered, frozen: rendered, target: None, presence };
+    let frames = StepFrames { reference, rendered, frozen: rendered, target: None, presence, owed: None };
     let (mut steps, mut cells) = (Vec::new(), cells_grid());
     for y in 0..h {
         boundary_line_steps(frames, geometry, ScanLine::row(y, (w, h)), &mut steps, &mut cells);

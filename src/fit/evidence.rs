@@ -115,6 +115,34 @@ impl EvidenceModel {
         self.presence.as_ref().is_some_and(|p| p.get(i).copied().unwrap_or(0.0) <= 0.0)
     }
 
+    /// The share of this model's present mass that PAIRS ([`Self::paired`]) —
+    /// the mass the objective's `p` starts from (`look::TargetLook`), before
+    /// the pairing's reliability.
+    pub fn paired_share(&self) -> f32 {
+        let (mut mass, mut paired) = (0.0f64, 0.0f64);
+        for (i, weight) in self.source_presence_weights.iter().enumerate() {
+            let weight = weight.max(0.0) as f64;
+            mass += weight;
+            if self.paired.get(i).copied().unwrap_or(false) {
+                paired += weight;
+            }
+        }
+        if mass > 0.0 { (paired / mass) as f32 } else { 0.0 }
+    }
+
+    /// Do the two frames show ONE scene — does any part of the frame pair?
+    /// The paired share must be a population (`EVIDENCE_MIN_SHARE`, the line
+    /// under which a share is not one). A frame none of whose cells reads
+    /// under the zone line is two photographs: nothing in it says that index
+    /// `i` of one side and index `i` of the other are the same scene point,
+    /// and a control that answers per PLACE has nothing to read
+    /// (`fit_zoned::field::field_testimony`). The controls that answer for a
+    /// population are not asked this question — two photographs still have
+    /// distributions, which is what Atmosphere mode fits.
+    pub(crate) fn pairs_a_population(&self) -> bool {
+        self.paired_share() >= EVIDENCE_MIN_SHARE
+    }
+
     /// `weights` with every absent pixel's weight taken to zero — THE
     /// population rule for a zone's pair weights. Borrowed when every pixel
     /// is present, so a pair with nothing absent runs on its own bytes.
@@ -864,47 +892,71 @@ pub(super) fn weighted_median(samples: &mut [(f32, f32)]) -> f32 {
     samples[samples.len() - 1].0
 }
 
-/// The population AND the pairing the Atmosphere white balance is solved on.
-/// ONE authority chooses both, and that is the point: a readable
-/// shared-content population EXISTS only because a correspondence field was
-/// readable, and the field that is trusted to say WHICH pixels are shared is
-/// the same field that says WHICH target pixel each source pixel corresponds
-/// to. Taking the population without the pairing is how a RECOMPOSED pair —
-/// the same content, moved in frame, which is squarely inside Atmosphere's
-/// remit — gets read as a colour cast: same-index pairing against the raw
-/// target array is a random association once content has moved.
+/// The population AND the pairing an Atmosphere solve is read on. ONE
+/// authority chooses both, and that is the point: a readable shared-content
+/// population EXISTS only because a correspondence field was readable, and
+/// the field that is trusted to say WHICH pixels are shared is the same
+/// field that says WHICH target pixel each source pixel corresponds to.
+/// Taking the population without the pairing is how a RECOMPOSED pair — the
+/// same content, moved in frame, which is squarely inside Atmosphere's remit
+/// — gets read as a colour cast: same-index pairing against the raw target
+/// array is a random association once content has moved.
 ///
 /// With no readable field the two sides are index-paired exactly as they
-/// always were, and the per-pixel weight is `min(source, target)`. That is
-/// not an invention: it is this module's own two-sidedness rule, the
-/// `source_evidence_share.min(target_evidence_share)` that [`EvidenceModel`]
-/// already applies to every range.
+/// always were: `tp` itself, and no model — the caller keeps the frame's.
 ///
-/// With a readable field `p.source` ALONE is the coherent weight, and mixing
-/// in `p.target` would not be. `shared_content_population` sets `source[i]`
-/// exactly where `conf[i] >= CONFIDENT_MATCH`, i.e. exactly where `pair_tp[i]`
-/// IS that source pixel's counterpart; the target weights are RANK-paired
-/// (built by sorting `luma601(&tp[..])`), so `target_weights[i]` is a
-/// statement about `tp[i]`'s own luma rank, not about a pairing with `sp[i]`.
-pub(super) fn atmosphere_wb_pairing<'a>(
+/// With a readable field the pairing is the field's remap (`c.tp`, the
+/// target in the SOURCE frame) and the evidence model is BUILT ON THAT PAIR
+/// by the frame model's own construction: the structural instrument read on
+/// `(sp, c.tp)`, made structure-blind, scoped to the field's confident
+/// matches ([`SharedPopulation::members`], a membership). Every statement
+/// the model makes — its pairing flags, its range weights, its presence —
+/// is then a statement about `c.tp[i]` against `sp[i]`, which the frame
+/// model's are not once content has moved (its target weights are
+/// rank-paired on `tp`'s own luma).
+///
+/// THE CONSERVATION LAW (R30 R2): a restriction that changed dials when it
+/// dropped nothing would be changing the estimator, not its population.
+/// Under an identity field `c.tp` is `tp`, every pixel is a member, and this
+/// model is the frame's blind model field for field (`structure_blind` ends
+/// on the same `scoped(tp, ones, ones)`), so every reading below is the
+/// unrestricted one. Until 2026-11-10 three things broke that and
+/// `a_field_that_drops_nothing_moves_nothing` read a saturation of 27.6
+/// against 29.9: the model was scoped by the restricted ESTIMATION weights
+/// (`scoped` multiplies its own in, so every pixel was weighed twice and its
+/// presence became a weight); the white balance's pair weight was the
+/// source's alone where the frame's is `min(source, target)`; and the law's
+/// cells took membership for pairing where J* read the structural flags.
+pub(super) fn shared_content_pairing<'a>(
+    sp: &[[f32; 3]],
     tp: &'a [[f32; 3]],
-    evidence: &'a EvidenceModel,
+    structural: &EvidenceModel,
     correspondence: Option<&'a PairCorrespondence>,
-    readable: Option<&'a SharedPopulation>,
-) -> (&'a [[f32; 3]], Cow<'a, [f32]>) {
-    match readable {
-        Some(p) => (
-            correspondence.map_or(tp, |c| c.tp.as_slice()),
-            Cow::Borrowed(p.source.as_slice()),
-        ),
-        None => {
-            let n = evidence.source_weights.len().min(evidence.target_weights.len());
-            let paired = (0..n)
-                .map(|i| evidence.source_weights[i].min(evidence.target_weights[i]))
-                .collect::<Vec<_>>();
-            (tp, Cow::Owned(paired))
+    readable: Option<&SharedPopulation>,
+) -> (&'a [[f32; 3]], Option<EvidenceModel>) {
+    match (readable, correspondence) {
+        (Some(p), Some(c)) => {
+            let pair_tp = c.tp.as_slice();
+            let judged =
+                evidence_model_paired(sp, pair_tp, structural.presence.as_deref(), structural.width, structural.height)
+                    .structure_blind(pair_tp)
+                    .scoped(pair_tp, &p.members, &p.members);
+            (pair_tp, Some(judged))
         }
+        _ => (tp, None),
     }
+}
+
+/// The per-pixel weight of the Atmosphere white balance's one population of
+/// colour changes: `min(source, target)` of the model the solve is judged on
+/// — this module's own two-sidedness rule, the
+/// `source_evidence_share.min(target_evidence_share)` that [`EvidenceModel`]
+/// already applies to every range. On a shared-content model
+/// ([`shared_content_pairing`]) both weights speak of the remapped pair and
+/// are zero outside the shared population, so one rule serves both paths.
+pub(super) fn atmosphere_wb_pairing(evidence: &EvidenceModel) -> Vec<f32> {
+    let n = evidence.source_weights.len().min(evidence.target_weights.len());
+    (0..n).map(|i| evidence.source_weights[i].min(evidence.target_weights[i])).collect()
 }
 
 /// The Atmosphere global white balance: a weighted median of the PER-PIXEL

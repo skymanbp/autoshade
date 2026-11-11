@@ -106,10 +106,203 @@ fn fit_recipe_zoned_inner_seeded(
     layers: ZonedLayerOpts,
     segmented: Option<(GrayImage, GrayImage)>,
 ) -> FitReport {
+    // ONE segmentation for every pass below.
     let segmented = match segmented {
         Some(pair) => Ok(pair),
         None => segment_both(src, target, seg, mask_path),
     };
+    let pair = segmented.as_ref().ok().cloned();
+    let solved = zoned_pass(src, target, mask_path, base, options, layers, segmented, GlobalArm::Solved);
+    match pair {
+        Some(pair) => zone_alone_check(src, target, mask_path, base, options, layers, pair, solved),
+        None => solved,
+    }
+}
+
+/// Which global recipe a zoned pass builds its zones on.
+#[derive(Clone, Copy)]
+enum GlobalArm<'r> {
+    /// The global solve's.
+    Solved,
+    /// The base: the global controls held at their starting values, the
+    /// report on the same ruler as the solved pass's (its mode and strength
+    /// carried from that report — [`zone_alone_check`]).
+    Base(&'r FitReport),
+    /// [`GlobalArm::Base`] for the alone check's probe: the two semantic
+    /// zones attached as single zones, their band partitions not tried
+    /// ([`GlobalArm::bands`]).
+    Probe(&'r FitReport),
+}
+
+impl GlobalArm<'_> {
+    /// Whether the pass tries each zone's band partitions. The probe does
+    /// not: it asks whether the zones could carry the frame at all, which
+    /// the bands refine and do not decide (on the night pair they were a
+    /// third of the leg's time for a reading of 0.037 against 0.011,
+    /// legs/V1).
+    fn bands(self) -> bool {
+        !matches!(self, GlobalArm::Probe(_))
+    }
+}
+
+/// The report a zoned pass starts its local layers from.
+fn global_report(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    base: &crate::recipe::EditRecipe,
+    promoted: bool,
+    options: fit::FitOptions<'_>,
+    arm: GlobalArm<'_>,
+) -> FitReport {
+    match arm {
+        GlobalArm::Solved => fit::fit_recipe_from_promoted_with_disclosure_opts(src, target, base, promoted, true, options),
+        GlobalArm::Base(solved) | GlobalArm::Probe(solved) => {
+            // The base as the solve would report it had it moved nothing
+            // (`fit::rescore_report`, the terminal arm's own composer): the
+            // mode and the strength are the solved report's, read from its
+            // notes; no other statement about that solve crosses over.
+            let prior: Vec<crate::rationale::Note> = solved
+                .notes
+                .iter()
+                .filter(|n| {
+                    n.key == crate::rationale::keys::FIT_SUMMARY_ATMOSPHERE
+                        || n.key == crate::rationale::keys::FIT_NOTE_STRENGTH
+                })
+                .cloned()
+                .collect();
+            let mut report = fit::rescore_report(src, target, base, base, solved.err_before, &prior);
+            report.correspondence = solved.correspondence.clone();
+            report
+        }
+    }
+}
+
+/// The alone check at the zone layer (RULING-1180-sc Q-SC-5: "the mask tint
+/// is the same law at the zone layer: the global recipe re-solved without
+/// the frame-domain controls the zone's own move explains, the zone's tint
+/// read on that, ties to the smaller domain"; RULING-1180-joint-r2, addendum
+/// 2026-11-10). The global solve runs first and has no way to know that a
+/// zone would explain what it is looking at: a tint the fit itself had
+/// rendered on the sky zone alone was taken by the grade wheels and the cast
+/// curves, and the zone was left a tint of 2 of the 30 set (gates/j125).
+/// Read from the other side it is cheap: the two semantic zones are attached
+/// ALONE on the base — no bands, no field, no tiles, no free masks, no detail — and
+/// only where that already reads a lower frame J* than the whole finished
+/// recipe is the zoned fit run again in full with the global controls held
+/// at the base; it ships when the frame reads no worse than with the global
+/// solve (a tie goes to the smaller domain). On a pair the global solve
+/// served, two zones on the base come nowhere near the finished frame, and
+/// the check costs that one probe.
+#[allow(clippy::too_many_arguments)]
+fn zone_alone_check(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    mask_path: &crate::store::OwnedRaster,
+    base: &crate::recipe::EditRecipe,
+    options: fit::FitOptions<'_>,
+    layers: ZonedLayerOpts,
+    pair: (GrayImage, GrayImage),
+    solved: FitReport,
+) -> FitReport {
+    // The global part of a recipe: everything but its local layers and the
+    // report's own words.
+    let global_of = |r: &crate::recipe::EditRecipe| {
+        let mut g = r.clone();
+        g.masks.clear();
+        g.colour_field = None;
+        g.rationale.clear();
+        g.confidence = 0.0;
+        g
+    };
+    if global_of(&solved.recipe) == global_of(base) {
+        return solved;
+    }
+    let trace = crate::config::live_env_os("AUTOSHADE_FIT_TRACE").is_some();
+    // The anchor raster as the solved pass left it: a later pass rewrites it
+    // (the same bytes) or, where its own zones are refused, removes it.
+    let anchor_bytes = std::fs::read(mask_path.path()).ok();
+    let restore_anchor = || {
+        if let Some(bytes) = &anchor_bytes {
+            let _ = std::fs::write(mask_path.path(), bytes);
+        }
+    };
+    let probe_layers = ZonedLayerOpts { field: false, spatial: false, free_masks: false, detail: false, ..layers };
+    let probe = zoned_pass(src, target, mask_path, base, options, probe_layers, Ok(pair.clone()), GlobalArm::Probe(&solved));
+    let triggered = probe.mode == solved.mode && probe.err_after < solved.err_after;
+    if trace {
+        eprintln!(
+            "zone alone check: the zones alone on the base read {:.5} against the finished recipe's {:.5}{}",
+            probe.err_after,
+            solved.err_after,
+            if triggered { " — the zoned fit runs again on the base" } else { "" }
+        );
+    }
+    if !triggered {
+        restore_anchor();
+        release_unselected_rasters(&probe, &solved, mask_path);
+        return solved;
+    }
+    let mut alone = zoned_pass(src, target, mask_path, base, options, layers, Ok(pair), GlobalArm::Base(&solved));
+    let ships = alone.mode == solved.mode && alone.err_after <= solved.err_after;
+    if trace {
+        eprintln!(
+            "zone alone check: on the base the zoned fit reads {:.5} against {:.5} — {}",
+            alone.err_after,
+            solved.err_after,
+            if ships { "it ships" } else { "the global solve's ships" }
+        );
+    }
+    if ships {
+        release_unselected_rasters(&probe, &alone, mask_path);
+        release_unselected_rasters(&solved, &alone, mask_path);
+        crate::rationale::push_note(
+            &mut alone.recipe.rationale,
+            &mut alone.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_ALONE_SHIPPED,
+                vec![("alone", format!("{:.5}", alone.err_after)), ("solved", format!("{:.5}", solved.err_after))],
+            ),
+        );
+        alone
+    } else {
+        restore_anchor();
+        release_unselected_rasters(&probe, &solved, mask_path);
+        release_unselected_rasters(&alone, &solved, mask_path);
+        solved
+    }
+}
+
+/// [`zone_alone_check`]'s probe by itself, for the tests that read the zone
+/// layer without paying for a global solve first: the two semantic zones
+/// attached alone on `base`, on the ruler a report of the base carries.
+#[cfg(test)]
+pub(super) fn probe_on_base_for_tests(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    mask_path: &crate::store::OwnedRaster,
+    base: &crate::recipe::EditRecipe,
+    pair: (GrayImage, GrayImage),
+) -> FitReport {
+    let options = fit::FitOptions { strength: crate::recipe::GradeStrength::default(), provider: None };
+    let mut seed = fit::rescore_report(src, target, base, base, 0.0, &[]);
+    seed.err_before = seed.err_after;
+    let layers = ZonedLayerOpts { field: false, spatial: false, free_masks: false, detail: false, ..SHIPPED_LAYERS };
+    zoned_pass(src, target, mask_path, base, options, layers, Ok(pair), GlobalArm::Probe(&seed))
+}
+
+/// One pass of the two-region zoned fit over a segmentation: the global
+/// report ([`global_report`]), then the zones and the local sequencer.
+#[allow(clippy::too_many_arguments)]
+fn zoned_pass(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    mask_path: &crate::store::OwnedRaster,
+    base: &crate::recipe::EditRecipe,
+    options: fit::FitOptions<'_>,
+    layers: ZonedLayerOpts,
+    segmented: Result<(GrayImage, GrayImage)>,
+    arm: GlobalArm<'_>,
+) -> FitReport {
     let (mut report, field, first_producer, layout, zones) = match segmented {
         Ok((mut src_mask, mut tgt_mask)) => {
             let refinements = if layers.refine_masks {
@@ -177,14 +370,7 @@ fn fit_recipe_zoned_inner_seeded(
                     .filter(|zone| zone.divergence.is_some_and(|d| d.d >= fit::DIVERGENCE_ZONE))
                     .map(|zone| zone.share)
                     .sum::<f32>();
-                let mut report = fit::fit_recipe_from_promoted_with_disclosure_opts(
-                    src,
-                    target,
-                    base,
-                    divergent_cover >= fit::DIVERGENT_COVER_PROMOTES,
-                    true,
-                    options,
-                );
+                let mut report = global_report(src, target, base, divergent_cover >= fit::DIVERGENT_COVER_PROMOTES, options, arm);
                 local_verdicts(src, target, base, &mut report);
                 for (label, kept, reading) in readings {
                     crate::rationale::push_note(
@@ -210,7 +396,7 @@ fn fit_recipe_zoned_inner_seeded(
                 push_widening_notes(&mut report, &widenings);
                 let field = layers.field
                     .then(|| field::solve_local_field(src, target, &mut report)).flatten();
-                let partitioned = attach_zones_with_divergence(
+                let partitioned = attach_zones_scoped(
                     src,
                     target,
                     &mut report,
@@ -218,6 +404,7 @@ fn fit_recipe_zoned_inner_seeded(
                     &tgt_mask,
                     mask_path,
                     zone_divergence,
+                    arm.bands(),
                 );
                 (
                     report,
@@ -233,18 +420,11 @@ fn fit_recipe_zoned_inner_seeded(
                 .filter(|zone| zone.divergence.is_some_and(|d| d.d >= fit::DIVERGENCE_ZONE))
                 .map(|zone| zone.share)
                 .sum::<f32>();
-            let mut report = fit::fit_recipe_from_promoted_with_disclosure_opts(
-                src,
-                target,
-                base,
-                divergent_cover >= fit::DIVERGENT_COVER_PROMOTES,
-                true,
-                options,
-            );
+            let mut report = global_report(src, target, base, divergent_cover >= fit::DIVERGENT_COVER_PROMOTES, options, arm);
             local_verdicts(src, target, base, &mut report);
             let field = layers.field
                 .then(|| field::solve_local_field(src, target, &mut report)).flatten();
-            let partitioned = attach_zones_with_divergence(
+            let partitioned = attach_zones_scoped(
                 src,
                 target,
                 &mut report,
@@ -252,6 +432,7 @@ fn fit_recipe_zoned_inner_seeded(
                 &tgt_mask,
                 mask_path,
                 zone_divergence,
+                arm.bands(),
             );
             (
                 report,
@@ -265,14 +446,7 @@ fn fit_recipe_zoned_inner_seeded(
         Err(e) => {
             // The provider still rides the fallback: a failed segmentation
             // must not also cost the global fit its correspondence.
-            let mut report = fit::fit_recipe_from_promoted_with_disclosure_opts(
-                src,
-                target,
-                base,
-                false,
-                true,
-                options,
-            );
+            let mut report = global_report(src, target, base, false, options, arm);
             local_verdicts(src, target, base, &mut report);
             crate::rationale::push_note(
                 &mut report.recipe.rationale,
@@ -288,14 +462,17 @@ fn fit_recipe_zoned_inner_seeded(
                 .map(|(_, reading)| reading.proposals.as_slice()).unwrap_or(&[]);
             range::attach_ranges(src, target, &mut report, proposals);
             // No segmentation, no zone whose local contrast could be paired.
-            (report, field, "ranges", Vec::new(), Vec::new())
+            (report, field, "ranges", field::PairedLayout::default(), Vec::new())
         }
     };
     run_local_sequencer(src, target, &mut report, &field, first_producer, mask_path, layers, &layout, &zones);
     report
 }
 
-/// R42. The membership every analysis pixel has in a region the segmenter
+/// R42 and J141: what the two frames' own partitions say about every analysis
+/// pixel ([`field::PairedLayout`]).
+///
+/// `paired` (R42) is the membership the pixel has in a region the segmenter
 /// found in BOTH frames: per pair of rasters the product of the source and
 /// target memberships at analysis size, so a pixel counts only where the same
 /// class sits in the same place on both sides, and the union over the pairs.
@@ -305,24 +482,51 @@ fn fit_recipe_zoned_inner_seeded(
 /// fallback has none. The colour field reads it
 /// (`field::attach_colour_field`) for the cells the pixel-scale evidence
 /// cannot read at all.
-fn paired_layout(
+///
+/// `split` (J141, v1.18.0) is how far the two partitions DISAGREE about the
+/// pixel: half the summed difference of its memberships on the two sides,
+/// over every paired class and the remainder no class holds — the total
+/// variation between the two labelings, 0 where they agree (soft edges that
+/// coincide included) and 1 where the source shows one region and the target
+/// another. A re-synthesised target moves its contours: on the reference pair
+/// the buttes' outlines sit a few pixels off the source's, so beside each
+/// there is a band of source sky whose target pixel is rock and a band of
+/// source rock whose target pixel is sky. Such a pair is not a pair — its
+/// residual is the layout the target was redrawn with, not an edit — and the
+/// colour field does not take its testimony (`field::field_testimony`). A
+/// pixel the target does not have holds no class there; it weighs nothing
+/// in any solve, whichever way this plane reads it.
+pub(super) fn paired_layout(
     src: &DynamicImage,
     target: &DynamicImage,
     pairs: &[(&GrayImage, &GrayImage)],
-) -> Vec<f32> {
+) -> field::PairedLayout {
     let (s_img, t_img) = fit::analysis_pair(src, target);
     let (w, h) = (s_img.width(), s_img.height());
     let presence = fit::presence_of(&t_img);
-    let mut out = vec![0.0f32; w as usize * h as usize];
+    let n = w as usize * h as usize;
+    let mut paired = vec![0.0f32; n];
+    // Per pixel: the summed |source - target| membership over the classes, and
+    // each side's total membership — what is left of 1 is "no class".
+    let (mut apart, mut held_s, mut held_t) = (vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n]);
     for (source, tgt) in pairs {
         let sw = mask_weights(source, w, h);
         let tw = mask_weights(tgt, t_img.width(), t_img.height());
         let tw = fit::with_presence(&tw, presence.as_deref()).into_owned();
-        for ((o, s), t) in out.iter_mut().zip(&sw).zip(&tw) {
-            *o = o.max(s * t);
+        for (i, (s, t)) in sw.iter().zip(&tw).enumerate().take(n) {
+            paired[i] = paired[i].max(s * t);
+            apart[i] += (s - t).abs();
+            held_s[i] += s;
+            held_t[i] += t;
         }
     }
-    out
+    let split = (0..n)
+        .map(|i| {
+            let rest = (held_s[i].min(1.0) - held_t[i].min(1.0)).abs();
+            (0.5 * (apart[i] + rest)).clamp(0.0, 1.0)
+        })
+        .collect();
+    field::PairedLayout { paired, split }
 }
 
 /// The single local producer sequencer shared by the historical two-region
@@ -353,7 +557,7 @@ fn run_local_sequencer(
     first_producer: &str,
     mask_path: &crate::store::OwnedRaster,
     layers: ZonedLayerOpts,
-    layout: &[f32],
+    layout: &field::PairedLayout,
     zones: &[detail::DetailZone],
 ) {
     run_mask_producers(src, target, report, field, first_producer, mask_path, layers);

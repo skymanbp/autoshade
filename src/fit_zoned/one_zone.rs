@@ -391,6 +391,36 @@ pub(super) fn attach_one_zone_as(
     // answer and it used to be a silent one: the zone attached with its colour
     // move and a tone residual nothing had refused, explained, or named. The
     // count is taken inside the solve's own borrow and disclosed after it.
+    // THE TINT-FIRST TRIAL READS ITS TINT BEFORE THE ZONE'S TONE (2026-11-10).
+    // Its hypothesis is that the zone's colour gap is a tint, and a Color tint
+    // holds Oklab lightness while still moving the Rec.601 luma the tone solve
+    // below pairs: a tone solved first spends that luma on its own dials, and
+    // the tint read after it cannot give it back. Measured on the app's own
+    // render of a sky tint of 30 at hue 200 and nothing else
+    // (`self_consistency`): read after the tone the tint itself came out
+    // right (0.297 at 200) under a tone that was not (exposure -0.05, contrast
+    // +2.6, highlights +1.7) and the zone's own paired reading stopped at
+    // 0.0058; read first it is 0.300 at 200, the tone solves to nothing and
+    // the zone reads 0.0008. The tone then answers what the tint leaves, and
+    // the read after it (below) adds what the toned zone still asks to the
+    // tint it carries. The plain and the on-gains solves carry no tint here.
+    let mut carried_tint = (0.0f32, 0.0f32);
+    if colour == ZoneColour::Tint && mode == ZoneMode::Full {
+        let rp = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
+        let pair_weight = |i: usize| {
+            zw_source.get(i).copied().unwrap_or(0.0).min(zw_target.get(i).copied().unwrap_or(0.0))
+        };
+        let coverage = |i: usize| sw.get(i).copied().unwrap_or(0.0);
+        if let Some(first) = super::tint::read_zone_tint(&rp, tgt_eff, &pair_weight, &coverage) {
+            let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
+            m.toning_hue = round1(first.hue);
+            m.toning_amount = round1(first.amount * 100.0);
+            carried_tint = (m.toning_hue, m.toning_amount / 100.0);
+            if crate::config::live_env_os("AUTOSHADE_FIT_TRACE").is_some() {
+                eprintln!("zone {label} tint read before the tone: hue {:.1} amount {:.3} over {} pairs", first.hue, first.amount, first.pairs);
+            }
+        }
+    }
     let mut unsupported_knots: Option<usize> = None;
     let mut diluted_spread: Option<(f32, f32)> = None;
     if mode == ZoneMode::Full {
@@ -590,7 +620,9 @@ pub(super) fn attach_one_zone_as(
             ),
         );
     }
-    // The tint trial's colour move, read on the zone as its tone left it and
+    // The tint trial's colour move, read on the zone as its tone left it —
+    // for the tint-first trial, what the toned zone still asks on top of the
+    // tint it carries from before the tone (above) — and
     // BEFORE the gains and the saturation chase, which then answer only what
     // the tint leaves (a chase run first turns a hue gap into a chroma one
     // the tint then misreads): every paired pixel, neutral and coloured
@@ -604,10 +636,16 @@ pub(super) fn attach_one_zone_as(
         // The mask's own alpha is the tint's coverage: the render scales the
         // shift by the mask weight.
         let coverage = |i: usize| sw.get(i).copied().unwrap_or(0.0);
-        let Some(tint) = super::tint::read_zone_tint(&rp, tgt_eff, &pair_weight, &coverage) else {
+        let Some(tint) = super::tint::read_zone_tint_over(carried_tint, &rp, tgt_eff, &pair_weight, &coverage) else {
             report.recipe.masks.pop();
             return None;
         };
+        if crate::config::live_env_os("AUTOSHADE_FIT_TRACE").is_some() {
+            eprintln!(
+                "zone {label} tint read ({colour:?}): hue {:.1} amount {:.3} over {} pairs ({} neutral)",
+                tint.hue, tint.amount, tint.pairs, tint.neutral
+            );
+        }
         let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
         m.toning_hue = round1(tint.hue);
         m.toning_amount = round1(tint.amount * 100.0);
@@ -851,6 +889,15 @@ pub(super) fn attach_one_zone_as(
     let tone_withheld = luma_ranges.is_some()
         && !luma_cells.is_some_and(|v| v.vouched())
         && luma_shrunk.is_none();
+    if crate::config::live_env_os("AUTOSHADE_FIT_TRACE").is_some() {
+        let m = report.recipe.masks.last().expect("zone mask just pushed");
+        eprintln!(
+            "zone {label} admit ({pairing:?}): solved ev {:+.3} con {:+.1} hi {:+.1} sh {:+.1} wh {:+.1} bl {:+.1} gains {:?} sat {:+.1}; tone ranges {:?} cells {:?} share {:?} withheld {tone_withheld}; colour bands {:?} cells {:?} share {:?} withheld {colour_withheld}",
+            m.exposure_ev, m.contrast, m.highlights, m.shadows, m.whites, m.blacks, m.color_gains, m.saturation,
+            luma_ranges, luma_cells, luma_shrunk.map(|(k, _)| k),
+            hue_bands, hue_cells, hue_shrunk.map(|(k, _)| k)
+        );
+    }
     if tone_withheld {
         let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
         m.exposure_ev = 0.0;

@@ -452,43 +452,8 @@ pub(super) fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: Sol
     // cannot drift from what shipped when a later do-no-harm loop shrinks the
     // mixer or resets the whole recipe; the refusals and the withdrawal
     // verdict are solve facts no re-measurement could recover.
-    let hsl_moved = (0..EVIDENCE_HUE_BANDS)
-        .filter(|&band| {
-            recipe.hsl.hue[band] != 0.0
-                || recipe.hsl.saturation[band] != 0.0
-                || recipe.hsl.luminance[band] != 0.0
-        })
-        .map(|band| {
-            let hue = recipe.hsl.hue[band];
-            format!(
-                "{} {}sat {:+.0} lum {:+.0}",
-                crate::recipe::HSL_BANDS[band],
-                if hue != 0.0 { format!("hue {hue:+.0} ") } else { String::new() },
-                recipe.hsl.saturation[band],
-                recipe.hsl.luminance[band]
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    if !hsl_moved.is_empty() || !solve.hsl.refused.is_empty() {
-        push_note(
-            &mut rationale,
-            &mut notes,
-            Note::new(
-                keys::FIT_NOTE_HSL_BANDS,
-                vec![
-                    ("moved", if hsl_moved.is_empty() { "none".into() } else { hsl_moved }),
-                    (
-                        "refused",
-                        if solve.hsl.refused.is_empty() {
-                            "none".into()
-                        } else {
-                            solve.hsl.refused.clone()
-                        },
-                    ),
-                ],
-            ),
-        );
+    if let Some(mixer) = mixer_note(&recipe, &solve.hsl.refused) {
+        push_note(&mut rationale, &mut notes, mixer);
     }
     if !solve.hsl.vouched.is_empty() {
         push_note(
@@ -502,21 +467,8 @@ pub(super) fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: Sol
     }
     // The colour grade, read off the recipe for the same reason as the
     // mixer: a later do-no-harm loop may have shrunk or reset it.
-    if !recipe.color_grade.is_neutral() {
-        let wheel = |hue: f32, sat: f32| format!("hue {hue:.0} sat {sat:.0}");
-        let cg = &recipe.color_grade;
-        push_note(
-            &mut rationale,
-            &mut notes,
-            Note::new(
-                keys::FIT_NOTE_COLOR_GRADE,
-                vec![
-                    ("shadows", wheel(cg.shadow_hue, cg.shadow_sat)),
-                    ("midtones", wheel(cg.midtone_hue, cg.midtone_sat)),
-                    ("highlights", wheel(cg.highlight_hue, cg.highlight_sat)),
-                ],
-            ),
-        );
+    if let Some(grade) = colour_grade_note(&recipe) {
+        push_note(&mut rationale, &mut notes, grade);
         if let Some((ceiling, asked)) = solve.grade_held {
             push_note(
                 &mut rationale,
@@ -850,6 +802,102 @@ pub fn rescore_report(
     .with_producer_notes(prior)
 }
 
+/// Whether `recipe` carries a mixer value off zero on `band`.
+fn band_moved(recipe: &EditRecipe, band: usize) -> bool {
+    recipe.hsl.hue[band] != 0.0 || recipe.hsl.saturation[band] != 0.0 || recipe.hsl.luminance[band] != 0.0
+}
+
+/// The mixer's sentence for `recipe`: what it moved, read off the recipe, and
+/// the bands the stage's population gate refused that the recipe LEAVES
+/// neutral (`refused`: the stage's `"<band> (<reason>)"` entries, comma
+/// separated; empty or "none" for none). The joint solve moves every
+/// coordinate the law admits, a refused band's among them, and a band it
+/// moved was not left neutral: it is stated once, under what moved. `None`
+/// when nothing moved and nothing is left to name.
+fn mixer_note(recipe: &EditRecipe, refused: &str) -> Option<crate::rationale::Note> {
+    let or_none = |text: String| if text.is_empty() { "none".to_string() } else { text };
+    let moved = hsl_moved_text(recipe);
+    let left: Vec<&str> = refused
+        .split(", ")
+        .filter(|entry| !entry.is_empty() && *entry != "none")
+        .filter(|entry| {
+            let name = entry.split(" (").next().unwrap_or(entry);
+            !(0..EVIDENCE_HUE_BANDS).any(|band| crate::recipe::HSL_BANDS[band] == name && band_moved(recipe, band))
+        })
+        .collect();
+    (!moved.is_empty() || !left.is_empty()).then(|| {
+        crate::rationale::Note::new(
+            crate::rationale::keys::FIT_NOTE_HSL_BANDS,
+            vec![("moved", or_none(moved)), ("refused", or_none(left.join(", ")))],
+        )
+    })
+}
+
+/// What the mixer moved, as the report states it: read off `recipe`, one
+/// entry per band with a value off zero; empty when none has.
+fn hsl_moved_text(recipe: &EditRecipe) -> String {
+    (0..EVIDENCE_HUE_BANDS)
+        .filter(|&band| band_moved(recipe, band))
+        .map(|band| {
+            let hue = recipe.hsl.hue[band];
+            format!(
+                "{} {}sat {:+.0} lum {:+.0}",
+                crate::recipe::HSL_BANDS[band],
+                if hue != 0.0 { format!("hue {hue:+.0} ") } else { String::new() },
+                recipe.hsl.saturation[band],
+                recipe.hsl.luminance[band]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The colour grade's sentence, read off `recipe`; `None` at a neutral grade.
+fn colour_grade_note(recipe: &EditRecipe) -> Option<crate::rationale::Note> {
+    let cg = &recipe.color_grade;
+    let wheel = |hue: f32, sat: f32| format!("hue {hue:.0} sat {sat:.0}");
+    (!cg.is_neutral()).then(|| {
+        crate::rationale::Note::new(
+            crate::rationale::keys::FIT_NOTE_COLOR_GRADE,
+            vec![
+                ("shadows", wheel(cg.shadow_hue, cg.shadow_sat)),
+                ("midtones", wheel(cg.midtone_hue, cg.midtone_sat)),
+                ("highlights", wheel(cg.highlight_hue, cg.highlight_sat)),
+            ],
+        )
+    })
+}
+
+/// The mixer's and the grade's sentences stated again in place — in `notes`
+/// and in the rendered `rationale` — from what `recipe` carries NOW
+/// ([`mixer_note`], on the refusals the sentence already names;
+/// [`colour_grade_note`]). A mixer sentence with nothing moved and nothing
+/// left to name, and a grade sentence (with its ceiling's) at a neutral
+/// grade, are withdrawn.
+fn restate_notes(rationale: &mut String, notes: &mut Vec<crate::rationale::Note>, recipe: &EditRecipe) {
+    use crate::rationale::{keys, render_one};
+    let grade = colour_grade_note(recipe);
+    let mut restated = Vec::with_capacity(notes.len());
+    for note in std::mem::take(notes) {
+        let next = if note.key == keys::FIT_NOTE_HSL_BANDS {
+            let refused = note.args.iter().find(|(k, _)| *k == "refused").map_or("", |(_, v)| v.as_str());
+            mixer_note(recipe, refused)
+        } else if note.key == keys::FIT_NOTE_COLOR_GRADE {
+            grade.clone()
+        } else if note.key == keys::FIT_NOTE_COLOR_GRADE_HELD && grade.is_none() {
+            None
+        } else {
+            Some(note.clone())
+        };
+        let (was, is) = (render_one(&note), next.as_ref().map(render_one).unwrap_or_default());
+        if was != is && let Some(at) = rationale.find(&was) {
+            rationale.replace_range(at..at + was.len(), &is);
+        }
+        restated.extend(next);
+    }
+    *notes = restated;
+}
+
 impl FitReport {
     /// A reading of J* taken after the report was composed — the terminal
     /// full-size one — becomes the report's residual: the confidence is read
@@ -869,6 +917,17 @@ impl FitReport {
                 Note::new(keys::FIT_NOTE_FAR, vec![("err_after", format!("{err_after:.2}"))]),
             );
         }
+    }
+
+    /// The mixer's and the grade's sentences stated again from the recipe
+    /// (v1.18.0, J135): the terminal re-read may set a band value or a wheel
+    /// back after the report was composed
+    /// (`pipeline::reread_at_full_size`, [`super::confirm_at_export`]), and
+    /// every sentence about a control is derived from the recipe that ships.
+    pub(crate) fn restate_mixer_and_grade(&mut self) {
+        let mut rationale = std::mem::take(&mut self.recipe.rationale);
+        restate_notes(&mut rationale, &mut self.notes, &self.recipe);
+        self.recipe.rationale = rationale;
     }
 
     /// R33 §H. [`rescore_report`] regenerates the GLOBAL solve's account from
@@ -908,5 +967,60 @@ impl FitReport {
             );
         }
         self
+    }
+}
+
+#[cfg(test)]
+mod restatement {
+    use super::*;
+    use crate::rationale::{Note, keys, push_note, render_one};
+
+    /// J135. A report composed for a recipe with two band values and a grade,
+    /// after one band value and the grade were set back: the mixer's sentence
+    /// names the band that is left (its refusals unchanged), the grade's
+    /// sentence and its ceiling's are gone, and every other sentence stands
+    /// byte for byte — in the notes and in the rendered rationale alike. A
+    /// band the stage refused and the recipe moves is stated once, under
+    /// what moved, and is listed as left neutral again only when the recipe
+    /// leaves it so. MUTATION: restate from the composed arguments instead of
+    /// the recipe; list every refused band whatever the recipe carries.
+    #[test]
+    fn the_mixer_and_grade_sentences_follow_the_recipe() {
+        let mut recipe = EditRecipe::default();
+        recipe.hsl.hue[5] = 20.0;
+        recipe.hsl.saturation[4] = 0.7;
+        recipe.color_grade.shadow_sat = 12.0;
+        let (mut rationale, mut notes) = (String::from("Summary."), Vec::new());
+        push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_JOINT_NONE));
+        let composed = mixer_note(&recipe, "Red (one-sided), Aqua (one-sided)").expect("two band values");
+        assert_eq!(composed.args[1], ("refused", "Red (one-sided)".to_string()), "Aqua is moved, not left neutral");
+        push_note(&mut rationale, &mut notes, composed);
+        push_note(&mut rationale, &mut notes, colour_grade_note(&recipe).expect("a grade off neutral"));
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(keys::FIT_NOTE_COLOR_GRADE_HELD, vec![("ceiling", "10".into()), ("asked", "12".into())]),
+        );
+        push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_NOT_SAME_FRAME));
+        assert!(rationale.contains("Aqua sat +1") && rationale.contains("Blue hue +20"), "premise: {rationale}");
+
+        recipe.hsl.saturation[4] = 0.0;
+        recipe.color_grade = Default::default();
+        restate_notes(&mut rationale, &mut notes, &recipe);
+
+        let keys_left: Vec<&str> = notes.iter().map(|n| n.key).collect();
+        assert_eq!(keys_left, vec![keys::FIT_NOTE_JOINT_NONE, keys::FIT_NOTE_HSL_BANDS, keys::FIT_NOTE_NOT_SAME_FRAME]);
+        let mixer = &notes[1];
+        assert_eq!(mixer.args, vec![("moved", "Blue hue +20 sat +0 lum +0".to_string()), ("refused", "Red (one-sided)".to_string())]);
+        let rendered: String = std::iter::once("Summary.".to_string()).chain(notes.iter().map(render_one)).collect();
+        assert_eq!(rationale, rendered, "the rationale is its notes, in order");
+        assert!(!rationale.contains("Aqua"), "{rationale}");
+
+        // Nothing moved and nothing refused: the mixer's sentence is withdrawn.
+        let (mut rationale, mut notes) = (String::new(), Vec::new());
+        push_note(&mut rationale, &mut notes, Note::new(keys::FIT_NOTE_HSL_BANDS, vec![("moved", "Aqua sat +1 lum +0".into()), ("refused", "none".into())]));
+        restate_notes(&mut rationale, &mut notes, &EditRecipe::default());
+        assert!(notes.is_empty() && rationale.is_empty(), "{rationale:?}");
+        assert!(mixer_note(&EditRecipe::default(), "").is_none() && mixer_note(&EditRecipe::default(), "none").is_none());
     }
 }

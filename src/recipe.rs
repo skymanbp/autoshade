@@ -5745,7 +5745,7 @@ mod tests {
         assert!(!wrapped.grid_fits_shape(), "an overflowing shape fits no grid");
         assert!(!wrapped.renderable(), "…so it is not renderable");
         let mut px = vec![[0.5f32; 3]; 4];
-        crate::render::apply_colour_field(&mut px, 2, 2, Some(&wrapped), None);
+        crate::render::apply_colour_field(&mut px, 2, 2, Some(&wrapped), &crate::render::FieldFrame::default(), None);
         assert!(px.iter().all(|p| *p == [0.5; 3]), "the render leaves the frame alone");
 
         let sound = ColourField {

@@ -3319,6 +3319,60 @@ fn a_step_the_target_itself_carries_is_not_charged_as_a_seam() {
     path.remove();
 }
 
+/// The soft ruler's owed treatment is the correction's own law where the
+/// gate hands it over (`boundary::Owed`), and the settled side's median
+/// multiplier only where it does not. The law here is one no multiplier
+/// describes — every pixel's red falls by the same 0.06 whatever its level,
+/// as a tint's move is set by the pixel and not by a ratio — applied through
+/// an eight-pixel feather in haze whose band rows alternate far above and far
+/// below the settled level. Read exactly, the band's shortfall is the
+/// feather's alone: half the law's step where the mask is half; and a target
+/// that is the candidate itself carries every bit of it, so nothing is
+/// charged. Read through the multiplier, the law's departure from a ratio is
+/// a rim of its own, twice the size.
+#[test]
+fn the_soft_rim_reads_a_law_that_is_no_multiplier_through_its_own_full_treatment() {
+    let (w, h) = (HAZY.0 as usize, HAZY.1 as usize);
+    let weights: Vec<f32> = (0..w * h).map(|i| (((i % w) as f32 - 28.0) / 8.0).clamp(0.0, 1.0)).collect();
+    let reference: Vec<[f32; 3]> = (0..w * h)
+        .map(|i| {
+            let (x, y) = (i % w, i / w);
+            let level = match (29..36).contains(&x) {
+                true if y % 2 == 0 => 0.8,
+                true => 0.2,
+                false => 0.5,
+            };
+            [level; 3]
+        })
+        .collect();
+    let full: Vec<[f32; 3]> = reference.iter().map(|p| [p[0] - 0.06, p[1], p[2]]).collect();
+    let rendered: Vec<[f32; 3]> = reference
+        .iter()
+        .zip(&full)
+        .zip(&weights)
+        .map(|((p, f), a)| std::array::from_fn(|c| p[c] + a * (f[c] - p[c])))
+        .collect();
+    let owed = super::boundary::Owed { rendered: [&full[..], &reference[..]], frozen: [&full[..], &reference[..]] };
+    let exact = super::boundary::boundary_rim_owed(
+        Some(&rendered), &reference, &rendered, &rendered, &weights, HAZY.0, HAZY.1, None, Some(owed),
+    );
+    let transported =
+        boundary_rim_toward(Some(&rendered), &reference, &rendered, &rendered, &weights, HAZY.0, HAZY.1, None);
+    assert_eq!(exact.transitions, h, "one transition a row: {exact:?}");
+    assert!((exact.colour - 0.03).abs() <= 1e-5, "half the law's step where the mask is half: {exact:?}");
+    assert_eq!((exact.charged, exact.colour_charged), (0.0, 0.0), "the target carries the same step: {exact:?}");
+    assert!(
+        transported.colour > exact.colour + 0.02,
+        "the multiplier reads the law's departure from a ratio as a rim: {transported:?} against {exact:?}"
+    );
+    // Without a target the exact form still charges the feather's own
+    // shortfall — the rule the ceiling exists for — and nothing else.
+    let alone = super::boundary::boundary_rim_owed(
+        None, &reference, &rendered, &rendered, &weights, HAZY.0, HAZY.1, None, Some(owed),
+    );
+    assert!(alone.colour_charged >= 0.03 - BOUNDARY_STEP_FLOOR - 1e-5, "{alone:?}");
+}
+
 /// R37. The unasked part of an introduced step, by cases.
 #[test]
 fn the_unasked_part_of_a_step_is_its_excess_over_what_the_target_carries() {
@@ -7438,7 +7492,7 @@ fn pinned_zone_fixture(zone_evidence: Option<f32>, name: &str) -> (f32, f32) {
         &tgt,
         &mut report,
         crate::recipe::GradeStrength::new(0.85),
-        &[],
+        &super::field::PairedLayout::default(),
     );
     let read = |note: &crate::rationale::Note, key: &str| -> f32 {
         note.args.iter().find(|(k, _)| *k == key).map(|(_, v)| v.parse().unwrap()).unwrap()

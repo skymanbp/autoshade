@@ -582,14 +582,108 @@ pub(super) fn apply_develop_with_rasters(
 /// the pixel's share in that corner's zone, the owner count transposed
 /// ([`field_owned_weights`]); `None`, or a field with no owners, is the plain
 /// read, bit for bit.
+///
+/// v1.18.0 (J133): `frame` states where this frame's pixels read the grid's
+/// two spatial axes ([`FieldFrame`]) — each pixel's own place by default, the
+/// original-frame point it shows on a lens-corrected plate — so the fit that
+/// solves a field on a frame reads it exactly as every develop of that frame
+/// will.
 pub(crate) fn apply_colour_field(
     data: &mut [[f32; 3]],
     w: usize,
     h: usize,
     field: Option<&crate::recipe::ColourField>,
+    frame: &FieldFrame,
     sky: Option<&[f32]>,
 ) {
-    apply_colour_field_in(data, w, h, field, None, sky);
+    apply_colour_field_in(data, w, h, field, frame.corrected(), sky);
+}
+
+/// The frame a colour field is read in: where each pixel of the frame finds
+/// its place on the grid's two spatial axes.
+///
+/// A stored field's grid spans the ORIGINAL frame (the sensor's), like every
+/// other stored position in a recipe. On pixels nothing has moved, a pixel's
+/// own place is that point; on a lens-corrected frame
+/// ([`MaskFrame::Corrected`]) it is the original-frame point the pixel shows.
+/// The engine has read it so since v1.17.0. The FIT did not (until v1.18.0,
+/// J133): it solved the field at each analysis pixel's own place whatever
+/// frame its source plate was in, so on a corrected plate — a RAW whose
+/// camera stage resamples the lens, a source moved into a corrected target's
+/// frame — the grid was solved on one frame's coordinates and read on the
+/// other's by every develop of the recipe it wrote: the field landed
+/// displaced by the lens's distortion, and the solve's own render was not
+/// the render `develop_preview` gives the same recipe on the same pixels.
+/// This value is the ONE statement of the frame both sides read: the fit
+/// builds it for its analysis plate ([`FieldFrame::of_preview`]) and solves,
+/// renders and judges the field through it ([`FieldFrame::axes`],
+/// [`apply_colour_field`]). The default is the pixel's own place.
+#[derive(Clone, Default)]
+pub(crate) struct FieldFrame(Option<std::sync::Arc<MaskUnwarp>>);
+
+impl std::fmt::Debug for FieldFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() { "FieldFrame(lens-corrected)" } else { "FieldFrame(own place)" })
+    }
+}
+
+impl FieldFrame {
+    /// The frame [`develop_preview`] reads a field in on `reference` under
+    /// `recipe`: the decision [`apply_develop`] makes for the stored-position
+    /// passes — a registered plate in the corrected frame reads through the
+    /// camera stage's resample, every other preview at its own place.
+    pub(crate) fn of_preview(reference: &DynamicImage, recipe: &EditRecipe) -> Self {
+        let validated = crate::recipe::ValidatedRecipe::new(recipe);
+        let geom = geometry_profile(&validated);
+        let frame = MaskFrame::of_base(&geom, validated.lens_distortion, super::canvas::plate_corrected(reference));
+        Self(match frame {
+            MaskFrame::Corrected { .. } => {
+                frame.unwarp((reference.width() as f32, reference.height() as f32)).map(std::sync::Arc::new)
+            }
+            _ => None,
+        })
+    }
+
+    fn corrected(&self) -> Option<&MaskUnwarp> {
+        self.0.as_deref()
+    }
+
+    /// This frame's read of a `w`×`h` raster on a grid `x` by `y` vertices.
+    pub(crate) fn axes(&self, w: usize, h: usize, x: usize, y: usize) -> FieldAxes<'_> {
+        FieldAxes::new(w, h, x, y, self.corrected())
+    }
+}
+
+/// A frame's read of the colour field's two spatial axes ([`FieldFrame`]):
+/// ONE implementation, for the engine's read ([`apply_colour_field_in`]) and
+/// the fit's splat (`fit_field`).
+pub(crate) struct FieldAxes<'a> {
+    xs: Vec<f32>,
+    ys: Vec<f32>,
+    w: usize,
+    h: usize,
+    limits: (usize, usize),
+    corrected: Option<&'a MaskUnwarp>,
+}
+
+impl<'a> FieldAxes<'a> {
+    fn new(w: usize, h: usize, x: usize, y: usize, corrected: Option<&'a MaskUnwarp>) -> Self {
+        Self { xs: field_axis(w, x), ys: field_axis(h, y), w, h, limits: (x, y), corrected }
+    }
+
+    /// Pixel `i`'s coordinate on the grid's x and y axes: its own place
+    /// (pixel `i` of `n` at `i·(limit − 1)/(n − 1)`, [`field_axis`]), or, on a
+    /// corrected frame, the original-frame point it shows on the same axis law.
+    pub(crate) fn at(&self, i: usize) -> (f32, f32) {
+        let Some(u) = self.corrected else { return (self.xs[i % self.w], self.ys[i / self.w]) };
+        // Pixel position `p` (continuous, `p = i` at a pixel centre) on the axis.
+        let on_axis = |p: f32, n: usize, limit: usize| {
+            if n <= 1 { 0.0 } else { (p * (limit - 1) as f32 / (n - 1) as f32).clamp(0.0, (limit - 1) as f32) }
+        };
+        let (w, h) = (self.w, self.h);
+        let (sx, sy) = u.source_point(((i % w) as f32 + 0.5) / w as f32, ((i / w) as f32 + 0.5) / h as f32);
+        (on_axis(sx * w as f32 - 0.5, w, self.limits.0), on_axis(sy * h as f32 - 0.5, h, self.limits.1))
+    }
 }
 
 /// The field's read is the owner count transposed (v1.18.0, "a zone's
@@ -648,20 +742,10 @@ fn apply_colour_field_in(
     }
     let sky = sky.filter(|s| s.len() == data.len() && !field.owners.is_empty());
     let guide = field_guide_luma(data, w, h);
-    let (xs, ys) = (field_axis(w, field.x), field_axis(h, field.y));
-    // Pixel position `p` (continuous, `p = i` at a pixel centre) on the axis.
-    let on_axis = |p: f32, n: usize, limit: usize| {
-        if n <= 1 { 0.0 } else { (p * (limit - 1) as f32 / (n - 1) as f32).clamp(0.0, (limit - 1) as f32) }
-    };
+    let axes = FieldAxes::new(w, h, field.x, field.y, corrected);
     let amount = field.amount.clamp(0.0, 1.0);
     for (i, c) in data.iter_mut().enumerate() {
-        let (gx, gy) = match corrected {
-            None => (xs[i % w], ys[i / w]),
-            Some(u) => {
-                let (sx, sy) = u.source_point(((i % w) as f32 + 0.5) / w as f32, ((i / w) as f32 + 0.5) / h as f32);
-                (on_axis(sx * w as f32 - 0.5, w, field.x), on_axis(sy * h as f32 - 0.5, h, field.y))
-            }
-        };
+        let (gx, gy) = axes.at(i);
         let coords = [gx, gy, guide[i].clamp(0.0, 1.0) * (field.b - 1) as f32];
         let limits = [field.x, field.y, field.b];
         let (mut low, mut high, mut frac) = ([0usize; 3], [0usize; 3], [0.0f32; 3]);
@@ -689,12 +773,18 @@ fn apply_colour_field_in(
             }
         }
         let g = guide[i];
+        let before = *c;
         for ch in 0..3 {
             let d = std::f64::consts::LN_2 * c[ch] as f64 * p[0]
                 + c[ch] as f64 * p[1 + ch]
                 + (c[ch] - g) as f64 * p[4];
             c[ch] = (c[ch] + amount * d as f32).clamp(0.0, 1.0);
         }
+        // The field is solved from measured pixels (a channel at the white
+        // clip never testifies, `fit_field`); a pixel blown in every channel
+        // takes its brightness from the field and no hue
+        // (`keep_blown_white`).
+        *c = keep_blown_white(&before, *c);
     }
 }
 

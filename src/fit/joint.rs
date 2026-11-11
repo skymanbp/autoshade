@@ -1,8 +1,15 @@
 //! The joint objective (v1.18.0, RULING-1180-joint-r1): ONE objective the
-//! global solve minimises, with one penalty per degree of freedom and hard
-//! constraints that only reject —
+//! global solve minimises, with one penalty per control off the base, priced
+//! by its reach, and hard constraints that only reject —
 //!
-//! `F(x) = J*(render(x)) + FIT_QUANT · dof(x)`,  `x` admissible under `G`.
+//! `F(x) = J*(render(x)) + FIT_QUANT · price(x)`,  `x` admissible under `G`,
+//!
+//! `price(x)` the controls off the base, each weighed by the share of the
+//! frame it reaches ([`price_of`], [`Reach`]; until 2026-11-10 every control
+//! cost one whole quantum, `dof(x)`, and a mixer band that reaches 4 % of the
+//! frame could never buy it: read on the frame its gain is divided by its
+//! share, gates/j125 — a +20 band hue the fit itself rendered read 0.0008 at
+//! the base and shipped nothing).
 //!
 //! Before this the stages each fitted a different statistic (a luma map, a
 //! chroma ratio, channel CDFs) and J* only ever accepted or rejected what
@@ -495,17 +502,21 @@ impl Point {
     }
 }
 
-/// What one evaluation of a point reads: its render, J*, dof and F.
+/// What one evaluation of a point reads: its render, J*, dof, price and F.
 #[derive(Clone)]
 pub(super) struct Eval {
     pub(super) px: Vec<[f32; 3]>,
     pub(super) j: f32,
+    /// The controls off the base, counted ([`dof_of`]): a reading.
     pub(super) dof: usize,
+    /// The same controls, each weighed by its reach ([`price_of`]): what F
+    /// charges.
+    pub(super) price: f32,
 }
 
 impl Eval {
     pub(super) fn f(&self) -> f32 {
-        self.j + FIT_QUANT * self.dof as f32
+        self.j + FIT_QUANT * self.price
     }
 }
 
@@ -524,9 +535,18 @@ pub(super) struct Joint<'c, 'a> {
     /// The classes [`Joint::repair`] scaled the start on and the fraction of
     /// the stages' estimate each kept — the report's seed disclosure.
     scaled: std::cell::RefCell<Vec<(Refusal, f32)>>,
+    /// The class that refused the last candidate [`Joint::admissible`] read:
+    /// it is asked first of the next one.
+    last_refused: std::cell::Cell<Option<Refusal>>,
+    /// Each class's last leave-one-out frame with the recipe it renders, in
+    /// [`CLASSES`]' order ([`Joint::class_frame`]).
+    frames: std::cell::RefCell<[Option<ClassFrame>; 4]>,
     /// The solve's number in this process, for the trace.
     id: u32,
 }
+
+/// A candidate WITHOUT one class, and its render.
+type ClassFrame = (EditRecipe, std::rc::Rc<Vec<[f32; 3]>>);
 
 /// The solves started in this process, numbered for the trace.
 static SOLVES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -565,6 +585,8 @@ impl<'c, 'a> Joint<'c, 'a> {
             spent: std::cell::Cell::new((0.0, 0.0, 0.0)),
             phases: std::cell::RefCell::new(Vec::new()),
             scaled: std::cell::RefCell::new(Vec::new()),
+            last_refused: std::cell::Cell::new(None),
+            frames: std::cell::RefCell::new(Default::default()),
             id: SOLVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
@@ -591,7 +613,15 @@ impl<'c, 'a> Joint<'c, 'a> {
         }
         let moved: Vec<String> =
             global_controls().into_iter().filter(|c| c.differs(&p.recipe, self.ctx.base)).map(|c| c.name()).collect();
-        eprintln!("J#{} {phase}: J* {:.5} dof {} F {:.5} [{}]", self.id, e.j, e.dof, e.f(), moved.join(", "));
+        eprintln!(
+            "J#{} {phase}: J* {:.5} dof {} price {:.3} F {:.5} [{}]",
+            self.id,
+            e.j,
+            e.dof,
+            e.price,
+            e.f(),
+            moved.join(", ")
+        );
         if phase == "start" {
             eprintln!("J#{} start recipe: {}", self.id, serde_json::to_string(&p.recipe).unwrap_or_default());
         }
@@ -608,7 +638,7 @@ impl<'c, 'a> Joint<'c, 'a> {
     }
 
     /// A sub-solve's readings, added to this one's.
-    fn absorb(&self, sub: &Joint<'_, '_>) {
+    pub(super) fn absorb(&self, sub: &Joint<'_, '_>) {
         self.renders.set(self.renders.get() + sub.renders.get());
         let (r, j, g) = self.spent.get();
         let (sr, sj, sg) = sub.spent.get();
@@ -694,6 +724,213 @@ pub(super) fn dof_of(r: &EditRecipe, b: &EditRecipe, law: render::WbLaw) -> usiz
     }
     n
 }
+
+/// The share of the frame each priced control reaches, read ONCE per solve on
+/// the base render (RULING-1180-joint-r2, addendum 2026-11-10; Q-SC-3's "a
+/// mixer band earns on its own hue-range population" stated as the price).
+/// A control's price is FIT_QUANT times its reach: FIT_QUANT is the rounding
+/// of a per-pixel mean over the frame, and a control that reaches a share
+/// `s` of the frame can round — and can earn — only on that share, so read
+/// on the frame its quantum is `s · FIT_QUANT` (`ships_local` reads the same
+/// fact from the other side: on a region's own pixels the quantum is
+/// FIT_QUANT again). The exposure, contrast, the four tone sliders (R22's
+/// band clause is this law's older form for them and stays), vibrance,
+/// saturation, the white balance, the global wheel and every curve knot
+/// reach the whole frame.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Reach {
+    /// The mixer bands (`render::HSL_CENTERS` order): the mean over the base
+    /// render of the pixel's partition weight in the band times the chroma
+    /// gate's fade ([`render::hsl_band_reach`], the engine's own reach).
+    pub(crate) band: [f32; 8],
+    /// The shadow, midtone and highlight wheels: the mean of the grade's
+    /// region weight ([`render::color_grade_regions`]).
+    pub(crate) wheel: [f32; 3],
+}
+
+impl Reach {
+    /// The membership of every base pixel in each priced population: the
+    /// eight mixer bands, then the shadow, midtone and highlight regions.
+    pub(super) fn populations(base_px: &[[f32; 3]], grade: &crate::recipe::ColorGrade) -> Vec<Vec<f32>> {
+        let mut out = vec![vec![0.0f32; base_px.len()]; 11];
+        for (i, p) in base_px.iter().enumerate() {
+            let (h, _, _) = render::rgb_to_hsl(p[0], p[1], p[2]);
+            if let Some((b0, b1, w1, fade)) = render::hsl_band_reach(h, render::chroma(p)) {
+                out[b0][i] += (1.0 - w1) * fade;
+                out[b1][i] += w1 * fade;
+            }
+            for (k, w) in render::color_grade_regions(grade, luma601(p)).into_iter().enumerate() {
+                out[8 + k][i] = w;
+            }
+        }
+        out
+    }
+
+    pub(crate) fn of(base_px: &[[f32; 3]], grade: &crate::recipe::ColorGrade) -> Self {
+        let n = base_px.len().max(1) as f64;
+        let populations = Self::populations(base_px, grade);
+        let share = |k: usize| (populations[k].iter().map(|w| *w as f64).sum::<f64>() / n) as f32;
+        Reach { band: std::array::from_fn(share), wheel: std::array::from_fn(|k| share(8 + k)) }
+    }
+
+    /// A reach as it is priced: no control is free, so a population under
+    /// [`EVIDENCE_MIN_SHARE`] — the share below which the evidence model
+    /// gives a range no standing — is priced at that share.
+    fn priced(share: f32) -> f32 {
+        share.clamp(EVIDENCE_MIN_SHARE, 1.0)
+    }
+
+    fn band_price(&self, b: usize) -> f32 {
+        Self::priced(self.band[b])
+    }
+
+    /// Wheel `w` in the descent's order (0 shadows, 1 midtones, 2
+    /// highlights, 3 global).
+    fn wheel_price(&self, w: usize) -> f32 {
+        self.wheel.get(w).map_or(1.0, |s| Self::priced(*s))
+    }
+
+    /// The reach a coordinate's quantum is read at ([`Joint::descend`]).
+    pub(super) fn of_coord(&self, c: Coord) -> f32 {
+        match c {
+            Coord::HslHue(b) | Coord::HslSaturation(b) | Coord::HslLuminance(b) => self.band_price(b),
+            Coord::GradeA(w) | Coord::GradeB(w) | Coord::GradeLum(w) => self.wheel_price(w),
+            _ => 1.0,
+        }
+    }
+
+    /// The reach one of the elimination's controls is priced at: a mixer
+    /// band value its band's, a regional wheel its region's, every other
+    /// control the whole frame.
+    fn of_control(&self, c: Control) -> f32 {
+        match c {
+            Control::HslHue(b) | Control::HslSaturation(b) | Control::HslLuminance(b) => self.band_price(b),
+            Control::GradeShadows => self.wheel_price(0),
+            Control::GradeMidtones => self.wheel_price(1),
+            Control::GradeHighlights => self.wheel_price(2),
+            _ => 1.0,
+        }
+    }
+}
+
+/// price(x): [`dof_of`] with each control weighed by its reach ([`Reach`]).
+pub(super) fn price_of(r: &EditRecipe, b: &EditRecipe, law: render::WbLaw, reach: &Reach) -> f32 {
+    let scalar = |x: f32, y: f32| if x != y { 1.0f32 } else { 0.0 };
+    let mut n = scalar(r.exposure_ev, b.exposure_ev)
+        + scalar(r.contrast, b.contrast)
+        + scalar(r.highlights, b.highlights)
+        + scalar(r.shadows, b.shadows)
+        + scalar(r.whites, b.whites)
+        + scalar(r.blacks, b.blacks)
+        + scalar(r.vibrance, b.vibrance)
+        + scalar(r.saturation, b.saturation);
+    let (pr, pb) = (law.point_of(r), law.point_of(b));
+    n += scalar(pr.0, pb.0) + scalar(pr.1, pb.1);
+    for i in 0..8 {
+        n += reach.band_price(i)
+            * (scalar(r.hsl.hue[i], b.hsl.hue[i])
+                + scalar(r.hsl.saturation[i], b.hsl.saturation[i])
+                + scalar(r.hsl.luminance[i], b.hsl.luminance[i]));
+    }
+    let (g, h) = (&r.color_grade, &b.color_grade);
+    for (w, (hue, sat, lum)) in [
+        ((g.shadow_hue, h.shadow_hue), (g.shadow_sat, h.shadow_sat), (g.shadow_lum, h.shadow_lum)),
+        ((g.midtone_hue, h.midtone_hue), (g.midtone_sat, h.midtone_sat), (g.midtone_lum, h.midtone_lum)),
+        ((g.highlight_hue, h.highlight_hue), (g.highlight_sat, h.highlight_sat), (g.highlight_lum, h.highlight_lum)),
+        ((g.global_hue, h.global_hue), (g.global_sat, h.global_sat), (g.global_lum, h.global_lum)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let sat_moved = scalar(sat.0, sat.1);
+        let moved = sat_moved + scalar(lum.0, lum.1) + if sat_moved > 0.0 { scalar(hue.0, hue.1) } else { 0.0 };
+        n += reach.wheel_price(w) * moved;
+    }
+    for c in Curve::ALL {
+        n += free_knots(c.of(r)) as f32;
+    }
+    n
+}
+
+/// What the finished recipe owes at the terminal full-size re-read, in
+/// FIT_QUANT (`pipeline::reread_at_full_size`): its global controls' price by
+/// reach, capped at one quantum; one whole quantum, as before, once it
+/// carries a local layer (each of those earned FIT_QUANT on its own pixels,
+/// and the frame-wide reading is the guard they were always read by) or no
+/// priced control at all (a detail-only recipe is read on the detail ruler,
+/// outside F).
+pub(crate) fn terminal_price(recipe: &EditRecipe, base: &EditRecipe, base_px: &[[f32; 3]]) -> f32 {
+    if recipe.masks != base.masks || recipe.colour_field != base.colour_field {
+        return 1.0;
+    }
+    let price = price_of(recipe, base, render::WbLaw::of(base), &Reach::of(base_px, &base.color_grade));
+    if price > 0.0 { price.min(1.0) } else { 1.0 }
+}
+
+/// The controls priced by their reach, confirmed where they ship (v1.18.0,
+/// J135; `pipeline::reread_at_full_size`). A control priced under one quantum
+/// is kept for less than FIT_QUANT of the frame's J*, and the frame the
+/// search reads is the fit's PREVIEW: the preview and the export of one
+/// recipe sit 0.0032-0.0214 of J* apart on the corpus (R14), and not evenly —
+/// a tone with a clamp does not commute with the resample, so the difference
+/// lives on the highlights, and a band that lives there can earn its small
+/// price on the preview's own error. Measured on the self-consistency gate
+/// (exposure -0.4 EV on the seaside frame, rel1180 gates/v3-exp-trace and
+/// j135-exp, 2026-11-10): the solve started on the exposure, the whites and
+/// the saturation at 0.00667 of J* on the preview and finished on the
+/// exposure with Aqua saturation +0.7 at 0.00618, the band priced at 0.042
+/// of a quantum; as the export renders it that recipe read 0.00005, and the
+/// exposure alone reads 0.00000 there. Under one whole quantum per control
+/// (until `Reach`) no such control could be bought; under the reach it must
+/// be asked again of the frame that ships.
+///
+/// So each such control off the base is read against its own ABSENCE — the
+/// control at the base, nothing re-polished: the export has no search — as
+/// the export renders both (`read`, the terminal re-read's own reading; a
+/// recipe it cannot read is left alone), on F at the control's price, a tie
+/// to the absence as in [`Joint::eliminate`]; the smallest absence first, and
+/// every other control read again after a drop. A control that reaches the
+/// whole frame earned FIT_QUANT on the preview and is judged with the recipe
+/// (R13b). `reading` is `recipe`'s own export reading; returns the reading of
+/// the recipe as it leaves and the names of the controls set back.
+pub(crate) fn confirm_at_export(
+    recipe: &mut EditRecipe,
+    base: &EditRecipe,
+    base_px: &[[f32; 3]],
+    mut reading: f32,
+    read: &dyn Fn(&EditRecipe) -> Option<f32>,
+) -> (f32, Vec<String>) {
+    let reach = Reach::of(base_px, &base.color_grade);
+    let f = |r: &EditRecipe, j: f32| j + FIT_QUANT * price_of(r, base, render::WbLaw::of(base), &reach);
+    let mut dropped = Vec::new();
+    loop {
+        let with = f(recipe, reading);
+        let mut least: Option<(f32, f32, Control, EditRecipe)> = None;
+        for c in global_controls() {
+            if !c.differs(recipe, base) || reach.of_control(c) >= 1.0 {
+                continue;
+            }
+            let mut without = recipe.clone();
+            c.reset(&mut without, base);
+            let Some(j) = read(&without) else { continue };
+            let absent = f(&without, j);
+            if absent <= with && least.as_ref().is_none_or(|(smallest, ..)| absent < *smallest) {
+                least = Some((absent, j, c, without));
+            }
+        }
+        let Some((_, j, c, without)) = least else {
+            return (reading, dropped);
+        };
+        *recipe = without;
+        reading = j;
+        dropped.push(c.name());
+    }
+}
+
+/// A control's absence as [`Joint::absence`] reads it: the point, its
+/// reading, what its repair scaled, and whether the law refused the point as
+/// it stood (it was then scaled into G and read there, unpolished).
+type Absence = (Point, Eval, Vec<(Refusal, f32)>, bool);
 
 /// The coordinates a refused class holds ([`Joint::repair`]).
 fn class_coords(class: Refusal, p: &Point) -> Vec<Coord> {
@@ -822,7 +1059,8 @@ impl<'c, 'a> Joint<'c, 'a> {
         let j = look_err_with_evidence(&px, self.ctx.tp, self.ctx.evidence);
         let (sr, sj, sg) = self.spent.get();
         self.spent.set((sr, sj + started.elapsed().as_secs_f32(), sg));
-        Eval { px, j, dof: self.dof(&p.recipe) }
+        let price = price_of(&p.recipe, self.ctx.base, self.ctx.law, &self.ctx.reach);
+        Eval { px, j, dof: self.dof(&p.recipe), price }
     }
 
     /// G, read on the candidate's render: the strength budget's white-balance
@@ -839,50 +1077,109 @@ impl<'c, 'a> Joint<'c, 'a> {
     /// refused an EXPOSURE because the pixels of a one-sided hue band had
     /// moved with it — the calibration pair stuck at −0.04 EV where −0.7
     /// reads 0.112 against 0.162). Reject only.
+    ///
+    /// The verdict is [`Joint::refusal`] finding no class, asked in another
+    /// order: the class that refused the last candidate first. A refused
+    /// candidate is refused whichever class is read first, and beside a
+    /// law's edge it is the same class that refuses step after step — on
+    /// p36's elimination 632 of 688 refused steps were the curves', the last
+    /// class in the stages' order, each read after three classes that
+    /// admitted it and a render apiece (legs/V6, 2026-11-11).
     pub(super) fn admissible(&self, p: &Point, px: &[[f32; 3]]) -> bool {
-        self.refusal(p, px).is_none()
+        self.charged_to_g(|| {
+            if self.over_budget(p) {
+                return false;
+            }
+            let first = self.last_refused.get();
+            let order = first.into_iter().chain(CLASSES.into_iter().filter(|class| Some(*class) != first));
+            for class in order {
+                if self.class_refused(p, px, class) {
+                    self.last_refused.set(Some(class));
+                    return false;
+                }
+            }
+            true
+        })
     }
 
-    /// The class G refuses `p` on, if any ([`Refusal`]); the gates' own
-    /// renders are charged to G, not to rendering.
+    /// The class G refuses `p` on, if any ([`Refusal`]) — the FIRST refused
+    /// one in the stages' order ([`CLASSES`]); the gates' own renders are
+    /// charged to G, not to rendering.
     pub(super) fn refusal(&self, p: &Point, px: &[[f32; 3]]) -> Option<Refusal> {
+        self.charged_to_g(|| {
+            if self.over_budget(p) {
+                return Some(Refusal::WhiteBalance);
+            }
+            CLASSES.into_iter().find(|&class| self.class_refused(p, px, class))
+        })
+    }
+
+    /// Whether G refuses `p` on `class` ITSELF — the gain budget for the
+    /// white balance, and the class's own verdict between its two frames —
+    /// whatever the other classes read. [`Joint::refusal`] cannot say this
+    /// for a class behind another refused one, and the repair's bisection
+    /// asked it exactly that until 2026-11-10 ([`Joint::repair_class`]).
+    fn refused_on(&self, p: &Point, px: &[[f32; 3]], class: Refusal) -> bool {
+        self.charged_to_g(|| {
+            (class == Refusal::WhiteBalance && self.over_budget(p)) || self.class_refused(p, px, class)
+        })
+    }
+
+    /// `read`, with the renders it takes charged to G, not to rendering.
+    fn charged_to_g<T>(&self, read: impl FnOnce() -> T) -> T {
         let started = std::time::Instant::now();
         let before = self.spent.get();
-        let verdict = self.refusal_inner(p, px);
+        let verdict = read();
         let (_, sj, _) = self.spent.get();
         self.spent.set((before.0, sj, before.2 + started.elapsed().as_secs_f32()));
         verdict
     }
 
-    fn refusal_inner(&self, p: &Point, px: &[[f32; 3]]) -> Option<Refusal> {
+    /// The strength budget's white-balance gains, exceeded.
+    fn over_budget(&self, p: &Point) -> bool {
+        let (r, base, law) = (&p.recipe, self.ctx.base, self.ctx.law);
+        law.point_of(r) != law.point_of(base) && !wb_gains_fit_budget(law.gains(law.point_of(r)), self.ctx.budget)
+    }
+
+    /// One class's verdict under the law: read between the candidate WITHOUT
+    /// the class and the candidate's render (`without_class`); the base's
+    /// own render where the frame without the class is the base. A class at
+    /// the base moved nothing and is not read.
+    fn class_refused(&self, p: &Point, px: &[[f32; 3]], class: Refusal) -> bool {
         let ctx = self.ctx;
-        let (r, base, law) = (&p.recipe, ctx.base, ctx.law);
-        if law.point_of(r) != law.point_of(base) && !wb_gains_fit_budget(law.gains(law.point_of(r)), ctx.budget) {
-            return Some(Refusal::WhiteBalance);
+        let (r, base) = (&p.recipe, ctx.base);
+        let w_r = without_class(base, r, class);
+        if w_r == *r {
+            return false;
         }
-        // Each class that moved, read between the candidate WITHOUT it and
-        // the candidate's render (`without_class`); the base's own render
-        // where the frame without the class is the base.
-        let withhold = ctx.budget.vetoes == VetoPolicy::Withhold;
-        let trace = crate::config::live_env_os("AUTOSHADE_G_TRACE").is_some();
+        let own = (w_r != *base).then(|| self.class_frame(class, w_r));
+        let before: &[[f32; 3]] = own.as_ref().map_or(ctx.sp, |frame| frame.as_slice());
         let cells = &ctx.validity;
-        for class in CLASSES {
-            let w_r = without_class(base, r, class);
-            if w_r == *r {
-                continue;
-            }
-            let own = (w_r != *base).then(|| self.render(&w_r));
-            let before: &[[f32; 3]] = own.as_deref().unwrap_or(ctx.sp);
-            let v = cells.judge(class.class(), before, px);
-            if !v.admits(withhold) {
-                if trace {
-                    eprintln!("G {}", cells.describe(class.class(), &v));
-                    eprintln!("G asks {}", cells.describe_asks(&cells.asks(class.class(), before)));
-                }
-                return Some(class);
-            }
+        let v = cells.judge(class.class(), before, px);
+        let refused = !v.admits(ctx.budget.vetoes == VetoPolicy::Withhold);
+        if refused && crate::config::live_env_os("AUTOSHADE_G_TRACE").is_some() {
+            eprintln!("G {}", cells.describe(class.class(), &v));
+            eprintln!("G asks {}", cells.describe_asks(&cells.asks(class.class(), before)));
         }
-        None
+        refused
+    }
+
+    /// The render of `w_r`, a candidate WITHOUT `class`: that class's
+    /// leave-one-out frame. The last one of each class is kept with its
+    /// recipe: a step inside a class leaves the candidate without it where
+    /// it was (a channel-curve knot's step is read against the same
+    /// curve-less frame as the knot's before it), and that frame is the one
+    /// already rendered.
+    fn class_frame(&self, class: Refusal, w_r: EditRecipe) -> std::rc::Rc<Vec<[f32; 3]>> {
+        let slot = CLASSES.iter().position(|c| *c == class).unwrap_or(0);
+        if let Some((recipe, frame)) = &self.frames.borrow()[slot]
+            && *recipe == w_r
+        {
+            return frame.clone();
+        }
+        let frame = std::rc::Rc::new(self.render(&w_r));
+        self.frames.borrow_mut()[slot] = Some((w_r, frame.clone()));
+        frame
     }
 
     /// A start that violates G has the class G refuses RE-ESTIMATED from
@@ -895,7 +1192,19 @@ impl<'c, 'a> Joint<'c, 'a> {
     /// ([`Refusal`]); each class is re-estimated at most [`REPAIR_REFITS`]
     /// times, since the other classes' re-estimations move its frame. A
     /// class at λ = 0 is the base's, which that class is
-    /// admitted at by construction (nothing moved). Until 2026-11-07 the
+    /// admitted at by construction (nothing moved).
+    ///
+    /// Two classes can end on their laws' edges together, each one's repair
+    /// moving the other's frame by a hair: the rounds then end with the start
+    /// still refused, and it is scaled WHOLE toward the base — every class at
+    /// one fraction — to the largest G admits, by the same bisection; it is
+    /// the base only where no fraction is admitted. Until 2026-11-10 it was
+    /// the base at once, and the bisection of one class read
+    /// [`Joint::refusal`], the FIRST refused class: on the night RAW pair the
+    /// white balance's every trial the tone was refused at counted as
+    /// admitted, the two walked each other down by 1/64 a round, the start
+    /// fell to the base and the global solve shipped nothing (J* 0.17560 →
+    /// 0.17560 where the proposal read 0.14403, legs/V1). Until 2026-11-07 the
     /// refused class was reset whole, and a tint the law refused for the sky
     /// took the rocks' Kelvin with it; until 2026-11-08 it was scaled alone,
     /// and a shape refused on DIRECTION in a cell (the haze pair's mid-aqua
@@ -903,14 +1212,23 @@ impl<'c, 'a> Joint<'c, 'a> {
     /// at every λ, so the class fell to the base and the pair closed 8 % of
     /// its gap (RULING-1180-joint-r2, addendum 2026-11-08 23:40).
     pub(super) fn repair(&self, p: &mut Point) -> Eval {
+        self.repair_with(p, REPAIR_REFITS)
+    }
+
+    /// [`Joint::repair`] with each class re-estimated from the cells' asks at
+    /// most `refits_each` times before it is scaled: [`REPAIR_REFITS`] for a
+    /// start, none for an absence ([`Joint::absence`]), which is scaled only
+    /// — the same rounds, each one evaluation, G's reading and one bisection.
+    fn repair_with(&self, p: &mut Point, refits_each: usize) -> Eval {
         let base = self.ctx.base;
         let trace = crate::config::live_env_os("AUTOSHADE_G_TRACE").is_some();
+        let noted = self.scaled.borrow().len();
         let mut refits = [0usize; 4];
         for _ in 0..CLASSES.len() * (REPAIR_REFITS + 1) {
             let e = self.eval(p);
             let Some(refusal) = self.refusal(p, &e.px) else { return e };
             let slot = CLASSES.iter().position(|c| *c == refusal).unwrap_or(0);
-            let refit = refits[slot] < REPAIR_REFITS;
+            let refit = refits[slot] < refits_each;
             if refit {
                 refits[slot] += 1;
             }
@@ -925,17 +1243,54 @@ impl<'c, 'a> Joint<'c, 'a> {
             }
         }
         // Still inadmissible after every class was re-estimated and scaled:
-        // the base is admissible by construction (nothing moved, the as-shot
-        // gains), so the start is the base.
+        // the whole start toward the base, to the largest fraction G admits.
+        // The base is admissible by construction (nothing moved, the as-shot
+        // gains), and is the start where no fraction is.
         let e = self.eval(p);
         if self.admissible(p, &e.px) {
             return e;
         }
-        if trace {
-            eprintln!("G repair: still refused after every class was re-estimated and scaled; the start is the base");
+        let moved: Vec<Refusal> =
+            CLASSES.into_iter().filter(|&class| without_class(base, &p.recipe, class) != p.recipe).collect();
+        let coords: Vec<Coord> = moved.iter().flat_map(|&class| class_coords(class, p)).collect();
+        let (mut lo, mut hi) = (0.0f32, 1.0f32);
+        let mut kept: Option<(Point, Eval)> = None;
+        for _ in 0..REPAIR_BISECTIONS {
+            let mid = 0.5 * (lo + hi);
+            let mut trial = p.clone();
+            scale_class(&mut trial, &coords, mid, self.ctx);
+            let e = self.eval(&trial);
+            if self.admissible(&trial, &e.px) {
+                lo = mid;
+                kept = Some((trial, e));
+            } else {
+                hi = mid;
+            }
         }
-        *p = p.at_base(base);
-        self.eval(p)
+        if trace {
+            eprintln!(
+                "G repair: still refused after every class was re-estimated and scaled; the whole start scaled toward the base to {lo:.3}"
+            );
+        }
+        // Each class's fraction of its estimate, as the report reads it: what
+        // its own repair kept, times the whole's.
+        {
+            let mut scaled = self.scaled.borrow_mut();
+            for class in moved {
+                let own = scaled[noted..].iter().rev().find(|(c, _)| *c == class).map_or(1.0, |(_, l)| *l);
+                scaled.push((class, own * lo));
+            }
+        }
+        match kept {
+            Some((trial, e)) => {
+                *p = trial;
+                e
+            }
+            None => {
+                *p = p.at_base(base);
+                self.eval(p)
+            }
+        }
     }
 
     /// One class of `p` repaired, `p` refused on it: with `refit`, the
@@ -944,7 +1299,9 @@ impl<'c, 'a> Joint<'c, 'a> {
     /// it; otherwise, or failing that, the class SCALED toward the base
     /// ([`scale_class`]) to the largest fraction the whole is admitted at on
     /// it, by bisection ([`REPAIR_BISECTIONS`]; the base of the class at
-    /// λ = 0 is admitted for it by construction). Returns the fraction of
+    /// λ = 0 is admitted for it by construction). "On it" is the class's OWN
+    /// verdict ([`Joint::refused_on`]), whatever another class reads at the
+    /// trial: another class's refusal is that class's repair. Returns the fraction of
     /// the estimate kept: 1.0 for the re-estimate, λ for the scaling. Used
     /// by [`Joint::repair`] on the start and by [`Joint::descend`] on a step
     /// refused on a class the other coordinates' move put past its law
@@ -963,7 +1320,7 @@ impl<'c, 'a> Joint<'c, 'a> {
             // exposure and the curve that undoes it on the withheld top are
             // admitted together and refused apart, gates/j120).
             let moved = without_class(ctx.base, &full.recipe, class) != full.recipe;
-            if moved && self.refusal(&full, &ef.px) != Some(class) {
+            if moved && !self.refused_on(&full, &ef.px, class) {
                 *p = full;
                 return 1.0;
             }
@@ -976,7 +1333,7 @@ impl<'c, 'a> Joint<'c, 'a> {
             let mut trial = p.clone();
             scale_class(&mut trial, &coords, mid, ctx);
             let e = self.eval(&trial);
-            if self.refusal(&trial, &e.px) == Some(class) {
+            if self.refused_on(&trial, &e.px, class) {
                 hi = mid;
             } else {
                 lo = mid;
@@ -1017,7 +1374,7 @@ impl<'c, 'a> Joint<'c, 'a> {
         p: &Point,
         coords: &[Coord],
         steps: f32,
-        resolution: f32,
+        resolution: &dyn Fn(Coord) -> f32,
         value: &mut dyn FnMut(&Point) -> f32,
         v0: f32,
     ) -> Vec<(Coord, f32)> {
@@ -1051,7 +1408,7 @@ impl<'c, 'a> Joint<'c, 'a> {
                 found = Some((h, dv));
                 // Clamped short of the probe: the bound is reached.
                 let at_bound = (w - v).abs() < 0.999 * h * q;
-                if dv.abs() >= resolution || at_bound {
+                if dv.abs() >= resolution(c) || at_bound {
                     break;
                 }
                 h *= 2.0;
@@ -1152,7 +1509,7 @@ impl<'c, 'a> Joint<'c, 'a> {
         let mut m0 = m(&q);
         for &steps in &STEP_MULTIPLIERS {
             for _ in 0..ASK_FIT_PASS_CAP {
-                let mut d = self.direction(&q, &coords, steps, unit, &mut m, m0);
+                let mut d = self.direction(&q, &coords, steps, &|_| unit, &mut m, m0);
                 let mut accepted = false;
                 while !d.is_empty() {
                     let trial = self.apply(&q, &d);
@@ -1228,7 +1585,9 @@ impl<'c, 'a> Joint<'c, 'a> {
             for _ in 0..DESCENT_PASS_CAP {
                 let j0 = best.j;
                 let mut j = |q: &Point| -> f32 { self.eval(q).j };
-                let full = self.direction(p, &coords, steps, FIT_QUANT, &mut j, j0);
+                // Each coordinate's effect is read at the resolution the
+                // objective resolves ITS move at: its own price.
+                let full = self.direction(p, &coords, steps, &|c| FIT_QUANT * ctx.reach.of_coord(c), &mut j, j0);
                 let mut d = full.clone();
                 let mut accepted = false;
                 let (mut dropped, mut restricted): (Vec<Refusal>, bool) = (Vec::new(), false);
@@ -1422,13 +1781,63 @@ impl<'c, 'a> Joint<'c, 'a> {
         best
     }
 
+    /// The ABSENCE of control `c` at `p` ([`Joint::eliminate`]): the control at
+    /// the base and pinned, the rest re-polished at the quantum — inside G.
+    /// The rest was solved WITH the control, so the point without it can be
+    /// one the law refuses (the withheld-top toy's curve holds its withheld
+    /// range only beside the exposure it was solved with: alone it moved the
+    /// cell luma[0.82-0.88] by 0.0104 against an ask of +0.2029,
+    /// gates/v1-withheld). Such an absence is brought into G by the cheap
+    /// half of a start's repair — each refused class SCALED toward the base
+    /// to the largest fraction its own law admits ([`Joint::repair_with`], no
+    /// re-estimation; the dropped control staying pinned) — and priced THERE,
+    /// as it stands: re-estimating and re-polishing a displaced point is a
+    /// solve without the control, and a control whose absence needs one to
+    /// read no worse is kept. Until 2026-11-10 a refused absence was read as
+    /// it stood, and where it read the lower F the elimination shipped a
+    /// recipe the law refuses. From then until 2026-11-11 (J129) it was
+    /// repaired exactly as a start is — each refused class re-estimated from
+    /// the cells' asks ([`Joint::ask_fit`]) up to three times, the whole then
+    /// polished — once per control off the base and again for every later
+    /// control after a drop: p36 enters the elimination with 21 controls off
+    /// the base, its first absence took eight minutes of a traced fit
+    /// (legs/V5t, 2026-11-11), and neither p36 nor p39 ended a fit in rounds
+    /// V2-V5 (10.6 hours in V5, against 1209 s and 2676 s on the build
+    /// before, legs/J17). Returns the point, its reading, what the repair
+    /// scaled, and whether the point was displaced.
+    fn absence(&self, p: &Point, c: Control) -> Absence {
+        let ctx = self.ctx;
+        let mut without = p.clone();
+        for coord in Coord::of_control(c, p) {
+            let v = without.base_value(coord, ctx);
+            coord.set(&mut without, v, ctx);
+        }
+        c.reset(&mut without.recipe, ctx.base);
+        let mut sub = Joint::with_pinned(ctx, self.pinned.clone());
+        sub.pinned.extend(Coord::of_control(c, p));
+        let start = sub.eval(&without);
+        let displaced = !sub.admissible(&without, &start.px);
+        let e = if displaced {
+            sub.repair_with(&mut without, 0)
+        } else {
+            sub.polish(&mut without, start, &STEP_MULTIPLIERS[3..])
+        };
+        self.absorb(&sub);
+        let scaled = sub.scaled.borrow().clone();
+        (without, e, scaled, displaced)
+    }
+
     /// The self-consistency law read whole (RULING-1180-joint-r1 (4)): for
     /// each control off the base, its ABSENCE is the point with the control
     /// at the base and pinned, re-polished at the quantum; the control is
     /// dropped when the absence is no worse on F — a tie goes to the simpler
     /// recipe — unless it is one of the four band sliders and earns on the
     /// luminance band it acts on (R22, the frame a guard). Smallest absence
-    /// first, repeated until a pass drops nothing. Returns what was dropped.
+    /// first, repeated until a pass drops nothing. An absence the law refuses
+    /// as it stands is read scaled into G, unpolished ([`Joint::absence`]);
+    /// where it is the one kept, the point is settled at the quantum before
+    /// the next control is read against it — an unsettled point would lend
+    /// its own slack to every later absence. Returns what was dropped.
     pub(super) fn eliminate(&mut self, p: &mut Point, best: &mut Eval) -> Vec<Control> {
         let ctx = self.ctx;
         let bands = look::luma_bands(ctx.tp, ctx.evidence);
@@ -1444,63 +1853,36 @@ impl<'c, 'a> Joint<'c, 'a> {
         loop {
             let candidates: Vec<Control> =
                 global_controls().into_iter().filter(|c| c.differs(&p.recipe, ctx.base)).collect();
-            let mut absences: Vec<(f32, Control, Point, Eval)> = Vec::new();
+            let mut absences: Vec<(f32, Control, Absence)> = Vec::new();
             for c in candidates {
-                let mut without = p.clone();
-                for coord in Coord::of_control(c, p) {
-                    let v = without.base_value(coord, ctx);
-                    coord.set(&mut without, v, ctx);
-                }
-                c.reset(&mut without.recipe, ctx.base);
-                let mut sub = Joint::with_pinned(ctx, self.pinned.clone());
-                sub.pinned.extend(Coord::of_control(c, p));
-                let start = sub.eval(&without);
-                let e = if sub.admissible(&without, &start.px) {
-                    sub.polish(&mut without, start, &STEP_MULTIPLIERS[3..])
-                } else {
-                    start
-                };
-                self.absorb(&sub);
-                absences.push((e.f(), c, without, e));
+                let absence = self.absence(p, c);
+                absences.push((absence.1.f(), c, absence));
             }
             absences.sort_by(|a, b| a.0.total_cmp(&b.0));
             let mut changed = false;
-            for (_, c, without, e) in absences {
-                if changed {
-                    // The pass's absences were read on the state they judge;
-                    // after a drop the state moved, so this one is read again.
+            for (_, c, absence) in absences {
+                // The pass's absences were read on the state they judge;
+                // after a drop the state moved, so this one is read again.
+                let (mut without, mut e, scaled, displaced) = if changed {
                     if !c.differs(&p.recipe, ctx.base) {
                         continue;
                     }
-                    let mut again = p.clone();
-                    c.reset(&mut again.recipe, ctx.base);
-                    for coord in Coord::of_control(c, p) {
-                        let v = again.base_value(coord, ctx);
-                        coord.set(&mut again, v, ctx);
-                    }
-                    let mut sub = Joint::with_pinned(ctx, self.pinned.clone());
-                    sub.pinned.extend(Coord::of_control(c, p));
-                    let start = sub.eval(&again);
-                    let e = if sub.admissible(&again, &start.px) {
-                        sub.polish(&mut again, start, &STEP_MULTIPLIERS[3..])
-                    } else {
-                        start
-                    };
-                    self.absorb(&sub);
-                    if self.keeps(c, &bands, &solved, &reading(&e), best, &e) {
-                        continue;
-                    }
-                    *p = again;
-                    *best = e;
+                    self.absence(p, c)
                 } else {
-                    if self.keeps(c, &bands, &solved, &reading(&e), best, &e) {
-                        continue;
-                    }
-                    *p = without;
-                    *best = e;
+                    absence
+                };
+                if self.keeps(c, &bands, &solved, &reading(&e), best, &e) {
+                    continue;
                 }
+                self.pinned.extend(Coord::of_control(c, &without));
+                if displaced {
+                    e = self.polish(&mut without, e, &STEP_MULTIPLIERS[3..]);
+                }
+                *p = without;
+                *best = e;
+                // What the absence's repair scaled is this solve's to report.
+                self.scaled.borrow_mut().extend(scaled);
                 solved = reading(best);
-                self.pinned.extend(Coord::of_control(c, p));
                 dropped.push(c);
                 changed = true;
             }
@@ -1528,4 +1910,59 @@ impl<'c, 'a> Joint<'c, 'a> {
             && earns_on_its_band(c, bands, solved, without)
     }
 
+}
+
+#[cfg(test)]
+mod export_confirmation {
+    use super::*;
+
+    /// J135. A recipe of three controls — the exposure, a Blue hue and an
+    /// Aqua saturation — whose export reads: 0.00005 with the Aqua
+    /// saturation in it and nothing without; 0.00079 more without the Blue
+    /// hue; 0.03 more without the exposure. The Aqua saturation is set back
+    /// (its absence is no worse on F), the Blue hue is kept (its absence
+    /// costs more than its price: a fifth of the frame is blue), and the
+    /// exposure — a whole-frame control — is never asked: the readings are
+    /// the two band values' in the mixer's order (Aqua before Blue), then the
+    /// Blue hue's again on the recipe as the drop left it. MUTATION: ask
+    /// every control (drop the reach test) and a
+    /// fourth reading is taken with the exposure at the base; keep ties
+    /// (`absent < with`) and nothing changes here, which is why the second
+    /// case reads a tie.
+    #[test]
+    fn a_reach_priced_control_is_kept_only_where_its_absence_is_worse_as_exported() {
+        let base = EditRecipe::default();
+        let mut base_px = vec![[0.5f32, 0.5, 0.5]; 70];
+        base_px.extend(vec![[0.2f32, 0.3, 0.8]; 20]);
+        base_px.extend(vec![[0.2f32, 0.8, 0.8]; 10]);
+        let (aqua, blue) = (4, 5);
+        let mut recipe = base.clone();
+        recipe.exposure_ev = -0.4;
+        recipe.hsl.hue[blue] = 20.0;
+        recipe.hsl.saturation[aqua] = 0.7;
+        let asked = std::cell::RefCell::new(Vec::new());
+        let read = |r: &EditRecipe| -> Option<f32> {
+            asked.borrow_mut().push((r.exposure_ev, r.hsl.hue[blue], r.hsl.saturation[aqua]));
+            let mut j = 0.0f32;
+            if r.hsl.saturation[aqua] != 0.0 { j += 0.00005; }
+            if r.hsl.hue[blue] == 0.0 { j += 0.00079; }
+            if r.exposure_ev == 0.0 { j += 0.03; }
+            Some(j)
+        };
+        let (reading, dropped) = confirm_at_export(&mut recipe, &base, &base_px, 0.00005, &read);
+        assert_eq!(dropped, vec!["Aqua saturation".to_string()]);
+        assert_eq!((recipe.exposure_ev, recipe.hsl.hue[blue], recipe.hsl.saturation[aqua]), (-0.4, 20.0, 0.0));
+        assert_eq!(reading, 0.0);
+        assert_eq!(*asked.borrow(), vec![(-0.4, 20.0, 0.0), (-0.4, 0.0, 0.7), (-0.4, 0.0, 0.0)]);
+
+        // A tie goes to the absence: a band value whose absence reads exactly
+        // its price more is set back.
+        let reach = Reach::of(&base_px, &base.color_grade);
+        let price = FIT_QUANT * reach.of_control(Control::HslSaturation(aqua));
+        let mut tied = base.clone();
+        tied.hsl.saturation[aqua] = 5.0;
+        let read = |r: &EditRecipe| Some(if r.hsl.saturation[aqua] == 0.0 { price } else { 0.0 });
+        let (reading, dropped) = confirm_at_export(&mut tied, &base, &base_px, 0.0, &read);
+        assert_eq!((dropped.len(), tied.hsl.saturation[aqua], reading), (1, 0.0, price));
+    }
 }

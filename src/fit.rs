@@ -41,13 +41,14 @@
 //!      structural and luma-range evidence survives. Outside J* by
 //!      construction: the detail ruler is its own.
 //!   5. **Per-band colour mixer and the colour cast** — `hsl.saturation`,
-//!      `hsl.luminance` and the band hues from each ACR band's OWN population
-//!      statistics, admitted by the two-sided population gate the rest of the
-//!      module reads and budgeted by strength; the per-channel CDF residuals
+//!      `hsl.luminance` and `hsl.hue` from the paired pixels where the frame
+//!      pairs, the two amounts from each ACR band's OWN population statistics
+//!      (and no hue) where it does not, on the bands the two-sided population
+//!      gate admits, budgeted by strength; the per-channel CDF residuals
 //!      as red/green/blue curves, whose SHAPE only the curve stage solves.
 //!
 //! Then the JOINT OBJECTIVE judges ([`joint`]): one function the global solve
-//! minimises, `F(x) = J*(render(x)) + FIT_QUANT · dof(x)`, over every
+//! minimises, `F(x) = J*(render(x)) + FIT_QUANT · price(x)`, over every
 //! coordinate the stages estimated, under constraints that only reject
 //! (`G`, read on every candidate render: the strength budget's white-balance
 //! gains, and the ONE control-validity law ([`validity`]) on each class
@@ -87,6 +88,7 @@ use image::DynamicImage;
 
 use crate::recipe::{CurvePoint, EditRecipe};
 use crate::render;
+mod asks_curve;
 mod atmosphere;
 mod budget;
 mod cast_outcome;
@@ -154,7 +156,7 @@ pub(crate) use evidence::{
 use evidence::{
     DETAIL_EVIDENCE_MIN_IDENTIFIABILITY, EVIDENCE_HUE_BANDS, EVIDENCE_LUMA_BINS, EVIDENCE_MIN_SHARE,
     EVIDENCE_RANGE_SURVIVAL_MIN, atmosphere_wb_from_populations, atmosphere_wb_pairing, paired_wb_closed_loop, paired_wb_from_populations,
-    divergent_range_names, movement_identifiability, source_hue_is_withheld,
+    divergent_range_names, movement_identifiability, shared_content_pairing, source_hue_is_withheld,
     source_luma_is_withheld, weighted_cdf, weighted_mean_chroma,
 };
 #[cfg(test)]
@@ -175,6 +177,7 @@ pub(crate) use hue_gates::{
 };
 #[cfg(test)]
 pub(crate) use hue_gates::moved_unsupported_hue_range_names;
+pub(crate) use joint::{confirm_at_export, terminal_price};
 pub(crate) use look::{look_err_with_evidence, look_terms};
 use look::{round1, round2};
 #[cfg(test)]

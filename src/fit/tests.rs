@@ -648,8 +648,11 @@ fn a_readable_field_chooses_the_pairing_and_not_only_the_population() {
         shared.source_retained,
         shared.target_retained
     );
-    let (pair_tp, pair_w) =
-        atmosphere_wb_pairing(&tp, &evidence, Some(&pc), Some(&shared));
+    // The pairing the solve itself reads (`shared_content_pairing`): the
+    // field's remap, and the evidence model built on that pair.
+    let structural = evidence_model_for(&sp, &tp, w, h);
+    let (pair_tp, judged) = shared_content_pairing(&sp, &tp, &structural, Some(&pc), Some(&shared));
+    let pair_w = atmosphere_wb_pairing(&judged.expect("a readable field is judged on the shared content"));
     // Under the per-range consensus (2026-10-21) a broken pairing no longer
     // shows as a wrong Kelvin — its ranges OPPOSE one another and the stage
     // ships nothing — so the premise is read on the per-range axes the
@@ -4225,7 +4228,7 @@ fn free_atmosphere_wb_for_pair(
     // shared-content reference, so since R30 R2 it had been testing a
     // solve production no longer performed.
     let anchor = base.as_shot_k.unwrap_or(5500.0);
-    let (pair_tp, pair_w) = atmosphere_wb_pairing(&tp, &evidence, None, None);
+    let (pair_tp, pair_w) = (tp.as_slice(), atmosphere_wb_pairing(&evidence));
     let (wb_k, wb_tint, _) =
         atmosphere_wb_from_populations(&sp, pair_tp, &pair_w, render::WbLaw::of(&base));
     (anchor, wb_k, wb_tint)
@@ -5783,7 +5786,9 @@ fn an_invented_half_is_silent_on_the_restricted_cells() {
         "on the whole frame the invented half's cells refuse the re-hue: {}",
         whole.describe(Class::Curves, &verdict)
     );
-    let restricted = Cells::restricted(&cur, &target, &evidence, &shared);
+    // The shared-content model: the frame's, scoped to the membership
+    // (`evidence::shared_content_pairing`).
+    let restricted = Cells::new(&cur, &target, &evidence.scoped(&target, &shared, &shared));
     let verdict = restricted.judge(Class::Curves, &cur, &moved);
     assert!(
         verdict.admits(true),
@@ -5915,10 +5920,11 @@ fn tone_stage_keeps_withheld_luma_range_at_identity() {
     // the tone must leave every withheld cell inside its asks (|move − ask| ≤
     // |ask| + se; a global brightening read move 0.39 against −0.12 and was
     // refused, gates/j104). What ships lifts the paired bottom through the
-    // master curve's knot 47 -> 64 and holds the withheld top within one code
-    // (tone_delta 0.0000): J* 0.047 -> 0.031. The claim is the law's verdict
-    // on the withheld cells, read here as the solver reads it (the tone's
-    // leave-one-out frame against the finished render).
+    // exposure and the master curve and holds the withheld top within one
+    // code (tone_delta 0.0034): J* 0.0467 -> 0.0155 (gates/v6-withheld,
+    // 2026-11-11). The claim is the law's verdict on the withheld cells, read
+    // here as the solver reads it (the tone's leave-one-out frame against the
+    // finished render).
     {
         use super::joint::{without_class, Refusal};
         use super::validity::{Cells, Class};
@@ -5950,16 +5956,34 @@ fn tone_stage_keeps_withheld_luma_range_at_identity() {
         report.recipe.tone_curve,
         report.recipe.rationale,
     );
-    // The paired bottom is served only as far as a tone that holds the
-    // withheld top can serve it: under the bounded Atmosphere curve (user
-    // ruling 2026-11-09) the shape is the stage's — the exposure it proposes
-    // brightens the top against two cells' asks and is refused whole, and the
-    // curve's identity pins over the withheld ranges (J121) carry what the
-    // free knots used to rebuild. What ships never reads worse than the base
-    // (the elimination's own law); how much better is the shape's to earn
-    // (gates/j121-tests: the stage's exposure 0.51 refused at every fraction,
-    // the start the base, 0.0467 either way).
-    assert!(report.err_after <= report.err_before, "the tone that ships never reads worse than the base: {} -> {}", report.err_before, report.err_after);
+    // RE-PINNED 2026-11-11 (gates/v6-withheld; the tone's other carrier and
+    // the elimination's absence inside G, J139). The paired bottom is served
+    // by a tone that holds the withheld top: under the bounded Atmosphere
+    // curve (user ruling 2026-11-09) the shape is the stage's, and the stage
+    // states one tone two ways. The exposure with a curve that undoes it over
+    // the withheld ranges solves to nothing — the exposure brightens the top
+    // against two cells' asks, and what the repair keeps of it earns less
+    // than its price (0.0447 on five controls, eliminated to the base). The
+    // curve alone — the withheld ranges pinned where they stand — is repaired
+    // into an exposure beside the curve, solved the same way and ships:
+    // 0.0467 -> 0.0155 on [exposure, tone curve]. Its exposure stays: without
+    // it the law refuses the point, the absence is scaled into the law and
+    // reads worse there (`Joint::absence`; the elimination took 18 renders).
+    // From 2026-11-10 to J139 that absence was re-estimated from the cells'
+    // asks into [shadows, tone curve] and taken at F 0.03033 against 0.03072
+    // — four units of price for 0.0072 of the look (0.0467 -> 0.0227, 878
+    // renders, gates/v2-withheld). Before that nothing shipped (0.0467 either
+    // way, gates/j121-tests) and, once the curve was proposed, the
+    // elimination took an absence the law refuses (gates/v1-withheld).
+    // MUTATION (J139): repair the absence as a start is repaired
+    // (`repair_with(.., REPAIR_REFITS)` in `Joint::absence`) and the exposure
+    // is dropped.
+    assert!(report.err_after < report.err_before, "the tone that holds the withheld top serves the paired bottom: {} -> {}", report.err_before, report.err_after);
+    assert!(
+        report.recipe.exposure_ev != 0.0,
+        "the exposure stays: its absence is read where the law admits it, not re-estimated into another recipe: {}",
+        report.recipe.rationale
+    );
     eprintln!("WITHHELD_TONE err {} -> {}", report.err_before, report.err_after);
     assert!(report.evidence.globally_same_content);
     assert!(report.evidence.spatial_supported.iter().all(|&supported| supported));
@@ -5979,6 +6003,147 @@ fn tone_stage_keeps_withheld_luma_range_at_identity() {
     let (structural_luma, _) = withheld_range_names(structural);
     assert!(!structural_luma.is_empty());
     assert_eq!(named, &structural_luma, "the note names the structural ranges excluded from Atmosphere");
+}
+
+/// The structural reading of two photographs, imposed on a synthetic pair's
+/// model: every cell past the zone line, no pixel paired. (The instrument
+/// reads two generated frames as more alike than two photographs ever are,
+/// so a synthetic pair cannot earn the reading; the different-photo pair of
+/// the calibration corpus does. `fit_zoned::field::tests` imposes it the
+/// same way for J141.)
+fn two_photographs_model(sp: &[[f32; 3]], tp: &[[f32; 3]], w: u32, h: u32) -> EvidenceModel {
+    let mut ingredients = evidence_model_paired(sp, tp, None, w, h);
+    ingredients.spatial_weights.fill(0.0);
+    ingredients.spatial_divergence.fill(1.2);
+    ingredients.spatial_supported.fill(false);
+    ingredients.paired.fill(false);
+    ingredients.globally_same_content = false;
+    let ones = vec![1.0; sp.len()];
+    ingredients.scoped(tp, &ones, &ones)
+}
+
+/// J142. A frame nothing pairs on has no withheld range: the identity pins
+/// are for ranges withheld FROM a pairing. The withheld-top fixture pairs
+/// (its ground is one scene) and its checker sky is pinned; the same frames
+/// read as two photographs carry no weight on any range, and until J142
+/// every populated range was pinned — the stage's tone was the identity.
+/// MUTATION (J142-D): drop the `pairs_a_population` return in
+/// `withheld_identity_pins` — the two-photographs model pins its ranges.
+#[test]
+fn a_frame_nothing_pairs_on_has_no_withheld_range() {
+    let (w, h) = (192u32, 128u32);
+    let source = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+        let v = if y < 43 { 0.72 + 0.20 * x as f32 / (w - 1) as f32 } else { 0.12 + 0.42 * x as f32 / (w - 1) as f32 };
+        image::Rgb([(v * 255.0).round() as u8; 3])
+    }));
+    let target = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+        let v = if y < 43 {
+            if (x / 3 + y / 3) % 2 == 0 { 0.70 } else { 0.96 }
+        } else {
+            (0.12 + 0.42 * x as f32 / (w - 1) as f32) * 1.12 + 0.025
+        };
+        image::Rgb([(v.clamp(0.0, 1.0) * 255.0).round() as u8; 3])
+    }));
+    let (s_img, t_img) = analysis_pair(&source, &target);
+    let sp = pixels_of(&render::develop_preview(&s_img, &EditRecipe::default()));
+    let tp = pixels_of(&t_img);
+    let one_scene = evidence_model_paired(&sp, &tp, None, s_img.width(), s_img.height());
+    assert!(one_scene.pairs_a_population(), "premise: the ground pairs");
+    let pinned = super::atmosphere::withheld_identity_pins(&sp, &sp, &one_scene);
+    assert!(!pinned.is_empty(), "premise: one scene with a withheld range pins it");
+    let two = two_photographs_model(&sp, &tp, s_img.width(), s_img.height());
+    assert_eq!(two.paired_share(), 0.0, "premise: no cell of the frame pairs");
+    let unweighted = two.luma.iter().filter(|r| r.weight <= 0.0 && r.source_share >= EVIDENCE_MIN_SHARE).count();
+    assert!(unweighted > pinned.len(), "premise: read as two photographs, more ranges carry no weight ({unweighted})");
+    assert!(
+        super::atmosphere::withheld_identity_pins(&sp, &sp, &two).is_empty(),
+        "nothing is withheld from a pairing that does not exist"
+    );
+}
+
+/// J142. Two photographs' tone is carried by the law's asks. The source is
+/// a bright frame — a sky band over a mid-bright ground; the target another
+/// photograph with the same share of the same sky, laid out elsewhere, over
+/// a ground near black. The population asks are the ground far down and the
+/// sky where it is, and one exposure with three quantile knots cannot say
+/// that: the exposure dims the sky against its ask, the quantile curve's top
+/// segment drags the sky's lower half down with the ground, and either shape
+/// is scaled toward the base until the sky is admitted. The asks' curve
+/// holds the sky by construction and takes the ground as far as the slope
+/// budget lets a curve go. MUTATION (J142-C): do not offer the asks' start
+/// (`alternatives` without "the asks carry the tone") — the ground stays
+/// within a few codes of where it was.
+#[test]
+fn two_photographs_tone_is_carried_by_the_asks() {
+    let (w, h) = (192u32, 128u32);
+    let source = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+        let v = if y < 48 { 0.80 + 0.16 * x as f32 / (w - 1) as f32 } else { 0.30 + 0.35 * x as f32 / (w - 1) as f32 };
+        image::Rgb([(v * 255.0).round() as u8; 3])
+    }));
+    let target = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+        let v = if x < 72 { 0.80 + 0.16 * y as f32 / (h - 1) as f32 } else { 0.03 + 0.07 * y as f32 / (h - 1) as f32 };
+        image::Rgb([(v * 255.0).round() as u8; 3])
+    }));
+    let (s_img, t_img) = analysis_pair(&source, &target);
+    let base = EditRecipe::default();
+    let sp = pixels_of(&render::develop_preview(&s_img, &base));
+    let tp = pixels_of(&t_img);
+    let structural = two_photographs_model(&sp, &tp, s_img.width(), s_img.height());
+    assert_eq!(structural.paired_share(), 0.0, "premise: no cell of the frame pairs");
+    let report = fit_atmosphere_from_parts(
+        &s_img,
+        &sp,
+        &tp,
+        &base,
+        false,
+        DivergencePair { fine: None, coarse: None },
+        &structural,
+        false,
+        crate::recipe::GradeStrength::new(0.85),
+        None,
+    );
+    let after = pixels_of(&render::develop_preview(&s_img, &report.recipe));
+    let mean_move = |pick: &dyn Fn(f32) -> bool, size: bool| -> f32 {
+        let moves: Vec<f32> = sp
+            .iter()
+            .zip(&after)
+            .filter(|(s, _)| pick(luma601(s)))
+            .map(|(s, a)| if size { (luma601(a) - luma601(s)).abs() } else { luma601(a) - luma601(s) })
+            .collect();
+        moves.iter().sum::<f32>() / moves.len().max(1) as f32
+    };
+    let ground = mean_move(&|l| l < 0.70, false);
+    let sky = mean_move(&|l| l > 0.78, true);
+    eprintln!(
+        "ASKS_TONE err {} -> {} ground {ground:+.4} sky {sky:.4} ev={:.2} curve={:?}; {}",
+        report.err_before,
+        report.err_after,
+        report.recipe.exposure_ev,
+        report.recipe.tone_curve.iter().map(|k| (k.input, k.output)).collect::<Vec<_>>(),
+        report.recipe.rationale
+    );
+    {
+        use super::joint::{without_class, Refusal};
+        use super::validity::{Cells, Class};
+        let blind = structural.structure_blind(&tp);
+        let cells = Cells::new(&sp, &tp, &blind);
+        let frame = without_class(&base, &report.recipe, Refusal::Tone);
+        let before_px = pixels_of(&render::develop_preview(&s_img, &frame));
+        let verdict = cells.judge(Class::Tone, &before_px, &after);
+        assert!(
+            verdict.admits(false),
+            "the tone that ships is admitted on every range: {}",
+            cells.describe(Class::Tone, &verdict)
+        );
+    }
+    assert!(ground < -0.20, "the ground is taken down as its ranges ask ({ground:+.4}): {}", report.recipe.rationale);
+    assert!(sky < 0.01, "the sky stays where its ranges ask it to ({sky:.4}): {}", report.recipe.rationale);
+    assert!(
+        report.err_after < 0.5 * report.err_before,
+        "the pair closes more than half its distance: {} -> {}",
+        report.err_before,
+        report.err_after
+    );
 }
 
 #[test]

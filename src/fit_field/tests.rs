@@ -27,7 +27,8 @@ fn the_analysis_solve_options_are_the_analyzers_own_constants() {
     // Opening the GAIN bound moves the three gain axes and nothing else: EV
     // and slope keep their constants, because the demand R34 measured is
     // chromatic and a bound widened for no reason stops meaning anything.
-    let wide = FieldSolveOpts { gain: 0.80, local_support: false };
+    assert!(!opts.refine, "…and the solve is the single smooth the ceiling has always read");
+    let wide = FieldSolveOpts { gain: 0.80, local_support: false, refine: false };
     assert_eq!(wide.bounds(0), (BOUNDS_LOW[0], BOUNDS_HIGH[0]), "EV is untouched");
     assert_eq!(wide.bounds(4), (BOUNDS_LOW[4], BOUNDS_HIGH[4]), "slope is untouched");
     for p in 1..=3 {
@@ -123,6 +124,7 @@ fn zero_field(width: u32, height: u32) -> LocalField {
         width,
         height,
         zones: None,
+        frame: crate::render::FieldFrame::default(),
     }
 }
 
@@ -142,7 +144,7 @@ fn field_splat_is_a_partition_of_unity() {
     let (w, h) = FIXTURE;
     let current = ramp(w, h, 0.03, 0.95, 0x51ed_2701);
     let guide = smooth_3tap_luma(&current, w, h);
-    let splat = splat_table(&guide, w, h);
+    let splat = splat_table(&guide, w, h, &crate::render::FieldFrame::default());
     assert_eq!(splat.ids.len(), w * h, "one splat row per pixel");
     for (ids, tri) in splat.ids.iter().zip(&splat.tri) {
         let sum: f32 = tri.iter().sum();
@@ -351,7 +353,7 @@ fn the_engine_renders_the_analyzers_field_bit_for_bit() {
         let field = LocalField::solve(&current, &target, w, h, &evidence).expect("solve");
         let (w, h) = (w as usize, h as usize);
         let guide = smooth_3tap_luma(&current, w, h);
-        let splat = splat_table(&guide, w, h);
+        let splat = splat_table(&guide, w, h, &crate::render::FieldFrame::default());
         let flat: Vec<f32> = field.grid.iter().flatten().copied().collect();
         assert!(flat.iter().any(|&v| v != 0.0), "premise: the solved field is not zero");
         let analyzer = apply_flat(&current, &guide, &splat, &flat);
@@ -1334,7 +1336,7 @@ fn a_soft_zone_edge_reads_the_field_at_its_coverage_without_a_step() {
     assert!((0..h).filter(|&y| coverage(y) > 0.0 && coverage(y) < 1.0).count() == run - 1, "premise: a 24-row ramp");
     let input = vec![[0.35f32, 0.35, 0.35]; w * h];
     let mut read = input.clone();
-    crate::render::apply_colour_field(&mut read, w, h, Some(&field), Some(&sky));
+    crate::render::apply_colour_field(&mut read, w, h, Some(&field), &crate::render::FieldFrame::default(), Some(&sky));
     let row = |y: usize| read[y * w + w / 2][1];
     let lift = row(top) - input[0][1];
     assert!(lift > 0.05, "premise: the sky reads its lift above the ramp: {lift}");
@@ -1380,7 +1382,7 @@ fn a_soft_zone_edge_reads_the_field_at_its_coverage_without_a_step() {
     )
     .expect("the soft-edged toy solves");
     let guide = smooth_3tap_luma(&current, w, h);
-    let mut splat = splat_table(&guide, w, h);
+    let mut splat = splat_table(&guide, w, h, &crate::render::FieldFrame::default());
     let zones = own_splat(&mut splat, &sky);
     assert_eq!(Some(&zones.owners), field.zones.as_ref().map(|z| &z.owners), "one count of the owners");
     let flat: Vec<f32> = field.grid.iter().flatten().copied().collect();
@@ -1428,9 +1430,9 @@ fn a_half_covered_pixel_path_reads_the_field_continuously_across_a_vertex_plane(
     let sky = vec![0.5f32; w * h];
     let input = vec![[0.35f32, 0.35, 0.35]; w * h];
     let mut owned = input.clone();
-    crate::render::apply_colour_field(&mut owned, w, h, Some(&field), Some(&sky));
+    crate::render::apply_colour_field(&mut owned, w, h, Some(&field), &crate::render::FieldFrame::default(), Some(&sky));
     let mut plain = input.clone();
-    crate::render::apply_colour_field(&mut plain, w, h, Some(&field), None);
+    crate::render::apply_colour_field(&mut plain, w, h, Some(&field), &crate::render::FieldFrame::default(), None);
     let y = h / 2;
     let px = |img: &[[f32; 3]], x: usize| img[y * w + x][1];
     let plane = (w - 1) / 2;
@@ -1444,4 +1446,145 @@ fn a_half_covered_pixel_path_reads_the_field_continuously_across_a_vertex_plane(
         widest <= trilinear_step * (1.0 + 1e-3),
         "no step beyond one pixel's trilinear change: {widest:.5} > {trilinear_step:.5}"
     );
+}
+
+/// J133 (v1.18.0). The shipped field's REFINEMENT, on one frame at two
+/// brightnesses. The frame is a luma ramp (0.40-0.70) under a planted lift —
+/// an EV ramp over the lower third, the shape of a horizon glow, 0.4 EV at
+/// its top — and the same frame five times darker (0.08-0.14) under the same
+/// lift. On both the regulariser has a say over the lifted rows: the lift
+/// moves them into luma ranges the frame hardly holds, so their evidence
+/// weight is low (0.10 and 0.28 of a pixel, printed), and one solve leaves
+/// most of what was planted (the share is the mean absolute display code
+/// over the lifted rows against the planted one: 0.635 and 0.578). The
+/// refinement gives part of each back (0.560 and 0.336) — the same system,
+/// its regulariser centred on the first answer (`System::solve`). Each
+/// solve's own convergence is printed with it: both converge, neither stands
+/// on a bound, so what is left is the regulariser's. Mutation: `refine`
+/// ignored, the refined solve IS the single one and neither share falls.
+#[test]
+fn the_refined_solve_gives_back_what_the_regulariser_took_on_a_dark_frame() {
+    let (w, h) = FIXTURE;
+    let lift = |i: usize, _: f32| {
+        let y = (i / w) as f32 / (h - 1) as f32;
+        0.4 * ((y - 0.62) / 0.38).clamp(0.0, 1.0)
+    };
+    // (share one solve leaves, share the refined solve leaves, codes planted)
+    let read = |current: &[[f32; 3]]| {
+        let target = plant(current, w, h, lift);
+        let evidence = fit::evidence_model_for(current, &target, w as u32, h as u32);
+        // mean |target − frame| over the lifted rows, in display codes
+        let apart = |frame: &[[f32; 3]]| {
+            let (mut sum, mut n) = (0.0f64, 0usize);
+            for i in (h * 2 / 3) * w..w * h {
+                for c in 0..3 {
+                    sum += (target[i][c] - frame[i][c]).abs() as f64;
+                    n += 1;
+                }
+            }
+            sum / n as f64 * 255.0
+        };
+        let left = |refine: bool| {
+            let field = LocalField::solve_with(
+                current, &target, w as u32, h as u32, &evidence, TIKHONOV, SMOOTH, ITERATIONS,
+                FieldSolveOpts { local_support: false, refine, ..FieldSolveOpts::default() },
+            )
+            .expect("the planted pair solves");
+            let weight = evidence.source_weights[(h * 2 / 3) * w..].iter().sum::<f32>() / (w * h / 3) as f32;
+            eprintln!(
+                "  refine {refine}: CG {} steps to {:.1e}, {} on a bound, mean evidence weight over the lifted rows {weight:.3}",
+                field.solve.iterations, field.solve.relative_residual, field.saturated
+            );
+            apart(&field.render(current))
+        };
+        let planted = apart(current);
+        (left(false) / planted, left(true) / planted, planted)
+    };
+    let bright = ramp(w, h, 0.40, 0.70, 0x5eed_0134);
+    let dark: Vec<[f32; 3]> = bright.iter().map(|p| p.map(|v| v * 0.2)).collect();
+    let (dark_once, dark_refined, dark_planted) = read(&dark);
+    let (bright_once, bright_refined, bright_planted) = read(&bright);
+    eprintln!(
+        "share of the planted lift left: dark {dark_once:.3} -> {dark_refined:.3} of {dark_planted:.2} codes; bright {bright_once:.3} -> {bright_refined:.3} of {bright_planted:.2} codes"
+    );
+    assert!(dark_planted > 1.0 && bright_planted > 1.0, "premise: a lift of codes on both frames");
+    assert!(
+        dark_refined < 0.8 * dark_once,
+        "on the darker frame the refinement gives back part of what one solve left: {dark_once:.3} -> {dark_refined:.3}"
+    );
+    assert!(
+        bright_refined < 0.95 * bright_once,
+        "and on the brighter one: {bright_once:.3} -> {bright_refined:.3}"
+    );
+}
+
+/// J133 (v1.18.0). A field solved on a LENS-CORRECTED plate is the field the
+/// develop of its recipe renders on that plate. A stored grid spans the
+/// original frame, and on a corrected frame every develop reads each pixel at
+/// the original-frame point it shows; the solve reads the same way
+/// (`FieldFrame`), so its own render and `develop_preview` of the recipe that
+/// carries the field are one picture. The luma ramps ACROSS the frame (every
+/// luma range is two-sided) and the planted lift rises DOWN its bottom rows,
+/// so only the grid's spatial axes can carry it — where the profile moves a
+/// pixel by rows. Mutation (the defect): solved at each pixel's own place,
+/// the develop of the same field reads it displaced and the two renders part
+/// by codes.
+#[test]
+fn a_field_solved_on_a_corrected_plate_is_the_field_its_develop_renders() {
+    use crate::recipe::{EditRecipe, LensProfile};
+    let (w, h) = (384usize, 256usize);
+    // The in-camera knots of the calibration pair that exposed the fit's
+    // geometry (`pipeline`'s `distorting_base`).
+    let distortion = vec![
+        1.0f32, 1.0002441, 1.0008545, 1.0019531, 1.00354, 1.0054932, 1.0078735, 1.0108643, 1.0143433,
+        1.0183105, 1.0228271, 1.027832, 1.0335693, 1.0397949, 1.0466919, 1.0542603,
+    ];
+    let recipe = EditRecipe {
+        lens_profile: LensProfile { distortion, distortion_on: true, ..Default::default() },
+        ..Default::default()
+    };
+    let mut lcg = Lcg(0x5eed_0b33);
+    let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w as u32, h as u32, |x, _| {
+        let v = byte_of(0.20 + 0.45 * x as f32 / (w - 1) as f32 + 0.03 * (lcg.unit() - 0.5));
+        image::Rgb([v, v, v])
+    }));
+    let plate = crate::render::Plate::baked_in(image, true);
+    let shared = plate.shared();
+    let current = fit::pixels_of(&crate::render::develop_preview(&shared, &recipe));
+    let target = plant(&current, w, h, |i, _| 0.4 * (((i / w) as f32 - 180.0) / 60.0).clamp(0.0, 1.0));
+    let evidence = fit::evidence_model_for(&current, &target, w as u32, h as u32);
+    let frame = crate::render::FieldFrame::of_preview(&shared, &recipe);
+    let solve = |frame: &crate::render::FieldFrame| {
+        LocalField::solve_framed(
+            &current, &target, w as u32, h as u32, &evidence, TIKHONOV, SMOOTH, ITERATIONS,
+            FieldSolveOpts { local_support: false, ..FieldSolveOpts::default() }, None, frame,
+        )
+        .expect("the planted pair solves")
+    };
+    // worst code between the solve's own render and the develop of the recipe carrying the field
+    let apart = |field: &LocalField| {
+        let carried = EditRecipe { colour_field: Some(field.as_recipe_field()), ..recipe.clone() };
+        let developed = fit::pixels_of(&crate::render::develop_preview(&shared, &carried));
+        let own = field.render(&current);
+        developed
+            .iter()
+            .zip(&own)
+            .flat_map(|(d, o)| (0..3).map(move |c| byte_of(d[c]).abs_diff(byte_of(o[c]))))
+            .max()
+            .unwrap_or(0)
+    };
+    let framed = solve(&frame);
+    // the worst code the field moves the frame by: a neutral field would pass both arms vacuously
+    let moved = framed
+        .render(&current)
+        .iter()
+        .zip(&current)
+        .flat_map(|(o, c)| (0..3).map(move |k| byte_of(o[k]).abs_diff(byte_of(c[k]))))
+        .max()
+        .unwrap_or(0);
+    let (read_there, own_place) = (apart(&framed), apart(&solve(&crate::render::FieldFrame::default())));
+    eprintln!("the field moves the frame by up to {moved} codes; solve's render against the develop's, worst code: read where the develop reads {read_there}, at each pixel's own place {own_place}");
+    assert!(moved >= 10, "premise: the solve carries the planted lift: {moved} codes");
+    assert_eq!(read_there, 0, "solved where the develop reads it, the two renders are one picture, code for code");
+    assert!(own_place >= 3, "premise of the mutation: solved at each pixel's own place they part: {own_place} codes");
 }
