@@ -408,7 +408,7 @@
                     lang,
                     style_strength: 0.80,
                     grade_strength: 0.85,
-                    fit_strength: 0.85,
+                    fit_level: autoshade::fit::FitLevel::Strong,
                     verdict: has_verdict.then(|| (
                         autoshade::advisor::Decision::Accept, vec!["ok".into()]
                     )),
@@ -696,10 +696,11 @@
     /// thread behind a segmentation call.
     #[test]
     fn gui_reverse_fit_has_its_own_strength_dial() {
+        use autoshade::fit::FitLevel;
         // One constant, three consumers: app default, pref default, reset target.
-        assert_eq!(AutoShadeApp::default().fit_strength, autoshade::recipe::GradeStrength::DEFAULT);
+        assert_eq!(AutoShadeApp::default().fit_level, FitLevel::Standard);
         assert_eq!(
-            Prefs::default().fit_strength,
+            Prefs::default().fit_level().settings().strength,
             autoshade::recipe::GradeStrength::DEFAULT,
             "a prefs file written before this key existed must decode to the byte-identical \
              budget, never to serde's 0.0"
@@ -717,7 +718,7 @@
             autoshade::fit::VetoPolicy::Withhold,
             "the Analysis Strength must not reach the fit"
         );
-        let app = AutoShadeApp { fit_strength: 0.9, ..Default::default() };
+        let app = AutoShadeApp { fit_level: FitLevel::Strong, ..Default::default() };
         assert_eq!(
             autoshade::fit::FitBudget::for_strength(app.fit_strength()).vetoes,
             autoshade::fit::VetoPolicy::Disclose
@@ -734,27 +735,28 @@
             seen.iter().any(|t| t == "Reverse-fit strength"),
             "the dial must exist in the fold: {seen:?}"
         );
-        // The saved reverse-fit dial is a preference, so it leaves the ● unlit.
+        // The saved reverse-fit step is a preference, so it leaves the ● unlit.
         assert!(!app.ai_section_active(), "a fresh AI area has no state to flag");
-        app.fit_strength = 0.85;
-        assert!(!app.ai_section_active(), "a moved reverse-fit dial is still a preference");
-        app.fit_strength = autoshade::recipe::GradeStrength::DEFAULT;
+        app.fit_level = FitLevel::Strong;
+        assert!(!app.ai_section_active(), "a moved reverse-fit step is still a preference");
+        app.fit_level = FitLevel::default();
         assert!(!app.ai_section_active(), "resetting a preference also leaves the dot unlit");
         // Persisted on its own key; an older prefs file without it loads at the default.
-        let prefs = Prefs { fit_strength: 0.85, ..Prefs::default() };
+        let prefs = Prefs { fit_level: FitLevel::Strong.step(), ..Prefs::default() };
         let json = serde_json::to_string(&prefs).expect("prefs serialize");
         let decoded: Prefs = serde_json::from_str(&json).expect("prefs deserialize");
-        assert_eq!(decoded.fit_strength, 0.85);
+        assert_eq!(decoded.fit_level(), FitLevel::Strong);
         assert_eq!(decoded.grade_strength, GRADE_STRENGTH_DEFAULT, "its own key, not a rename");
-        let older = json.replace(r#""fit_strength":0.85,"#, "");
-        assert!(!older.contains("fit_strength"), "the key really was removed: {older}");
+        let older = json.replace(r#""fit_level":3,"#, "");
+        assert!(!older.contains("fit_level"), "the key really was removed: {older}");
         let decoded: Prefs = serde_json::from_str(&older).expect("an older prefs file loads");
-        assert_eq!(decoded.fit_strength, autoshade::recipe::GradeStrength::DEFAULT);
-        // …and the worker reads the fit's own dial, at both fit entry points.
+        assert_eq!(decoded.fit_level(), FitLevel::Standard);
+        // …and the worker reads the fit's own step, at both fit entry points.
         let worker = include_str!("../actions.rs");
         assert!(
-            worker.contains("let fit_strength = self.fit_strength();"),
-            "the reverse-fit block must read its own dial through fit_strength()"
+            worker.contains("let fit = self.fit_level.settings();")
+                && worker.contains("let fit_strength = self.fit_strength();"),
+            "the reverse-fit block must read its own step through fit_level.settings() / fit_strength()"
         );
         assert_eq!(
             worker.matches("strength: fit_strength,").count(),
@@ -762,9 +764,9 @@
             "both fit entry points (zoned and global) must receive the fit's dial"
         );
         assert_eq!(
-            worker.matches("GradeStrength::new(self.fit_strength)").count(),
+            worker.matches("GradeStrength::new(self.fit_level.settings().strength)").count(),
             1,
-            "exactly one reading of the fit's dial: fit_strength() itself"
+            "exactly one reading of the fit's budget: fit_strength() itself"
         );
         assert_eq!(
             worker.matches("GradeStrength::new(self.grade_strength)").count(),

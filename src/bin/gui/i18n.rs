@@ -301,11 +301,6 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // ── Settings ────────────────────────────────────────────────────────────
     ("Language", "语言"),
     ("Match a look (reverse-fit) · local", "反推配方（从成片反求滑杆）· 本地"),
-    ("Fit local areas too", "也拟合局部区域"),
-    ("Up to four semantic regions", "最多四个语义区域"),
-    ("Opt in to semantic regions beyond the historical sky/land pass; this costs one OneFormer pass per frame and may take longer.", "在原有天空/地面之外，再启用最多四个语义区域；每帧多跑一次 OneFormer，耗时可能更长。"),
-    ("After the global fit, tries extra local masks where the photo differs region by region: the sky, bright and dark ranges, and up to four tiles of a 4×4 grid. Each mask is kept only if it brings the result closer without making any area worse. Sky masks go to Lightroom as its own Select Sky; other masks Lightroom cannot hold are named when you save. Needs Python with transformers and torch; without them only the tonal ranges are tried.",
-        "全局拟合之后，再在照片各区域不同的地方尝试局部蒙版：天空、明暗范围、以及 4×4 网格里最多四块。每个蒙版只在让结果更接近、且不让任何区域变差时才保留。天空蒙版以 Lightroom 自己的「选择天空」写出；Lightroom 放不下的其他蒙版在保存时列出。需要装有 transformers 与 torch 的 Python；没有时只尝试明暗范围。"),
     ("Analysis model — used by AI Analyze, AI adjust and AI review", "分析模型 —— 用于 AI 分析、AI 调整与 AI 打分"),
     ("Provider", "提供方"),
     ("Model", "模型"),
@@ -524,25 +519,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "把本图的任意一张成品当作反推目标——你自己在 Lightroom / Capture One 导出的成片、相机直出 JPEG、TIFF，或另一个 RAW（会先中性显影）。反推求解的是能重现该文件观感的显影参数，不动你的像素。它只能是同一张照片：换成别的画面只会得到警告而不会被拒绝，而那样的结果没有意义。"),
     ("Forget this reference and go back to reverse-fitting the active generated variant",
         "清除这张参考图，回到反推当前 AI 生成变体"),
-    ("Retry once", "可重试一次"),
-    ("Retry once: runs the AI review before saving; if the review suggests a fix, tries it once and keeps whichever scores higher. Costs up to two paid vision calls instead of one, and the save waits for them; there is no cancel, as for the review itself. Off = the reviewed fit is saved first and the score is a note.",
-        "可重试一次：保存前先做 AI 打分；若打分给出改进建议，就按它试一次，保留分数更高的那个。开销：最多两次付费视觉调用而不是一次，保存要等它们返回；和打分本身一样没有取消。关闭 = 先保存打过分的反推结果，分数只作为一条注记。"),
-    ("Turn on 「AI review」 first — 「Retry once」 repeats that review",
-        "请先勾选「AI 打分」——「可重试一次」就是把这次打分再做一轮"),
     ("Reverse-fit recipe", "反推配方"),
     // The explainer is shared with the fit prompt (v1.17.0), so the fold's
     // own tail — the dial ABOVE the button — is a pair of its own.
     ("Statistical fit: reverse the freshly generated look into editable develop params (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes into this photo's develop store; hit Export to render the full-resolution result.",
         "统计拟合：把刚生成的观感反解成可编辑的 develop 参数（本地运算，无 API 费）。滑杆会更新（可 undo），RAW 会在该照片的显影库里生成 Lightroom XMP；再点「导出」可出全分辨率成品。"),
-    (" Uses the Reverse-fit strength dial above as its honesty budget.",
-        "使用上方「反推强度」滑杆作为反推的诚实预算。"),
     ("Extract style", "提取风格提示词"),
     ("Compare the original / generated images and have the vision model write a reusable style prompt: auto-fills the Generate image prompt (ready to restyle other photos) and saves <stem>.style.txt in the delivery folder.",
         "对比 原图/生成图，让 vision 模型写一段可复用的风格 prompt：自动填入「AI 生成出片」提示词（可直接给别的照片重绘用）并把 <stem>.style.txt 存到成片文件夹。"),
-    ("AI review", "AI 打分"),
-    // R23-6 D: the hint is no longer discarded, so the tooltip says so.
-    ("After the fit, show the target and the fitted render to the vision model and have it SCORE the match (0-100) with a short critique — LLM as a judge. One paid vision call per fit (needs the image API key); the fit itself stays local and free. The score, its critique AND its suggestion land in the status line below — nothing is changed for you. No cancel: like the fit itself, the app stays busy until the review returns.",
-        "反推后把 目标图/拟合渲染 交给 vision 模型打分：0-100 匹配度 + 说明（LLM as a judge）。每次反推一次 vision API 收费（需图像 API 密钥）；反推本身仍为本地免费。得分、说明和它给出的建议都显示在下方状态行——不会替你改动任何参数。无法取消：与反推本身一样，打分返回前 app 保持忙碌。"),
     ("After generating, use 「Reverse-fit recipe」 to turn the look into sliders + XMP (the full-resolution way).",
         "生成后可「反推配方」把观感变成滑杆+XMP（全分辨率的正道）。"),
     // 2026-09-27: every brush tool's fold carries its own arm / clear pair
@@ -1132,8 +1116,33 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
 
     // ── AI panel · the reverse-fit's OWN strength (user decision 2026-09-12) ──
     ("Reverse-fit strength", "反推强度"),
-    ("How far the fit may move sliders on weak evidence. At the default 65% it only moves what both images clearly support; higher values let it go further and flag those moves in the notes. This is separate from the Analysis Strength above. Double-click to reset.",
-        "证据不足时反推可以把滑杆推多远。默认 65% 只移动两张图都支持的部分；调高可走得更远，并在说明里标出这些移动。与上方「分析」里的强度无关。双击复位。"),
+    // ── AI panel · the reverse-fit's stepped strength (2026-11-10): one
+    // control for the budget, the local areas and the paid review.
+    ("1 · Light", "1 · 浅"),
+    ("2 · Standard", "2 · 标准"),
+    ("3 · Strong", "3 · 强"),
+    ("4 · Full", "4 · 最强"),
+    ("5 · Full + AI review", "5 · 最强＋AI 打分"),
+    ("Whole-frame fit at {pct}%", "整幅拟合 {pct}%"),
+    ("Whole-frame fit at {pct}% + local areas", "整幅拟合 {pct}%＋局部区域"),
+    ("Whole-frame fit at {pct}% + local areas, up to {n} semantic regions",
+        "整幅拟合 {pct}%＋局部区域，最多 {n} 个语义区域"),
+    (" + AI review, retry once · paid API: up to two vision calls",
+        "＋AI 打分、可重试一次 · 付费 API：最多两次视觉调用"),
+    ("How far the reverse-fit goes. Each step keeps everything the one before turns on. A higher strength lets the fit move sliders further on weak evidence; from 85% such moves are flagged in the notes instead of withheld.",
+        "反推走多远。每一档都包含前一档打开的全部内容。强度越高，证据不足时反推可以把滑杆推得越远；从 85% 起，这些移动会在说明里标出，而不是被扣下。"),
+    ("Local areas: after the whole-frame fit, extra masks are tried where the photo differs region by region (the sky, bright and dark ranges, tiles of a 4×4 grid); each is kept only if it brings the result closer without making any area worse. Sky masks go to Lightroom as its own Select Sky; masks Lightroom cannot hold are named when you save. Needs Python with transformers and torch; without them only the tonal ranges are tried. Four semantic regions cost one more OneFormer pass per frame.",
+        "局部区域：整幅拟合之后，再在照片各区域不同的地方尝试局部蒙版（天空、明暗范围、4×4 网格里的块）；每个蒙版只在让结果更接近、且不让任何区域变差时才保留。天空蒙版以 Lightroom 自己的「选择天空」写出；Lightroom 放不下的蒙版在保存时列出。需要装有 transformers 与 torch 的 Python；没有时只尝试明暗范围。四个语义区域每帧多跑一次 OneFormer。"),
+    ("AI review (step 5): before saving, the vision model scores how well the fitted render matches the target; if it suggests a fix, the fit tries it once and keeps whichever scores higher. Needs the image API key; the save waits for it and there is no cancel.",
+        "AI 打分（第 5 档）：保存前先让 vision 模型给拟合渲染与目标的匹配度打分；若打分给出改进建议，就按它试一次，保留分数更高的那个。需图像 API 密钥；保存要等它返回，没有取消。"),
+    ("Double-click to reset to 2 · Standard.", "双击复位到「2 · 标准」。"),
+    (" Uses the Reverse-fit strength step above: its budget and the passes it turns on.",
+        "使用上方「反推强度」的档位：它的预算和它打开的各项拟合。"),
+    (" · it suggests: {hint}", " · 它的建议：{hint}"),
+    ("Reverse-fit strength {step}: {what} — set in the AI panel's reverse-fit fold",
+        "反推强度 {step}：{what} ——在 AI 面板的「反推配方」一栏里设置"),
+    ("Turn it back on at the foot of the AI panel's 「Generate whole image」 fold: 「Ask after each AI generation」",
+        "可在 AI 面板「AI 生成出片」一栏的底部重新打开：「每次 AI 生成后询问」"),
 
     // ── AI panel · reference libraries (R23-2 feedback #6; R30 ladder) ───────
     ("⚠ no library", "⚠ 未建库"),
@@ -1671,8 +1680,6 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" · matched by cell statistics only (difference {fine} at pixel scale, {coarse} at layout scale)",
         " · 仅按单元统计配对（差异：像素尺度 {fine}，布局尺度 {coarse}）"),
     // ── R23-6: the reverse-fit's own status facts (workers::render_fit_note)
-    (" · it suggests: {hint} (nothing was changed — tick 「Retry once」 to let it try)",
-        " · 它的建议：{hint}（什么都没有改动——勾选「可重试一次」才会让它去试）"),
     (" · ⚠ THE REVERSE-FIT WAS DISCARDED: every version of it rendered farther from the target than your untouched photo, so the recipe was reset to neutral — this is the same as not having reverse-fitted at all",
         " · ⚠ 反推结果已被丢弃：它的每一个版本渲染出来都比你未处理的原图离目标更远，配方已重置为中性——这与没有做反推是一样的"),
     (" · ⚠ the reference's proportions do not match this photo — it was cropped, or it is not the same frame; either way the two distributions are not comparable",
@@ -2976,7 +2983,6 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "随时可用工具栏左侧的模式按钮切换，打开的照片不受影响。"),
     ("Back to the mode page — the open photo, its edits and the library stay as they are",
         "回到模式选择页：打开的照片、编辑和图库都保持不变"),
-    ("Local areas", "局部区域"),
     // ── Normal mode's own sidebar (panels/normal.rs, 2026-10-23): plain
     // words, a separate set of keys (design-normal-mode.md §6) ──
     ("One-click look", "一键出片"),
@@ -3051,13 +3057,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "前后并排对比 — 再点一下只看照片；按住 B 看原图"),    // v1.17.0 — the fit prompt after 「AI generate」: reverse-fit the new ✨
     // card, and from which negative (默认原图).
     ("Reverse-fit this AI result?", "是否把这张 AI 生成结果反推成配方？"),
-    ("Reverse-fit strength {pct}% · local areas {zoned} · AI review {review} — set in the AI panel's reverse-fit fold",
-        "反推强度 {pct}% · 局部区域 {zoned} · AI 打分 {review} ——在 AI 面板的「反推配方」一栏里设置"),
-    ("on", "开"),
-    ("off", "关"),
     ("Don't ask again after generating", "生成后不再询问"),
-    ("Turn it back on in the AI panel's reverse-fit fold: 「Ask after each AI generation」",
-        "可在 AI 面板的「反推配方」一栏里重新打开：「每次 AI 生成后询问」"),
     ("Not now", "暂不"),
     ("Reverse-fit", "反推"),
     ("Ask after each AI generation", "每次 AI 生成后询问"),

@@ -26,3 +26,4 @@
     include!("tests/normal.rs");
     include!("tests/portrait.rs");
     include!("tests/fit_prompt.rs");
+    include!("tests/fit_level.rs");

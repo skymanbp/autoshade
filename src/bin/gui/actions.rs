@@ -32,14 +32,14 @@ impl AutoShadeApp {
         autoshade::recipe::GradeStrength::new(self.grade_strength)
     }
 
-    /// The Reverse-fit fold's OWN Strength dial as the fit's honesty budget
+    /// The Reverse-fit fold's OWN strength step, as the fit's honesty budget
     /// (F1). Separate from [`Self::analysis_strength`] on purpose — user
     /// decision 2026-09-12: the two functions live in two folds, so each has
     /// its own control and neither reading reaches the other. Through v1.3.1
     /// both read one `panel_strength()`, and the fit's budget was a dial two
     /// folds above the fit's own row.
     pub(crate) fn fit_strength(&self) -> autoshade::recipe::GradeStrength {
-        autoshade::recipe::GradeStrength::new(self.fit_strength)
+        autoshade::recipe::GradeStrength::new(self.fit_level.settings().strength)
     }
 
     /// Restore persisted prefs (last folder, view mode, export options) and
@@ -78,7 +78,9 @@ impl AutoShadeApp {
         app.guide = prefs.guide;
         app.style_strength = prefs.style_strength.clamp(0.0, 1.0);
         app.grade_strength = prefs.grade_strength.clamp(0.0, 1.0);
-        app.fit_strength = prefs.fit_strength.clamp(0.0, 1.0);
+        // The step, or — from a file written before the stepped control —
+        // the step its separate switches stand for (`Prefs::fit_level`).
+        app.fit_level = prefs.fit_level();
         app.send_style_ref_image = prefs.send_style_ref_image;
         app.deep_think = prefs.deep_think;
         app.style_embed = prefs.style_embed;
@@ -97,10 +99,6 @@ impl AutoShadeApp {
         app.denoise_strength = prefs.denoise_strength.clamp(0.0, 1.0);
         app.baked_denoise_strength = prefs.baked_denoise_strength.clamp(0.0, 1.0);
         app.baked_save_denoise_strength = prefs.baked_save_denoise_strength.clamp(0.0, 1.0);
-        app.zoned_fit = prefs.zoned_fit;
-        app.zoned_four_regions = prefs.zoned_four_regions;
-        app.fit_ai_judge = prefs.fit_ai_judge;
-        app.fit_deep = prefs.fit_deep;
         app.reimagine_retry = prefs.reimagine_retry;
         app.ask_fit_after_generate = prefs.ask_fit_after_generate;
         app.adjust_quality = prefs.adjust_quality.min(2);
@@ -2797,9 +2795,8 @@ impl AutoShadeApp {
     /// whether to reverse-fit the new ✨ card, and from which negative. It
     /// only hands over to the fold's own verb — 「Reverse-fit」 sets the
     /// fold's source and calls [`Self::start_fit`] — so the fit it starts IS
-    /// the panel button's; the strength and the switches stay the fold's
-    /// controls (the AI review is paid, and its cost is named there), and the
-    /// layer only states them.
+    /// the panel button's; the strength step stays the fold's control (its
+    /// paid step names its cost there), and the layer only states it.
     pub(crate) fn fit_prompt_layer(&mut self, ctx: &egui::Context) {
         let lang = self.lang;
         let Some(mut prompt) = self.fit_prompt.take() else {
@@ -2812,14 +2809,12 @@ impl AutoShadeApp {
             .position(|v| v.id == prompt.target)
             .map(|i| trf(lang, "To: {card}", &[("card", &self.numbered_card_label(i))]));
         let fidelity = Self::reimagine_fidelity(lang, prompt.divergence);
-        let on_off = |on: bool| if on { tr(lang, "on") } else { tr(lang, "off") };
         let in_force = trf(
             lang,
-            "Reverse-fit strength {pct}% · local areas {zoned} · AI review {review} — set in the AI panel's reverse-fit fold",
+            "Reverse-fit strength {step}: {what} — set in the AI panel's reverse-fit fold",
             &[
-                ("pct", &format!("{:.0}", self.fit_strength * 100.0)),
-                ("zoned", on_off(self.zoned_fit)),
-                ("review", on_off(self.fit_ai_judge)),
+                ("step", crate::panels::fit_level::fit_level_name(lang, self.fit_level)),
+                ("what", &crate::panels::fit_level::fit_level_summary(lang, self.fit_level)),
             ],
         );
         let mut open = true;
@@ -2884,7 +2879,7 @@ impl AutoShadeApp {
                 });
                 ui.label(egui::RichText::new(&in_force).small().weak());
                 ui.checkbox(&mut prompt.dont_ask, tr(lang, "Don't ask again after generating"))
-                    .on_hover_text(tr(lang, "Turn it back on in the AI panel's reverse-fit fold: 「Ask after each AI generation」"));
+                    .on_hover_text(tr(lang, "Turn it back on at the foot of the AI panel's 「Generate whole image」 fold: 「Ask after each AI generation」"));
                 ui.add_space(SPACE_MD);
                 // The safe answer first, the primary tinted and last — the
                 // quit layer's order.
@@ -3643,18 +3638,16 @@ impl AutoShadeApp {
         // and the persisted pixel link all read this ONE capture, so the three
         // cannot disagree.
         let negative = self.fit_negative();
+        // The ONE source of the five values: the fold's strength step.
+        let fit = self.fit_level.settings();
         let fit_strength = self.fit_strength();
-        let zoned = self.zoned_fit;
-        let zoned_regions = if self.zoned_four_regions {
-            autoshade::fit_zoned::semantic::MAX_SEMANTIC_REGIONS
-        } else {
-            autoshade::fit_zoned::semantic::DEFAULT_SEMANTIC_REGIONS
-        };
-        let ai_judge = self.fit_ai_judge;
-        // The deep path IS the review, iterated — it cannot run without it,
-        // and the checkbox is disabled accordingly, but the worker must not
-        // depend on a UI gate for a spending decision.
-        let deep = self.fit_deep && ai_judge;
+        let zoned = fit.zoned;
+        let zoned_regions = fit.regions;
+        let ai_judge = fit.ai_judge;
+        // The deep path IS the review, iterated — it cannot run without it.
+        // The table never pairs them otherwise, but the worker must not
+        // depend on a table row for a spending decision.
+        let deep = fit.deep && ai_judge;
         let lang = self.lang;
         self.busy = true;
         let mut running = if zoned {

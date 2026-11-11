@@ -241,31 +241,37 @@
 
     /// R23-6 D (user decision 2026-08-17 ⑥): the deep reverse-fit is a PAID
     /// opt-in on top of another paid opt-in, so it must be off in both
-    /// defaults — a prefs file written before the key existed has to decode
-    /// to the same answer a fresh install gives — and it must not be
-    /// reachable without the review it iterates.
+    /// defaults — a prefs file written before the stepped control has to
+    /// decode to the same answer a fresh install gives — and it must not be
+    /// reachable without the review it iterates. Since 2026-11-10 both live
+    /// on the strength control's top step, whose line names the cost.
+    ///
+    /// MUTATION THIS CATCHES: the default step moved to the reviewed one, a
+    /// table row with `deep` but not `ai_judge`, or the paid step's line
+    /// losing its cost.
     #[test]
     fn the_deep_reverse_fit_is_off_by_default_and_gated_on_the_review() {
-        assert!(!AutoShadeApp::default().fit_deep, "spending is opt-in");
-        assert!(
-            !Prefs::default().fit_deep,
-            "an older prefs file must decode to the same answer"
-        );
+        let fresh = AutoShadeApp::default().fit_level.settings();
+        assert!(!fresh.deep && !fresh.ai_judge, "spending is opt-in");
+        let older = Prefs::default().fit_level().settings();
+        assert!(!older.deep && !older.ai_judge, "an older prefs file must decode to the same answer");
+        for level in autoshade::fit::FitLevel::ALL {
+            let s = level.settings();
+            assert!(!s.deep || s.ai_judge, "{level:?}: deep without the review is not a configuration");
+        }
         let mut app = AutoShadeApp::default();
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
         assert!(
-            seen.iter().any(|t| t == "Retry once"),
-            "the switch must exist: {seen:?}"
+            !seen.iter().any(|t| t.contains("paid API: up to two vision calls")),
+            "the default step names no cost, because it has none: {seen:?}"
         );
-        // The gate is on the WIDGET, so the tooltip that explains the gate is
-        // what a headless frame can witness; the enabled state itself is
-        // egui's and is asserted through the same predicate the UI uses.
-        assert!(!app.fit_ai_judge, "premise: the review is off in a stock app");
-        app.fit_ai_judge = true;
-        app.fit_deep = true;
-        // The worker's own gate, which must not depend on the UI's: deep
-        // without the review is not a configuration.
-        assert!(app.fit_deep && app.fit_ai_judge);
+        app.fit_level = autoshade::fit::FitLevel::Reviewed;
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        assert!(seen.iter().any(|t| t == "5 · Full + AI review"), "the step is named: {seen:?}");
+        assert!(
+            seen.iter().any(|t| t.contains("paid API: up to two vision calls")),
+            "the paid step says what it costs under the control: {seen:?}"
+        );
     }
 
     /// R23-2: the reference-PHOTO switch is off by default in BOTH defaults
@@ -457,7 +463,7 @@
             seen.iter().any(|t| t == "Deep thinking"),
             "the switch was not drawn in a 320 px panel: {seen:?}"
         );
-        // Same rule as `fit_ai_judge` / `send_style_ref_image`: a remembered
+        // Same rule as `fit_level` / `send_style_ref_image`: a remembered
         // preference is not "this photo's AI inputs carry state".
         app.deep_think = true;
         assert!(!app.ai_section_active(), "a preference must not light the section ●");

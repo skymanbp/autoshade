@@ -35,9 +35,6 @@ pub(crate) enum Mode {
 /// panel code is shared; each switch is read at the one place it governs.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Shell {
-    /// The reverse-fit's local-area switches sit in a fold of their own,
-    /// closed by default (Portraits).
-    pub(crate) zoned_folded: bool,
     /// The Open dialog lists rendered images (jpg, png, …) before RAWs.
     pub(crate) baked_first: bool,
     /// The sidebar is Normal's own four groups (`panels/normal.rs`: one-click
@@ -68,7 +65,6 @@ impl Mode {
     pub(crate) fn shell(self) -> Shell {
         match self {
             Mode::Landscape => Shell {
-                zoned_folded: false,
                 baked_first: false,
                 one_click_sidebar: false,
                 full_toolbar: true,
@@ -78,7 +74,6 @@ impl Mode {
                 portrait_panel: false,
             },
             Mode::Portraits => Shell {
-                zoned_folded: true,
                 baked_first: false,
                 one_click_sidebar: false,
                 full_toolbar: true,
@@ -88,7 +83,6 @@ impl Mode {
                 portrait_panel: true,
             },
             Mode::Normal => Shell {
-                zoned_folded: false,
                 baked_first: true,
                 one_click_sidebar: true,
                 full_toolbar: false,

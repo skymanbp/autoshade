@@ -78,14 +78,13 @@ pub(crate) struct AutoShadeApp {
     /// raw fraction and handed to `GradeStrength::new` at the call site, which
     /// owns the clamp.
     pub(crate) grade_strength: f32,
-    /// The reverse-fit's HONESTY BUDGET, 0..1 — its OWN dial in the Reverse-fit
+    /// The reverse-fit's stepped strength — its OWN control in the Reverse-fit
     /// fold (user decision 2026-09-12: a control belongs to the section whose
-    /// function it serves, and a function two sections need gets two controls,
-    /// not one shared reading). Through v1.3.1 the fit read the Analysis
-    /// Strength two folds up, which nobody looking at the fit's own row could
-    /// find. Persisted as the raw fraction; `GradeStrength::new` owns the clamp
-    /// at the call site, exactly like `grade_strength`.
-    pub(crate) fit_strength: f32,
+    /// function it serves; through v1.3.1 the fit read the Analysis Strength
+    /// two folds up). Since the stepped control (2026-11-10) this one value
+    /// stands for the honesty budget, the local areas, their region count and
+    /// the paid review: every reader takes them from `fit_level.settings()`.
+    pub(crate) fit_level: autoshade::fit::FitLevel,
     /// R23-2, feedback #6: also SHOW the vision model the nearest past photo,
     /// not only its numbers. Persisted, and OFF by default — it puts a second
     /// image on every call of a paid analysis (the checkbox says so).
@@ -234,16 +233,9 @@ pub(crate) struct AutoShadeApp {
     pub(crate) denoise_strength: f32,
     pub(crate) baked_denoise_strength: f32,
     pub(crate) baked_save_denoise_strength: f32,
-    pub(crate) zoned_fit: bool,        // 反推 adds a sky-to-sky zoned correction (bitmap mask)
-    pub(crate) zoned_four_regions: bool, // opt-in semantic expansion to up to four regions
-    pub(crate) fit_ai_judge: bool,     // 反推 then asks the vision model to SCORE the match (paid, opt-in)
-    // R23-6 D: 反推 runs the visual judge BEFORE the persist and buys bounded
-    // guided rounds off it. Paid and opt-in, like `fit_ai_judge`, and a
-    // REVISION of the R20 decision that the fit's review is informational
-    // only — user decision 2026-08-17 ⑥, recorded at `start_fit`.
-    pub(crate) fit_deep: bool,
     // Step-6: opt-in fidelity retry for reimagine — a second billed
-    // generation when the first diverges. Paid and opt-in, like `fit_deep`.
+    // generation when the first diverges. Paid and opt-in, like the
+    // reverse-fit's reviewed step.
     pub(crate) reimagine_retry: bool,
     // R23-6 B: an explicitly chosen reverse-fit reference (any finished
     // rendition of this frame — a Lightroom export, a camera JPEG, another
@@ -260,7 +252,7 @@ pub(crate) struct AutoShadeApp {
     // card of the open photo.
     pub(crate) fit_prompt: Option<FitPrompt>,
     // Whether to ask it at all (a pref): the prompt's 「Don't ask again」 turns
-    // it off, the reverse-fit fold's checkbox turns it back on.
+    // it off, the checkbox at the foot of the Generate fold turns it back on.
     pub(crate) ask_fit_after_generate: bool,
     pub(crate) show_settings: bool,    // the Settings window is open
     pub(crate) show_shortcuts: bool,   // the keyboard cheat-sheet window is open (F1 / ? / ⌨)
@@ -1813,9 +1805,11 @@ impl Default for AutoShadeApp {
             // (2026-08-17 ⑦). Same one-definition rule as above: the constant is
             // the lib's own `GradeStrength::DEFAULT`.
             grade_strength: GRADE_STRENGTH_DEFAULT,
-            fit_strength: autoshade::recipe::GradeStrength::DEFAULT,
+            // Standard: the historical default fit, no paid review — mirror
+            // what Prefs::default derives to.
+            fit_level: autoshade::fit::FitLevel::default(),
             // OFF: an extra image on a paid call is the user's opt-in, never a
-            // default (the same rule `fit_ai_judge` follows).
+            // default (the same rule the reverse-fit's reviewed step follows).
             send_style_ref_image: false,
             // OFF, same rule and a bigger bill (up to 17 calls per analyze).
             deep_think: false,
@@ -1845,12 +1839,6 @@ impl Default for AutoShadeApp {
             denoise_strength: autoshade::denoise::DEFAULT_STRENGTH_RAW,
             baked_denoise_strength: autoshade::denoise::DEFAULT_STRENGTH,
             baked_save_denoise_strength: autoshade::denoise::DEFAULT_STRENGTH,
-            zoned_fit: true,
-            zoned_four_regions: false,
-            // Paid opt-in (a vision call per fit) — mirror Prefs::default.
-            fit_ai_judge: false,
-            // Paid opt-in, and up to three vision calls — mirror Prefs::default.
-            fit_deep: false,
             // Paid opt-in (a second image per diverged reimagine) — mirror
             // Prefs::default.
             reimagine_retry: false,
@@ -2358,6 +2346,10 @@ impl eframe::App for AutoShadeApp {
     /// Persist the prefs (last folder, view mode, export options) — restored by
     /// [`AutoShadeApp::new`]. Window geometry is saved by eframe itself.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        // The step is the truth; its row is also written into the separate
+        // switches, so a build from before the stepped control that reads
+        // this file fits the same way (the `save_jpeg` rule below).
+        let fit = self.fit_level.settings();
         eframe::set_value(
             storage,
             eframe::APP_KEY,
@@ -2367,7 +2359,8 @@ impl eframe::App for AutoShadeApp {
                 guide: self.guide,
                 style_strength: self.style_strength,
                 grade_strength: self.grade_strength,
-                fit_strength: self.fit_strength,
+                fit_level: self.fit_level.step(),
+                fit_strength: fit.strength,
                 send_style_ref_image: self.send_style_ref_image,
                 deep_think: self.deep_think,
                 style_embed: self.style_embed,
@@ -2386,13 +2379,12 @@ impl eframe::App for AutoShadeApp {
                 denoise_strength: self.denoise_strength,
                 baked_denoise_strength: self.baked_denoise_strength,
                 baked_save_denoise_strength: self.baked_save_denoise_strength,
-                zoned_fit: self.zoned_fit,
-                zoned_four_regions: self.zoned_four_regions,
-                fit_ai_judge: self.fit_ai_judge,
-                // R23-6 D: the deep reverse-fit toggle persists like every
-                // other paid opt-in. `fit_ref` deliberately does NOT — it
-                // names one file for one photo (see the field).
-                fit_deep: self.fit_deep,
+                zoned_fit: fit.zoned,
+                zoned_four_regions: fit.regions > autoshade::fit_zoned::semantic::DEFAULT_SEMANTIC_REGIONS,
+                fit_ai_judge: fit.ai_judge,
+                // `fit_ref` deliberately does NOT persist — it names one file
+                // for one photo (see the field).
+                fit_deep: fit.deep,
                 reimagine_retry: self.reimagine_retry,
                 ask_fit_after_generate: self.ask_fit_after_generate,
                 adjust_quality: self.adjust_quality,

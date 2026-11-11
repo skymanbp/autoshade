@@ -209,10 +209,21 @@ pub(crate) struct Prefs {
     /// was too timid, so [`Prefs::default`] supplies 0.65 and serde's
     /// struct-level default routes every missing key through it.
     pub(crate) grade_strength: f32,
-    /// The reverse-fit's own Strength (user decision 2026-09-12). Routed through
-    /// [`Prefs::default`] like `grade_strength`: a prefs file written before this
-    /// key existed decodes to the lib's 0.65 — the byte-identical budget — and
-    /// never to serde's 0.0.
+    /// The reverse-fit's stepped strength ([`autoshade::fit::FitLevel::step`],
+    /// 1..=5) — the ONE setting the fold's control writes. 0 (serde's default,
+    /// and [`Prefs::default`]'s, so a file written before this key existed
+    /// decodes to it) means "derive the step once from the separate switches
+    /// below" ([`Prefs::fit_level`]); an unknown code from a newer build does
+    /// the same.
+    pub(crate) fit_level: u8,
+    /// The reverse-fit's own Strength (user decision 2026-09-12). Since the
+    /// stepped control this and `zoned_fit` / `zoned_four_regions` /
+    /// `fit_ai_judge` / `fit_deep` are WRITTEN from `fit_level`'s row, so an
+    /// older build reading a newer file still fits sensibly, and READ only to
+    /// derive the step of a file that has none. Routed through
+    /// [`Prefs::default`] like `grade_strength`: a prefs file written before
+    /// this key existed decodes to the lib's 0.65 — the byte-identical
+    /// budget — and never to serde's 0.0.
     pub(crate) fit_strength: f32,
     /// R23-2: the opt-in style REFERENCE photo. `#[serde(default)]` on the
     /// struct means an older prefs file decodes it as `false` — the same
@@ -310,6 +321,9 @@ impl Default for Prefs {
             guide: autoshade::pipeline::Guide::default(),
             style_strength: STYLE_STRENGTH_DEFAULT,
             grade_strength: GRADE_STRENGTH_DEFAULT,
+            // "Derive from the switches below", which are the default step's
+            // own values — so a missing key and a fresh install agree.
+            fit_level: 0,
             fit_strength: autoshade::recipe::GradeStrength::DEFAULT,
             // OFF, like every other paid opt-in here (see `fit_ai_judge`).
             send_style_ref_image: false,
@@ -355,6 +369,23 @@ impl Default for Prefs {
             accent: AccentPref::Gold,
             mode: Mode::Landscape,
         }
+    }
+}
+
+impl Prefs {
+    /// The reverse-fit step this file stands for: its own `fit_level` when
+    /// that names a step, else the step derived from the separate switches a
+    /// file written before the stepped control carries
+    /// ([`autoshade::fit::FitLevel::from_switches`]).
+    pub(crate) fn fit_level(&self) -> autoshade::fit::FitLevel {
+        autoshade::fit::FitLevel::from_step(self.fit_level).unwrap_or_else(|| {
+            autoshade::fit::FitLevel::from_switches(
+                self.fit_strength,
+                self.zoned_fit,
+                self.zoned_four_regions,
+                self.fit_ai_judge,
+            )
+        })
     }
 }
 

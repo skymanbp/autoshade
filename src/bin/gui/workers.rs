@@ -3033,13 +3033,10 @@ impl AutoShadeApp {
                 // R23-6: the third of the three things the paid call
                 // returned. R20 kept the score and the critique and dropped
                 // this one with no reason on record. Labelled as a
-                // SUGGESTION because on this path nothing acted on it.
+                // SUGGESTION: whether the retry tried it is the DeepFit
+                // note's to say, beside this one.
                 if let Some(h) = hint.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
-                    s.push_str(&trf(
-                        lang,
-                        " · it suggests: {hint} (nothing was changed — tick 「Retry once」 to let it try)",
-                        &[("hint", h)],
-                    ));
+                    s.push_str(&trf(lang, " · it suggests: {hint}", &[("hint", h)]));
                 }
                 s
             }

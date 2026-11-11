@@ -371,8 +371,8 @@ impl AutoShadeApp {
         // 「Zoned fit (sky)」 MOVED to the AI panel's reverse-fit sub-area (R22
         // #4): it is a setting for ONE button, and it sat two panels away from
         // that button — you changed it here and then went hunting for 「🎛
-        // Reverse-fit」. The `zoned_fit` FIELD is untouched (same Prefs key,
-        // same persistence, same `start_fit` read); only its UI row moved.
+        // Reverse-fit」. Since 2026-11-10 it is part of that fold's stepped
+        // 「Reverse-fit strength」 (`panels/fit_level.rs`).
         ui.separator();
         // The develop store is otherwise invisible (hashed AppData folders) —
         // this is the one place that names it and rescues pre-store saves.

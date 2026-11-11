@@ -139,11 +139,13 @@
     /// draws, on the photo with every button armed. Pass A opens every fold
     /// (egui's show-everything hook), so a section that is absent is absent
     /// because its mode does not draw it; pass B leaves folds at their
-    /// defaults, where Portraits' local-area switches are folded away.
+    /// defaults, where the reverse-fit's one strength control stands open in
+    /// both full workspaces (the Portraits-only local-area fold went with the
+    /// switches it held, 2026-11-10).
     ///
     /// MUTATION THIS CATCHES: any one switch of `Mode::shell` flipped (e.g.
-    /// Normal's `one_click_sidebar` to false, Portraits'
-    /// `zoned_folded` to false) fails a row below.
+    /// Normal's `one_click_sidebar` to false) fails a row below; the strength
+    /// control moved back into a closed fold in either mode fails pass B.
     #[test]
     fn each_mode_draws_the_sections_its_row_of_the_table_names() {
         let everything = [
@@ -155,7 +157,7 @@
             "Generate whole image · paid API",
             "Reference library · local",
             "Reverse-fit strength",
-            "AI review",
+            "Ask after each AI generation",
             "Export .xmp beside the photo",
             "Highlights",
             "Reverse-fit recipe",
@@ -209,8 +211,8 @@
             assert!(has(&texts, key), "Normal draws {key:?}");
         }
         let shared = [
-            "Fit local areas too",
-            "Up to four semantic regions",
+            "2 · Standard",
+            "Whole-frame fit at",
             "Extract style",
             "From:",
             "Develop",
@@ -224,12 +226,15 @@
             assert!(!has(&texts, key), "Normal does not draw {key:?}");
         }
         // Pass B: folds at their defaults.
-        let landscape = frame(Mode::Landscape, false);
-        assert!(has(&landscape, "Up to four semantic regions"), "Landscape: the switches stand in the fold, as before");
-        assert!(!has(&landscape, "Local areas"));
-        let portraits = frame(Mode::Portraits, false);
-        assert!(has(&portraits, "Local areas"), "Portraits: the switches have a fold of their own");
-        assert!(!has(&portraits, "Up to four semantic regions"), "…closed by default");
+        for mode in [Mode::Landscape, Mode::Portraits] {
+            let texts = frame(mode, false);
+            for key in ["Reverse-fit strength", "2 · Standard", "Whole-frame fit at 65% + local areas"] {
+                assert!(has(&texts, key), "{mode:?}: the strength control stands open in the fold: {key:?}");
+            }
+            for gone in ["Local areas", "Fit local areas too", "Up to four semantic regions", "AI review", "Retry once"] {
+                assert!(!texts.iter().any(|t| t == gone), "{mode:?}: the old switch {gone:?} is gone");
+            }
+        }
     }
 
     /// The Open dialog offers the same set in every mode, rendered images

@@ -46,8 +46,8 @@ impl AutoShadeApp {
     /// preferences, so the dot never went out.
     ///
     /// Deliberately NOT in the set: `style_strength`, `grade_strength`, and
-    /// `fit_strength` are remembered dial preferences, not this photo's state;
-    /// `reimagine_prompt`, `fit_ai_judge`, `zoned_fit`, and (R23-2)
+    /// `fit_level` are remembered dial preferences, not this photo's state;
+    /// `reimagine_prompt`, `ask_fit_after_generate`, and (R23-2)
     /// `send_style_ref_image` / `style_src_dir` are persisted preferences of
     /// paid verbs or library bookkeeping. The dot means "this PHOTO's AI
     /// inputs carry state", and a remembered dial or folder says nothing
@@ -893,6 +893,14 @@ impl AutoShadeApp {
                 ));
                 explainer(ui, lang, tr(lang, "After generating, use 「Reverse-fit recipe」 to turn the look into sliders + XMP \
                          (the full-resolution way)."));
+                // The way back from the fit prompt's 「Don't ask again」
+                // (v1.17.0). It sat in the reverse-fit fold until the stepped
+                // strength (2026-11-10); it is about what happens AFTER a
+                // generation, so it closes this fold. A preference: no gate.
+                ui.checkbox(&mut self.ask_fit_after_generate, tr(lang, "Ask after each AI generation"))
+                    .on_hover_text(tr(lang,
+                        "When 「AI generate」 lands a new ✨ card, ask whether to reverse-fit it and from which negative (the ▣ original unless you pick another).",
+                    ));
             });
     }
 
@@ -958,15 +966,16 @@ impl AutoShadeApp {
     /// freshly generated look back into an
     /// editable recipe — how the low-res experiment becomes a full-res, XMP-able
     ///「反推」variant. A PEER of the generation sub-area, not a row inside it:
-    /// its own switches (the optional AI review, and zoned fit — which used to
-    /// live in Settings, two panels from the button it changes) are settings for
-    /// this verb, and burying them one fold deeper than the verb was the
+    /// its own strength (one stepped control since 2026-11-10: the budget,
+    /// the local areas and the optional AI review were a slider and four
+    /// switches, zoned fit once in Settings two panels away) is a setting for
+    /// this verb, and burying it one fold deeper than the verb was the
     /// scattering this panel exists to end.
     ///
     /// R30 gave it a header of its own (it was a `group_caption` under a
     /// separator) and left it OPEN by default: the fit and the extract are
-    /// local and free, and the one paid switch inside — 「AI review」 — is
-    /// what the header's 「AI 打分付费」 half names.
+    /// local and free; only the top step (the AI review) is paid, and its
+    /// line under the control says so.
     /// What the reverse-fit does, in one sentence: the fold's verb says it on
     /// hover and the fit prompt says it in its body.
     pub(crate) fn fit_explainer(lang: Lang) -> &'static str {
@@ -979,8 +988,6 @@ impl AutoShadeApp {
 
     fn ai_reverse_fit(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        // Portraits (`mode::Shell::zoned_folded`) folds the local-area switches.
-        let shell = self.mode.shell();
         ui.add_space(SPACE_XS);
         card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Match a look (reverse-fit) · local"))
             .id_salt("sec_ai_reverse_fit")
@@ -1129,23 +1136,17 @@ impl AutoShadeApp {
             if clear_ref {
                 self.fit_ref = None;
             }
-            // The fit's OWN Strength, directly above the verb that reads it (user
+            // The fit's OWN strength, directly above the verb that reads it (user
             // decision 2026-09-12: a control belongs to the section whose function
             // it serves). Through v1.3.1 the fit silently read the Analysis dial two
-            // folds up — the last place anyone looking at this row would look. Same
-            // helper as the Analysis dials: 0..100 track, double-click reset, hover
-            // nudge, the explanation as the tooltip.
-            Self::slider_pct_hinted(
-                ui,
-                lang,
-                tr(lang, "Reverse-fit strength"),
-                &mut self.fit_strength,
-                1.0,
-                autoshade::recipe::GradeStrength::DEFAULT,
-                tr(lang,
-                    "How far the fit may move sliders on weak evidence. At the default 65% it only moves what both images clearly support; higher values let it go further and flag those moves in the notes. This is separate from the Analysis Strength above. Double-click to reset.",
-                ),
-            );
+            // folds up. Since 2026-11-10 ONE stepped control stands for the budget,
+            // the local areas and the paid review (`panels/fit_level.rs`), where a
+            // slider and four switches stood. Outside the can_fit gate: it is a
+            // persisted preference, not a fit-time verb (review R20-N1), and
+            // `start_fit` reads it once when it runs.
+            self.fit_level_control(ui);
+            // The verb row: two cells today, with room for a third verb in a
+            // later version (a wrapped row takes it on the next line).
             ui.horizontal_wrapped(|ui| {
                 let cell = columns(ui, 2);
                 let can = !self.busy && can_fit;
@@ -1153,7 +1154,7 @@ impl AutoShadeApp {
                     .on_hover_text(format!(
                         "{}{}",
                         Self::fit_explainer(lang),
-                        tr(lang, " Uses the Reverse-fit strength dial above as its honesty budget."),
+                        tr(lang, " Uses the Reverse-fit strength step above: its budget and the passes it turns on."),
                     ))
                     .clicked()
                 {
@@ -1170,72 +1171,6 @@ impl AutoShadeApp {
                     self.start_style_prompt();
                 }
             });
-            // R20 opt-in LLM-as-a-judge. OUTSIDE the can_fit gate: the
-            // toggle is a persisted PREFERENCE, not a fit-time verb —
-            // gating it on can_fit locked a setting behind having a
-            // generated variant active (review R20-N1). Only busy
-            // disables it. R38: on a plain row of its own with 「deep」, never
-            // in the wrapped verb row above — its two cells take the whole
-            // line, and a checkbox scoped after them was laid past the line's
-            // end (a scope never wraps), which widened the auto-fitting side
-            // panel by 47 px every frame
-            // (`the_generate_button_stays_one_line_and_the_panel_stays_put`
-            // is the witness — that test exists because this panel's width
-            // has run away once before).
-            ui.horizontal(|ui| {
-                ui.add_enabled_ui(!self.busy, |ui| {
-                    ui.checkbox(&mut self.fit_ai_judge, tr(lang, "AI review"))
-                        .on_hover_text(tr(lang,
-                            "After the fit, show the target and the fitted render to the vision model and \
-                             have it SCORE the match (0-100) with a short critique — LLM as a judge. One \
-                             paid vision call per fit (needs the image API key); the fit itself stays \
-                             local and free. The score, its critique AND its suggestion land in the \
-                             status line below — nothing is changed for you. No cancel: like the fit \
-                             itself, the app stays busy until the review returns.",
-                        ));
-                });
-                // R23-6 D: the review can now also ACT, when asked. Beside
-                //「AI review」 and gated on it, because a deep fit IS that review
-                // plus a loop — a checkbox that silently switched the other one
-                // on would be two settings pretending to be one.
-                ui.add_enabled_ui(!self.busy && self.fit_ai_judge, |ui| {
-                    ui.checkbox(&mut self.fit_deep, tr(lang, "Retry once"))
-                        .on_hover_text(if self.fit_ai_judge {
-                            tr(lang,
-                                "Retry once: runs the AI review before saving; if the review suggests a fix, tries it once and keeps whichever scores higher. Costs up to two paid vision calls instead of one, and the save waits for them; there is no cancel, as for the review itself. Off = the reviewed fit is saved first and the score is a note.",
-                            )
-                        } else {
-                            tr(lang, "Turn on 「AI review」 first — 「Retry once」 repeats that review")
-                        });
-                });
-            });
-            // The way back from the fit prompt's 「Don't ask again」 (v1.17.0),
-            // beside the verb it asks about. A preference, so no gate.
-            ui.checkbox(&mut self.ask_fit_after_generate, tr(lang, "Ask after each AI generation"))
-                .on_hover_text(tr(lang,
-                    "When 「AI generate」 lands a new ✨ card, ask whether to reverse-fit it and from which negative (the ▣ original unless you pick another).",
-                ));
-            // Migrated from Settings (#4): a switch that only ever changes what
-            // the button above does. Same rule as 「AI review」 — a persisted
-            // preference, so no can_fit gate (and, as in Settings, no busy gate:
-            // `start_fit` reads the flag when it runs).
-            let zoned_rows = |app: &mut Self, ui: &mut egui::Ui| {
-                ui.checkbox(&mut app.zoned_fit, tr(lang, "Fit local areas too")).on_hover_text(tr(
-                    lang,
-                    "After the global fit, tries extra local masks where the photo differs region by region: the sky, bright and dark ranges, and up to four tiles of a 4×4 grid. Each mask is kept only if it brings the result closer without making any area worse. Sky masks go to Lightroom as its own Select Sky; other masks Lightroom cannot hold are named when you save. Needs Python with transformers and torch; without them only the tonal ranges are tried.",
-                ));
-                ui.checkbox(&mut app.zoned_four_regions, tr(lang, "Up to four semantic regions"))
-                    .on_hover_text(tr(lang, "Opt in to semantic regions beyond the historical sky/land pass; this costs one OneFormer pass per frame and may take longer."));
-            };
-            if shell.zoned_folded {
-                // Portraits: the same two switches, in a fold closed by default.
-                egui::CollapsingHeader::new(tr(lang, "Local areas"))
-                    .id_salt("sec_fit_zoned")
-                    .default_open(false)
-                    .show(ui, |ui| zoned_rows(self, ui));
-            } else {
-                zoned_rows(self, ui);
-            }
             });
     }
 }
