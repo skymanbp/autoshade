@@ -461,6 +461,17 @@ enum Command {
         /// (confidence capped) rather than withheld.
         #[arg(long, value_parser = unit_interval)]
         strength: Option<f32>,
+        /// One of the desktop app's five reverse-fit strength steps, as a
+        /// shorthand for --strength / --zoned / --regions / --ai-judge /
+        /// --deep (and refused together with any of them): 1 or light =
+        /// whole-frame fit at 0.65; 2 or standard = 0.65 with local areas
+        /// (the app's default); 3 or strong = 0.85 with local areas; 4 or
+        /// full = 1.0 with local areas and up to four semantic regions; 5 or
+        /// reviewed = full plus the paid AI review with one retry (up to two
+        /// vision calls; needs OPENAI_API_KEY).
+        #[arg(long, value_name = "1-5|light|standard|strong|full|reviewed",
+              conflicts_with_all = ["strength", "zoned", "regions", "ai_judge", "deep"])]
+        level: Option<fit::FitLevel>,
         /// Named recipe JSON artifact for `apply` (default:
         /// ./out/<stem>.matched.json). The canonical recipe.json in this
         /// photo's develop store — what the GUI and web restore — is ALWAYS
@@ -625,10 +636,9 @@ fn main() -> Result<()> {
             generative::reimagine(&cfg, &raw, &prompt, &fidelity, &q, fidelity_retry, &out)
                 .map(|_report| ())
         }
-        Command::Match { raw, target, render, zoned, regions, style_prompt, ai_judge, deep, strength, out, negative } => {
-            // --deep IS the review, iterated: asking for the loop without the
-            // reviewer is not a configuration, it is a typo.
-            match_cmd(&raw, &target, render, zoned, regions, style_prompt, ai_judge || deep, deep, strength, out, negative)
+        Command::Match { raw, target, render, zoned, regions, style_prompt, ai_judge, deep, strength, level, out, negative } => {
+            let k = match_knobs(level, zoned, regions, ai_judge, deep, strength);
+            match_cmd(&raw, &target, render, k.zoned, k.regions, style_prompt, k.ai_judge, k.deep, k.strength, out, negative)
         }
         Command::Correspond { source, target, out } => correspond_cmd(&source, &target, out),
         Command::Retouch { raw, mask, prompt, quality, full_res, out } => {
@@ -1713,6 +1723,37 @@ fn match_source(raw: &Path, negative: Option<&Path>) -> Result<(render::Plate, E
 /// deliverables are parametric (recipe JSON + XMP + optional full-res render),
 /// so the low-res generative experiment becomes a real, adjustable develop.
 #[allow(clippy::too_many_arguments)] // one flag per CLI switch; a struct would just rename them
+/// The five values `match` fits with: a `--level` step's row of
+/// [`fit::FitLevel::settings`], else the individual flags (clap refuses the
+/// two together).
+#[derive(Debug, PartialEq)]
+struct MatchKnobs {
+    zoned: bool,
+    regions: usize,
+    ai_judge: bool,
+    deep: bool,
+    strength: Option<f32>,
+}
+
+fn match_knobs(
+    level: Option<fit::FitLevel>,
+    zoned: bool,
+    regions: usize,
+    ai_judge: bool,
+    deep: bool,
+    strength: Option<f32>,
+) -> MatchKnobs {
+    match level {
+        Some(l) => {
+            let s = l.settings();
+            MatchKnobs { zoned: s.zoned, regions: s.regions, ai_judge: s.ai_judge, deep: s.deep, strength: Some(s.strength) }
+        }
+        // --deep IS the review, iterated: asking for the loop without the
+        // reviewer is not a configuration, it is a typo.
+        None => MatchKnobs { zoned, regions, ai_judge: ai_judge || deep, deep, strength },
+    }
+}
+
 fn match_cmd(
     raw: &Path,
     target: &Path,
@@ -3015,6 +3056,61 @@ mod tests {
         assert_eq!(budget.sat, 60.0);
         assert_eq!(budget.vetoes, autoshade::fit::VetoPolicy::Disclose);
     }
+    /// `match --level` is the desktop app's stepped strength: each number and
+    /// word parses to its step, the step resolves to exactly the table's row,
+    /// it is refused beside any flag it stands for, and without it the
+    /// individual flags reach the fit unchanged.
+    ///
+    /// MUTATION THIS CATCHES: a name dropped from `conflicts_with_all`,
+    /// `match_knobs` ignoring the level (or the flags), or `--deep` no
+    /// longer implying `--ai-judge`.
+    #[test]
+    fn match_level_parses_resolves_to_the_table_and_conflicts_with_its_flags() {
+        let parse = |extra: &[&str]| {
+            let mut args = vec!["autoshade", "match", "source.png", "target.png"];
+            args.extend_from_slice(extra);
+            Cli::try_parse_from(args)
+        };
+        let knobs = |extra: &[&str]| match parse(extra).expect("parses").command {
+            Command::Match { zoned, regions, ai_judge, deep, strength, level, .. } => {
+                (level, match_knobs(level, zoned, regions, ai_judge, deep, strength))
+            }
+            _ => panic!("match parser returned another command"),
+        };
+        for l in fit::FitLevel::ALL {
+            let s = l.settings();
+            let want = MatchKnobs { zoned: s.zoned, regions: s.regions, ai_judge: s.ai_judge, deep: s.deep, strength: Some(s.strength) };
+            for spelled in [l.step().to_string(), l.word().to_string()] {
+                let (level, k) = knobs(&["--level", &spelled]);
+                assert_eq!(level, Some(l), "--level {spelled}");
+                assert_eq!(k, want, "--level {spelled}");
+            }
+        }
+        assert!(parse(&["--level", "6"]).is_err() && parse(&["--level", "max"]).is_err());
+        for flag in [&["--strength", "0.9"][..], &["--zoned"], &["--regions", "4"], &["--ai-judge"], &["--deep"]] {
+            let mut args = vec!["--level", "standard"];
+            args.extend_from_slice(flag);
+            let err = parse(&args).err().unwrap_or_else(|| panic!("--level with {flag:?} must be refused"));
+            assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict, "{flag:?}");
+        }
+        // Without --level: the flags, unchanged (and --deep brings its review).
+        let (level, k) = knobs(&["--zoned", "--regions", "4", "--deep", "--strength", "0.7"]);
+        assert_eq!(level, None);
+        assert_eq!(k, MatchKnobs { zoned: true, regions: 4, ai_judge: true, deep: true, strength: Some(0.7) });
+        let (_, k) = knobs(&[]);
+        assert_eq!(
+            k,
+            MatchKnobs {
+                zoned: false,
+                regions: autoshade::fit_zoned::semantic::DEFAULT_SEMANTIC_REGIONS,
+                ai_judge: false,
+                deep: false,
+                strength: None,
+            },
+            "a bare match is the historical global fit"
+        );
+    }
+
     /// L09#1 ordering: with a nonexistent RAW, a bad `-o` must fail on the
     /// OUTPUT (pre-pay preflight), never on decode or a paid call.
     #[test]
