@@ -312,6 +312,11 @@ improvement and must not be offered.",
     )
 }
 
+// A revision round's adopt-or-keep question: one look at the held develop and
+// the candidate together.
+mod choice;
+pub use choice::{judge_choice, Choice, ChoiceImages};
+
 pub(super) fn task_instruction(task: JudgeTask, intent: Option<GradeIntent<'_>>) -> String {
     let base = match task {
         JudgeTask::Develop => {

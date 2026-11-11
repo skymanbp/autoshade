@@ -109,8 +109,8 @@ enum Command {
         /// its own answer (printed here in full); its reasoning tier goes up one
         /// step, and the visual judge may run up to 2-3 guided rounds instead of
         /// one. COSTS MORE: a normal analyze is at worst 11 API calls (6 with
-        /// images, 8 high-detail); with --deep at a committed strength it is at
-        /// worst 17 calls (10 with images, 14 high-detail), plus ~10-20% more
+        /// images, 9 high-detail); with --deep at a committed strength it is at
+        /// worst 17 calls (10 with images, 17 high-detail), plus ~10-20% more
         /// output tokens per proposal. `batch` never does this.
         #[arg(long)]
         deep: bool,

@@ -385,3 +385,55 @@ fn a_heuristic_note_marks_the_analysis_as_fallen_back() {
     assert!(analysis_fell_back(&[Note::new(keys::HEURISTIC_UNAVAILABLE, vec![])]));
     assert!(!analysis_fell_back(&[Note::new(keys::JUDGE_SCORE, vec![])]));
 }
+
+/// The judge-guided round asks its adopt-or-keep question in ONE look: the
+/// request after the revision carries three frames (the starting frame, the
+/// held render, the candidate render), and the candidate is adopted only
+/// when the judge prefers it.
+///
+/// MUTATION: adopt on the winner's score instead of `prefers_candidate` and
+/// the "preferred A at 95" run comes back with the revision.
+#[test]
+fn the_judge_round_chooses_between_the_held_and_the_candidate_in_one_look() {
+    let run = |preferred: &str, score: u32| {
+        let judgement = serde_json::json!({
+            "score": 60, "decision": "revise", "critique": "flat", "hint": "lift the shadows"
+        });
+        let choice = serde_json::json!({
+            "preferred": preferred, "score": score, "decision": "accept", "critique": "c", "hint": null
+        });
+        let (url, seen, handle) = stub_endpoint(vec![
+            (200, "application/json", propose_reply(serde_json::json!({ "exposure_ev": 0.3, "rationale": "first" }))),
+            (200, "application/json", verdict_reply("accept", None)),
+            (200, "application/json", propose_reply(judgement)),
+            (200, "application/json", propose_reply(serde_json::json!({ "shadows": 25.0, "rationale": "second" }))),
+            (200, "application/json", verdict_reply("accept", None)),
+            (200, "application/json", propose_reply(choice)),
+        ]);
+        let (dir, png) = fixture_png(&format!("c7-{preferred}"));
+        let (recipe, _, _) = super::super::produce_recipe(
+            &png,
+            None,
+            &stub_cfg(&url),
+            false,
+            None,
+            None,
+            super::super::GradeRequest::default(),
+            true,
+            crate::diag::stderr(),
+        )
+        .expect("the canned chain completes");
+        join_stub(handle);
+        let bodies = seen.lock().unwrap().clone();
+        let v: Value = serde_json::from_str(&bodies[5]).unwrap();
+        let frames = v["input"][0]["content"].as_array().unwrap().iter().filter(|c| c["type"] == "input_image").count();
+        assert_eq!(frames, 3, "one look at the starting frame, the held and the candidate");
+        let _ = std::fs::remove_dir_all(dir);
+        recipe
+    };
+    let adopted = run("B", 80);
+    assert_eq!(adopted.shadows, 25.0, "a preferred revision is adopted");
+    let kept = run("A", 95);
+    assert_eq!(kept.shadows, 0.0, "a revision the judge did not prefer is discarded, whatever the score");
+    assert!(kept.rationale.contains("the judge preferred this one"), "{}", kept.rationale);
+}

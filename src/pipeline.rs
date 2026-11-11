@@ -20,6 +20,9 @@ use crate::xmp;
 // reply is read against the answer it revises.
 mod advise;
 pub use advise::analysis_fell_back;
+// The stub config the analysis tests drive the chain with, for the judge's own tests.
+#[cfg(test)]
+pub(crate) use advise::tests::stub_cfg as advise_test_cfg;
 
 /// The TASTE dials one develop is asked for — the two independent axes plus the
 /// reference library's opt-in images.
@@ -877,8 +880,9 @@ pub fn produce_recipe(
     // identical revision short-circuits before paying for a verify or a
     // re-judge (that check lives inside `visual_review_round`, so it fires
     // on every round by construction). Worst case for one analyze: 11 API
-    // calls today (6 carrying images, 8 high-detail frames), 17 with deep
-    // thinking at a committed strength (10 with images, 14 frames) — the
+    // calls (6 carrying images, 9 high-detail frames — a guided round's judge
+    // call shows three), 17 with deep thinking at a committed strength (10
+    // with images, 17 frames) — the
     // numbers the GUI tooltip and `--deep`'s help quote.
     if judge && can_revise {
         // The judge scores the frame the deliverable will BE (`held_view`: an
@@ -911,6 +915,39 @@ pub fn produce_recipe(
                 // GATE 4: the judge can BUY a revision, so a rubric that does
                 // not know the target strength does not merely mis-report — it
                 // re-timid-ifies the develop the user asked to push.
+                Some(intent),
+            )
+        };
+        // A guided round's adopt-or-keep question, asked in ONE look
+        // (`judge_choice`): the straight frame, the held develop and the
+        // candidate, both rendered as the deliverable would be (`held_view`),
+        // both recipes as context, the same intent. The candidate is adopted
+        // only when the judge prefers it; the first round's absolute score
+        // (`judge_of`) is unchanged.
+        let choose_of = |held: &EditRecipe,
+                         held_opinions: Opinions,
+                         candidate: &EditRecipe,
+                         candidate_opinions: Opinions|
+         -> Result<crate::advisor::Choice, crate::advisor::AdvisorError> {
+            let encode = |r: &EditRecipe, o: Opinions| -> Result<Vec<u8>, crate::advisor::AdvisorError> {
+                let mut jpeg = Vec::new();
+                crate::render::develop_preview(&preview_img, &held_view(r, o))
+                    .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+                    .map_err(|e| {
+                        crate::advisor::AdvisorError::Io(std::io::Error::other(format!(
+                            "encode judge render JPEG: {e}"
+                        )))
+                    })?;
+                Ok(jpeg)
+            };
+            let (held_jpeg, candidate_jpeg) = (encode(held, held_opinions)?, encode(candidate, candidate_opinions)?);
+            // Oversize context is OMITTED, not truncated (review R20-N5).
+            let context = |r: &EditRecipe| serde_json::to_string(r).ok().filter(|s| s.len() <= 16 * 1024);
+            crate::advisor::judge_choice(
+                cfg,
+                crate::advisor::ChoiceImages { reference: &preview.jpeg, held: &held_jpeg, candidate: &candidate_jpeg },
+                context(held).as_deref(),
+                context(candidate).as_deref(),
                 Some(intent),
             )
         };
@@ -990,11 +1027,10 @@ pub fn produce_recipe(
                             Ok(asked)
                         },
                         |r| verifier.verify(r, meta, hist, &intent),
-                        // The candidate's own opinion: `visual_review_round`
-                        // judges only the recipe its propose closure just
-                        // returned (`judge(&revised)`), never the held one.
-                        |r| judge_of(r, candidate_opinions.get()),
-                        current.score,
+                        // ONE look at both develops: the held recipe under
+                        // its own opinions, the candidate (the recipe the
+                        // propose closure just returned) under its own.
+                        |r| choose_of(&recipe, opinions, r, candidate_opinions.get()),
                     );
                     rounds_done += 1;
                     match outcome {
@@ -1061,18 +1097,18 @@ pub fn produce_recipe(
                             ));
                             break;
                         }
-                        VisualRound::KeptLower { second_score } => {
+                        VisualRound::KeptHeld { held } => {
                             if verbose {
                                 println!(
-                                    "judge    : re-scored {second_score:.0}/100 — lower, revision discarded"
+                                    "judge    : shown both, preferred the held develop ({:.0}/100) — revision discarded",
+                                    held.score
                                 );
                             }
                             log.push(crate::rationale::Note::new(
-                                crate::rationale::keys::JUDGE_KEPT,
+                                crate::rationale::keys::JUDGE_PREFERRED_HELD,
                                 vec![
                                     ("score1", score1),
-                                    ("critique", current.critique.clone()),
-                                    ("score2", format!("{second_score:.0}")),
+                                    ("critique", held.critique.clone()),
                                 ],
                             ));
                             break;
@@ -1431,8 +1467,9 @@ pub(crate) fn judge_next_round(
 
 /// Outcome of one judge-guided visual revision round (R20 closed loop).
 pub(crate) enum VisualRound {
-    /// The revision re-scored at least as high — it replaces the recipe,
-    /// and `verdict` is the data verifier's fresh word on it.
+    /// Shown both renders, the judge preferred the revision — it replaces the
+    /// recipe, `verdict` is the data verifier's fresh word on it and `second`
+    /// the judge's word on it (its score is the round's new score).
     Adopted {
         recipe: Box<EditRecipe>,
         verdict: Verdict,
@@ -1442,8 +1479,10 @@ pub(crate) enum VisualRound {
     /// re-judge (two paid calls saved), and no "was adopted" claim for a
     /// recipe that never changed (review R20-S3).
     Unchanged,
-    /// The revision re-scored LOWER — discarded (do-no-harm).
-    KeptLower { second_score: f32 },
+    /// Shown both renders, the judge preferred the HELD develop (a tie
+    /// included) — the revision is discarded (do-no-harm). `held` is the
+    /// judge's word on the develop it preferred.
+    KeptHeld { held: crate::advisor::Judgement },
     /// Propose or verify failed — nothing to compare, keep the reviewed recipe.
     RoundFailed { e: String },
     /// The revision exists but could not be re-judged — an UNCOMPARED swap
@@ -1452,17 +1491,22 @@ pub(crate) enum VisualRound {
 }
 
 /// ONE guided revision, adopt-or-keep. Factored over closures so the
-/// contract — a revision must re-judge AT LEAST AS HIGH to replace the
-/// reviewed recipe, an identical revision short-circuits, and every failure
-/// keeps the reviewed recipe — is testable without a network (the three
-/// steps are remote in production).
+/// contract — a revision replaces the reviewed recipe only when the judge,
+/// shown the held render and the candidate render in ONE look, PREFERS the
+/// candidate; an identical revision short-circuits; and every failure keeps
+/// the reviewed recipe — is testable without a network (the three steps are
+/// remote in production). `choose` is handed the candidate; the held recipe
+/// is the caller's to render beside it.
+///
+/// It used to compare two independent absolute scores (`second >= first`):
+/// noisy, and a tie favoured the re-roll. A preference read off one look at
+/// both, with a tie resolved to the held develop by the prompt, is neither.
 pub(crate) fn visual_review_round(
     hint: &str,
     current: &EditRecipe,
     propose: impl FnOnce(&str) -> Result<EditRecipe, crate::advisor::AdvisorError>,
     verify: impl FnOnce(&EditRecipe) -> Result<Verdict, crate::advisor::AdvisorError>,
-    judge: impl FnOnce(&EditRecipe) -> Result<crate::advisor::Judgement, crate::advisor::AdvisorError>,
-    first_score: f32,
+    choose: impl FnOnce(&EditRecipe) -> Result<crate::advisor::Choice, crate::advisor::AdvisorError>,
 ) -> VisualRound {
     let revised = match propose(hint) {
         Ok(r) => r,
@@ -1484,15 +1528,13 @@ pub(crate) fn visual_review_round(
         Ok(v) => v,
         Err(e) => return VisualRound::RoundFailed { e: e.to_string() },
     };
-    match judge(&revised) {
-        // >= not >: at EQUAL scores the revision wins because the judge asked
-        // for it — the hint was followed and nothing was lost.
-        Ok(second) if second.score >= first_score => VisualRound::Adopted {
+    match choose(&revised) {
+        Ok(c) if c.prefers_candidate => VisualRound::Adopted {
             recipe: Box::new(revised),
             verdict: v2,
-            second,
+            second: c.winner,
         },
-        Ok(second) => VisualRound::KeptLower { second_score: second.score },
+        Ok(c) => VisualRound::KeptHeld { held: c.winner },
         Err(e) => VisualRound::RejudgeFailed { e: e.to_string() },
     }
 }
@@ -4713,46 +4755,46 @@ impl std::error::Error for SourceFolderRefused {}
 #[cfg(test)]
 mod visual_round_tests {
     use super::*;
-    use crate::advisor::{AdvisorError, Decision, Judgement};
+    use crate::advisor::{AdvisorError, Choice, Decision, Judgement};
 
     fn j(score: f32) -> Judgement {
         Judgement { score, decision: Decision::Revise, critique: "c".into(), hint: None }
+    }
+
+    fn pick(candidate: bool, score: f32) -> Choice {
+        Choice { prefers_candidate: candidate, winner: j(score) }
     }
 
     fn accept() -> Verdict {
         Verdict { decision: Decision::Accept, reasons: vec![], revised_hint: None }
     }
 
-    /// The adopt-or-keep contract: ≥ adopts (equality included — the judge
-    /// asked for the round), < keeps, and EVERY failure keeps the reviewed
-    /// recipe — a revision that cannot be compared must never replace it.
+    /// The adopt-or-keep contract: the judge sees the held render and the
+    /// candidate render in ONE look, and the candidate replaces the recipe
+    /// only when the judge PREFERS it — whatever the scores say, and a tie
+    /// (which the prompt resolves to the held develop) keeps it.
+    ///
+    /// MUTATION: adopt on `winner.score >= first_score` (the old two-score
+    /// rule) and the "preferred the held one despite a high score" arm adopts.
     #[test]
-    fn a_revision_replaces_the_recipe_only_when_the_rejudge_holds_the_score() {
+    fn a_revision_replaces_the_recipe_only_when_the_judge_prefers_it() {
         let cur = EditRecipe::default();
-        let revised = || {
-            Ok(EditRecipe { exposure_ev: 1.25, ..Default::default() })
-        };
-        // Higher re-score adopts, and carries the fresh verdict.
-        match visual_review_round("h", &cur, |_| revised(), |_| Ok(accept()), |_| Ok(j(80.0)), 70.0)
-        {
+        let revised = || Ok(EditRecipe { exposure_ev: 1.25, ..Default::default() });
+        match visual_review_round("h", &cur, |_| revised(), |_| Ok(accept()), |_| Ok(pick(true, 80.0))) {
             VisualRound::Adopted { recipe, second, .. } => {
                 assert_eq!(recipe.exposure_ev, 1.25, "the REVISED recipe rides out");
-                assert_eq!(second.score, 80.0);
+                assert_eq!(second.score, 80.0, "…with the judgement of the winner");
             }
-            _ => panic!("a higher re-score adopts"),
+            _ => panic!("a preferred candidate is adopted"),
         }
-        // EQUAL re-score adopts too: the hint was followed, nothing was lost.
         assert!(matches!(
-            visual_review_round("h", &cur, |_| revised(), |_| Ok(accept()), |_| Ok(j(70.0)), 70.0),
-            VisualRound::Adopted { .. }
+            visual_review_round("h", &cur, |_| revised(), |_| Ok(accept()), |_| Ok(pick(false, 95.0))),
+            VisualRound::KeptHeld { held } if held.score == 95.0
         ));
-        // Lower re-score keeps (do-no-harm), reporting the losing score.
-        assert!(matches!(
-            visual_review_round("h", &cur, |_| revised(), |_| Ok(accept()), |_| Ok(j(69.9)), 70.0),
-            VisualRound::KeptLower { second_score } if second_score == 69.9
-        ));
-        // The hint the judge wrote is what the proposer receives.
+        // The judge is shown the REVISED recipe as the candidate, and the
+        // proposer receives the hint the judge wrote.
         let mut got = String::new();
+        let mut judged = 0.0;
         let _ = visual_review_round(
             "lift shadows",
             &cur,
@@ -4761,15 +4803,18 @@ mod visual_round_tests {
                 revised()
             },
             |_| Ok(accept()),
-            |_| Ok(j(90.0)),
-            70.0,
+            |cand| {
+                judged = cand.exposure_ev;
+                Ok(pick(true, 90.0))
+            },
         );
         assert_eq!(got, "lift shadows");
+        assert_eq!(judged, 1.25);
     }
 
     /// R20-S3: a revision whose SETTINGS are identical short-circuits —
     /// prose differences (rationale/confidence) must not defeat the check,
-    /// and neither verify nor re-judge may be paid for a no-op.
+    /// and neither verify nor the choice may be paid for a no-op.
     #[test]
     fn an_identical_revision_short_circuits_without_paying_for_more_calls() {
         let cur = EditRecipe { exposure_ev: 0.5, rationale: "original prose".into(), ..Default::default() };
@@ -4784,8 +4829,7 @@ mod visual_round_tests {
             &cur,
             |_| Ok(same_settings),
             |_| panic!("verify must not be paid for a no-op revision"),
-            |_| panic!("re-judge must not be paid for a no-op revision"),
-            70.0,
+            |_| panic!("the choice must not be paid for a no-op revision"),
         );
         assert!(matches!(out, VisualRound::Unchanged));
     }
@@ -4920,9 +4964,15 @@ mod visual_round_tests {
                     },
                     |_| {
                         judges += 1;
-                        Ok(judged(next_round))
+                        let next = judged(next_round);
+                        // Shown both, the judge prefers the candidate exactly
+                        // when it reads better than the held develop.
+                        Ok(if next.score > current.score {
+                            Choice { prefers_candidate: true, winner: next }
+                        } else {
+                            Choice { prefers_candidate: false, winner: current.clone() }
+                        })
                     },
-                    current.score,
                 );
                 rounds += 1;
                 match outcome {
@@ -4971,8 +5021,9 @@ mod visual_round_tests {
              FIRST round's verify + re-judge were paid for"
         );
 
-        // R20 定案 2, do-no-harm: a lower re-score ends the chain and keeps the
-        // reviewed recipe (exposure stays at the previous round's value).
+        // R20 定案 2, do-no-harm: a candidate the judge does not prefer ends
+        // the chain and keeps the reviewed recipe (exposure stays at the
+        // previous round's value).
         let r = drive(&[60.0, 70.0, 55.0, 99.0], 0.9, true, None);
         assert_eq!((r.rounds, r.proposes, r.judges), (2, 2, 2));
         assert_eq!(r.final_exposure, 0.25, "the losing candidate must not survive");
@@ -5012,17 +5063,17 @@ mod visual_round_tests {
         let changed = || Ok(EditRecipe { exposure_ev: 0.5, ..Default::default() });
         let boom = || AdvisorError::Transport("boom".into());
         assert!(matches!(
-            visual_review_round("h", &cur, |_| Err(boom()), |_| Ok(accept()), |_| Ok(j(99.0)), 70.0),
+            visual_review_round("h", &cur, |_| Err(boom()), |_| Ok(accept()), |_| Ok(pick(true, 99.0))),
             VisualRound::RoundFailed { .. }
         ));
         assert!(matches!(
-            visual_review_round("h", &cur, |_| changed(), |_| Err(boom()), |_| Ok(j(99.0)), 70.0),
+            visual_review_round("h", &cur, |_| changed(), |_| Err(boom()), |_| Ok(pick(true, 99.0))),
             VisualRound::RoundFailed { .. }
         ));
         // A revision that cannot be RE-JUDGED is discarded, not gambled on —
         // its own arm, so the disclosure can say the revision existed.
         assert!(matches!(
-            visual_review_round("h", &cur, |_| changed(), |_| Ok(accept()), |_| Err(boom()), 70.0),
+            visual_review_round("h", &cur, |_| changed(), |_| Ok(accept()), |_| Err(boom())),
             VisualRound::RejudgeFailed { .. }
         ));
     }

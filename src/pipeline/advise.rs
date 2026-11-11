@@ -143,4 +143,4 @@ pub fn analysis_fell_back(notes: &[crate::rationale::Note]) -> bool {
 
 #[cfg(test)]
 #[path = "advise_tests.rs"]
-mod tests;
+pub(crate) mod tests;

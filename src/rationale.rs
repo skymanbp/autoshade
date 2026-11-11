@@ -1387,6 +1387,14 @@ pub mod keys {
     pub const JUDGE_KEPT: &str =
         " [AI visual review: {score1}/100 — {critique}; the guided revision \
          re-scored lower ({score2}/100) and was discarded (do-no-harm)]";
+    /// A guided round's candidate, shown beside the held develop in ONE look,
+    /// was not preferred (a tie keeps the held develop). Replaces
+    /// `JUDGE_KEPT`'s "re-scored lower": the round no longer compares two
+    /// separate scores.
+    pub const JUDGE_PREFERRED_HELD: &str =
+        " [AI visual review: {score1}/100; shown the guided revision beside this \
+         develop, the judge preferred this one and the revision was discarded \
+         (do-no-harm) — {critique}]";
     pub const JUDGE_UNCHANGED: &str =
         " [AI visual review: {score}/100 — {critique}; the guided revision \
          returned the same recipe — keeping it]";

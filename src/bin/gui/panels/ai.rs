@@ -388,7 +388,7 @@ impl AutoShadeApp {
                      buy one guided revision), written into the sliders — undoable. Uses the \
                      reference library or the Direction above (the switch picks one); Strength \
                      steers it. COST, worst case: 11 API \
-                     calls, 6 of them carrying images (8 high-detail frames). Ticking 「Deep \
+                     calls, 6 of them carrying images (9 high-detail frames). Ticking 「Deep \
                      thinking」 below OR pushing Strength above 70% raises that ceiling — \
                      either one alone does it; the Deep thinking tooltip has the numbers.",
                 )))
@@ -488,7 +488,7 @@ impl AutoShadeApp {
             // read off the Strength band directly above it.
             ui.checkbox(&mut self.deep_think, tr(lang, "Deep thinking"))
                 .on_hover_text(tr(lang,
-                    "Make the AI show its work and let it iterate. The proposal must first name what it sees, decide EACH tool family (tone / white balance / presence / HSL / colour grading / curves / detail / framing / masks) with a reason, state the look it is going for, and end by critiquing its own answer — those three sentences land in the 「Deep thinking」 box under the rationale. It also asks the image model for one step more reasoning effort (only when a tier other than 「provider default」 is set in Settings), and lets the visual judge keep going until it scores well enough: 2 rounds at a balanced Strength, 3 above 70%. COST: a normal analyze is at worst 11 API calls (6 with images, 8 high-detail frames); with this box ticked OR Strength above 70% — either one alone is enough — it is at worst 17 calls (10 with images, 14 high-detail), plus roughly 10-20% more output tokens per proposal. Batch and the eval harness never do this.",
+                    "Make the AI show its work and let it iterate. The proposal must first name what it sees, decide EACH tool family (tone / white balance / presence / HSL / colour grading / curves / detail / framing / masks) with a reason, state the look it is going for, and end by critiquing its own answer — those three sentences land in the 「Deep thinking」 box under the rationale. It also asks the image model for one step more reasoning effort (only when a tier other than 「provider default」 is set in Settings), and lets the visual judge keep going until it scores well enough: 2 rounds at a balanced Strength, 3 above 70%. COST: a normal analyze is at worst 11 API calls (6 with images, 9 high-detail frames); with this box ticked OR Strength above 70% — either one alone is enough — it is at worst 17 calls (10 with images, 17 high-detail), plus roughly 10-20% more output tokens per proposal. Batch and the eval harness never do this.",
                 ));
             });
     }
