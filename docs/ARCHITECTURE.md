@@ -1653,7 +1653,7 @@ this trait.)
 |------|------------------|--------------|-----|
 | **Image advisor** (图像) | OpenAI-compatible vision over HTTP — the Responses API, or Chat Completions when the endpoint has no `/responses` (**API style** in Settings, `advisor::post_vision`; default `gpt-5.5`); Settings offers **API** (a real key) or **OAuth** (a local Codex bridge fronting a ChatGPT subscription) | **yes** (preview) | Look at the photo → emit an `EditRecipe`. The `claude` CLI has no image input in print mode, so this role never uses the claude OAuth path. |
 | **Analyst / verifier** (分析) | **OAuth** (`claude` CLI, default model `opus`) **or** API (OpenAI-compatible chat) | **no** (data only) | Reason over EXIF/histogram; **acceptance-verify** the recipe (ranges sane? consistent with metadata & intent? confidence adequate?) and flag/veto bad recipes. |
-| **Visual judge** (R20, `advisor::judge` — reuses the image role's endpoint/key, not a third credential) | same OpenAI-compatible vision endpoint as the image role | **yes** (reference + candidate renders) | Score a RESULT against a reference (strict-schema `{score, decision, critique, hint}`). Two consumers: the analyze closed loop (proposal rendered → judged → one guided revision, adopted only on a ≥ re-score) and the reverse-fit's opt-in AI review (target vs fitted render). Since R23-6 the fit review's `hint` is SHOWN (R20 dropped it silently) and, with the opt-in `deep` switch, is read by `advisor::hint_action` as a CHOICE among the app's own bounded moves (`FitAction`) — never as a parameter value, which is why the closed list lives beside the reply it reads. |
+| **Visual judge** (R20, `advisor::judge` — reuses the image role's endpoint/key, not a third credential) | same OpenAI-compatible vision endpoint as the image role | **yes** (reference + candidate renders) | Score a RESULT against a reference (strict-schema `{score, decision, critique, hint}`). Two consumers: the analyze closed loop (proposal rendered → judged → one guided revision, adopted only on a ≥ re-score) and the reverse-fit's opt-in AI review (target vs fitted render). Since R23-6 the fit review's `hint` is SHOWN (R20 dropped it silently) and, with the opt-in retry (`match --deep`; the GUI's reviewed strength step), is read by `advisor::hint_action` as a CHOICE among the app's own bounded moves (`FitAction`) — never as a parameter value, which is why the closed list lives beside the reply it reads. |
 
 > The verifier judges at the **data level** — recipe + histogram/clipping stats +
 > the advisor's rationale — *without* re-doing vision. The R20 judge is the
@@ -1709,8 +1709,10 @@ How hard the AI pushes is a first-class user input: `recipe::GradeStrength`
 (0..1) — the GUI's Analysis-fold **Strength** slider, the CLI's `--strength`,
 the web body's `grade_strength`. The reverse-fit's honesty budget (F1) is the
 same TYPE read from a second dial: since 2026-09-12 the Reverse-fit fold has
-its own **Reverse-fit strength** slider (`fit_strength`, persisted on its own
-key), and neither dial reaches the other's function — user decision: a control
+its own **Reverse-fit strength** control — since 2026-11-10 five steps from one
+library table (`fit::FitLevel`, also `match --level`), each step naming the
+budget, the local areas, their region count and the paid review; persisted as
+`Prefs.fit_level` — and neither control reaches the other's function — user decision: a control
 belongs to the section whose function it serves, and a function two sections
 need gets two controls. It has two NAMED points: `0.50` is the point every restraint
 NUMBER in the app was tuned at (the 147-photo eval of `f944ef3` plus
@@ -8344,8 +8346,8 @@ panics on an unparseable one, so font loading degrades safely.
 Portraits, Normal — and the choice is a GUI-layer preference only: `Prefs.mode`
 in `gui-prefs.ron`, read back just to mark the last card. A mode is a table of
 display switches (`Mode::shell`) that the shared panel code reads at the one
-place each switch governs — which sections are drawn, whether the reverse-fit's
-local-area switches are folded, the Open dialog's extension order. The
+place each switch governs — which sections are drawn, the Open dialog's
+extension order. The
 library, the CLI, the web UI and the recipe format know nothing of it, so no battery, gate or saved develop forks
 on a mode.
 
