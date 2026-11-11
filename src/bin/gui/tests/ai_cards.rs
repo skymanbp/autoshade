@@ -143,6 +143,41 @@
         assert!(!app.unsaved_marker_dirty(), "the landing saved the forked strip: {}", app.status);
     }
 
+    /// An analysis that fell back to the heuristic baseline says so in its
+    /// own words — never "AI edit applied" — and is not saved automatically,
+    /// even under an Accept verdict (the verifier accepts a plain baseline).
+    ///
+    /// MUTATION: drop `&& !fell_back` from `accepted` and the landing saves the
+    /// baseline; drop the `fell_back` status arm and the status reads as an AI
+    /// develop.
+    #[test]
+    fn an_analysis_that_fell_back_says_so_and_is_not_saved() {
+        let (mut app, _ctx, _dir, _src, _master, _ai_px, _scrub) =
+            ai_card_fixture("fallback", EditRecipe::default());
+        let epoch = app.gen_epoch;
+        let note = autoshade::rationale::Note::new(
+            autoshade::rationale::keys::HEURISTIC_UNAVAILABLE,
+            vec![("e", "quota".into())],
+        );
+        app.on_analyzed(
+            Lang::En,
+            epoch,
+            Box::new(Ok((
+                EditRecipe { contrast: 8.0, ..Default::default() },
+                autoshade::advisor::Verdict {
+                    decision: autoshade::advisor::Decision::Accept,
+                    reasons: Vec::new(),
+                    revised_hint: None,
+                },
+                vec![note],
+            ))),
+        );
+        assert!(app.status.starts_with("No AI edit"), "{}", app.status);
+        assert!(!app.status.contains("AI edit applied"), "{}", app.status);
+        assert!(app.unsaved_marker_dirty(), "a fallback is not saved automatically: {}", app.status);
+        assert_eq!(app.recipe.contrast, 8.0, "it still lands on the canvas, unsaved");
+    }
+
     /// 2026-10-01 (user decision, replacing 2026-09-15's new-card landing): a
     /// generative fill lands as a LAYER on the card it was made on — the
     /// strip does not grow, the card keeps its develop, base and pixel

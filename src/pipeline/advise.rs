@@ -131,6 +131,16 @@ pub(crate) fn analysis_frame(
     }
 }
 
+/// Did this analysis fall back to the heuristic baseline — no image model, or
+/// the image model failed — instead of producing an AI edit? Read off the
+/// typed notes the call returned (the heuristic's own note is always among
+/// them), so every surface can say so in its own words rather than calling a
+/// generic exposure fix an "AI edit".
+pub fn analysis_fell_back(notes: &[crate::rationale::Note]) -> bool {
+    use crate::rationale::keys;
+    notes.iter().any(|n| n.key == keys::HEURISTIC_UNAVAILABLE || n.key == keys::HEURISTIC_NO_KEY)
+}
+
 #[cfg(test)]
 #[path = "advise_tests.rs"]
 mod tests;

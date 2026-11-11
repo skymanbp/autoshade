@@ -1507,6 +1507,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("a saved develop exists but holds no effective edits", "已保存的显影存在但不含有效编辑"),
     ("the current variant holds no edits; this photo's saved edits live in {n} background variant(s)",
         "当前变体未作修改；本照片已保存的编辑在 {n} 个后台变体中"),
+    ("No AI edit: the image model could not be used, so only a simple automatic exposure fix was applied (the AI panel says why). Not saved yet (Ctrl+S saves, Ctrl+Z undoes)",
+        "没有 AI 调整：图像模型无法使用，只做了一个基本的自动曝光修正（原因见 AI 面板）。尚未保存（Ctrl+S 保存，Ctrl+Z 撤销）"),
     ("AI edit applied — the AI's self-check said: {v}. Not saved yet (Ctrl+S saves, Ctrl+Z undoes)",
         "AI 调整已应用 —— AI 自查结果：{v}。尚未保存（Ctrl+S 保存，Ctrl+Z 撤销）"),
     // Verdict decision words (advisor::decision_key) + the verdict line

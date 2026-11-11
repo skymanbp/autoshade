@@ -1453,7 +1453,10 @@ kept in the local cache rather than committed to the repository.
 | Style indexing and retrieval | |
 
 Without the vision role, the advisor can fall back to its disclosed histogram
-heuristic, which is not equivalent to the full vision-backed feature. The
+heuristic, which is not equivalent to the full vision-backed feature; the
+desktop app's status line then says that no AI edit was made, and that result
+is never saved automatically. A key outside the response schema in the model's
+reply is dropped and named in the rationale rather than failing the proposal. The
 data-only verifier defaults to the signed-in `claude` CLI over OAuth, so it does
 not require an API key, although provider-backed operations may still consume a
 subscription or incur charges.

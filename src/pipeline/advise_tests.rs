@@ -336,3 +336,52 @@ fn the_analysis_frame_is_the_calibrated_develop_for_a_fresh_raw_analysis_only() 
     }
 }
 
+
+/// One stray top-level key from an endpoint that ignores the strict schema no
+/// longer fails the whole paid parse (and drops the analysis to the heuristic
+/// baseline): it is dropped before the parse and named in the rationale.
+///
+/// MUTATION: skip `drop_unknown_recipe_keys` and the parse fails on
+/// `deny_unknown_fields` — the analysis then falls back, and the exposure
+/// assertion fails.
+#[test]
+fn a_stray_reply_key_is_dropped_and_disclosed_instead_of_failing_the_parse() {
+    let (url, _seen, handle) = stub_endpoint(vec![
+        (
+            200,
+            "application/json",
+            propose_reply(serde_json::json!({ "exposure_ev": 0.3, "made_up_key": 1, "rationale": "r" })),
+        ),
+        (200, "application/json", verdict_reply("accept", None)),
+    ]);
+    let (dir, png) = fixture_png("c4-stray");
+    let (recipe, _verdict) = analyze(&png, &url);
+    join_stub(handle);
+    assert_eq!(recipe.exposure_ev, 0.3, "the model's own proposal survives");
+    assert!(
+        recipe.rationale.contains("keys the response schema does not define: made_up_key"),
+        "{}",
+        recipe.rationale
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Only keys outside the schema go; every schema key stays.
+#[test]
+fn only_keys_outside_the_schema_are_dropped() {
+    let mut reply = serde_json::json!({ "exposure_ev": 0.3, "masks": [], "zzz": true, "base_curve": [] });
+    let mut dropped = crate::advisor::drop_unknown_recipe_keys(&mut reply);
+    dropped.sort();
+    assert_eq!(dropped, vec!["base_curve".to_string(), "zzz".to_string()]);
+    assert_eq!(reply["exposure_ev"], 0.3);
+    assert!(reply.get("masks").is_some());
+}
+
+/// The fallback is read off the heuristic's own notes, both of them.
+#[test]
+fn a_heuristic_note_marks_the_analysis_as_fallen_back() {
+    use crate::rationale::{keys, Note};
+    assert!(analysis_fell_back(&[Note::new(keys::HEURISTIC_NO_KEY, vec![])]));
+    assert!(analysis_fell_back(&[Note::new(keys::HEURISTIC_UNAVAILABLE, vec![])]));
+    assert!(!analysis_fell_back(&[Note::new(keys::JUDGE_SCORE, vec![])]));
+}

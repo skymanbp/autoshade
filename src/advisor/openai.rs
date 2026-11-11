@@ -758,6 +758,10 @@ impl OpenAiProvider {
         if let Some(held) = ctx.held {
             super::fill_absent_from_held(&mut parsed, held);
         }
+        // A key the schema does not define would fail the strict parse — and
+        // with it the whole paid proposal. Dropped and disclosed, exactly as a
+        // null is lifted out above rather than failing the parse.
+        let unknown_keys = super::drop_unknown_recipe_keys(&mut parsed);
         let repaired = repair_hsl_axis_lengths(&mut parsed);
         // The `ai` masks the model asked for, spelled as the engine's own
         // geometry with no alpha yet (the pipeline cuts it locally). An
@@ -787,6 +791,24 @@ impl OpenAiProvider {
         // string is byte-identical to what it always was while the GUI gets a
         // key it can render in the session language.
         let mut notes: Vec<Note> = Vec::new();
+        if !unknown_keys.is_empty() {
+            // Key NAMES only, at most eight (an endpoint echoing the whole
+            // engine recipe would otherwise crowd the rationale), bounded and
+            // projected like every other remote string.
+            let mut shown = unknown_keys.iter().take(8).cloned().collect::<Vec<_>>().join(", ");
+            if unknown_keys.len() > 8 {
+                shown.push_str(&format!(" and {} more", unknown_keys.len() - 8));
+            }
+            let shown = BoundedUntrustedText::new(&shown, 512, &[key]).into_string();
+            crate::rationale::push_note(
+                &mut recipe.rationale,
+                &mut notes,
+                Note::new(
+                    keys::PROPOSAL_LIMITS_DISCARDED,
+                    vec![("dropped", format!("keys the response schema does not define: {shown}"))],
+                ),
+            );
+        }
         if !masks_dropped.is_empty() {
             crate::rationale::push_note(
                 &mut recipe.rationale,
@@ -1248,12 +1270,13 @@ mod tests {
                 !body.contains("recipe.rationale.push_str("),
                 "the provider is writing untyped prose into the rationale again"
             );
-            // Three: the dropped ai-mask targets (2026-10-21), the repaired
-            // HSL axes, and the discarded over-limit controls.
+            // Four: the dropped keys outside the response schema, the dropped
+            // ai-mask targets (2026-10-21), the repaired HSL axes, and the
+            // discarded over-limit controls.
             assert_eq!(
                 body.matches("&mut notes,").count(),
-                3,
-                "all three provider disclosures must ride the typed channel"
+                4,
+                "all four provider disclosures must ride the typed channel"
             );
 
         // A correctly-sized mixer is left completely alone (no false note).

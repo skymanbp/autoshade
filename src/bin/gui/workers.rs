@@ -1878,8 +1878,13 @@ impl AutoShadeApp {
                         // pre-analyze step and Ctrl+Z skips it.
                         self.commit_pending_names();
                         self.commit_now();
+                        // A heuristic fallback is not an AI edit: it says so in
+                        // its own words below and, like a non-Accept verdict,
+                        // is never saved automatically (the verifier happily
+                        // accepts a plain baseline).
+                        let fell_back = autoshade::pipeline::analysis_fell_back(&rationale_notes);
                         let accepted =
-                            verdict.decision == autoshade::advisor::Decision::Accept;
+                            verdict.decision == autoshade::advisor::Decision::Accept && !fell_back;
                         // The recipe arrives with its base_curve already
                         // stamped by produce_recipe (saved-curve-first, else a
                         // fresh estimate) — the single authority all three
@@ -1931,7 +1936,15 @@ impl AutoShadeApp {
                         // an unpersisted analyze silently diverges from every
                         // one of them. An existing explicit save is snapshotted
                         // to v<N> first, never destroyed.
-                        self.status = if !accepted {
+                        self.status = if fell_back {
+                            let t = tr(
+                                lang,
+                                "No AI edit: the image model could not be used, so only a simple automatic exposure fix was applied (the AI panel says why). Not saved yet (Ctrl+S saves, Ctrl+Z undoes)",
+                            )
+                            .to_string();
+                            self.toast(ToastKind::Error, t.clone());
+                            t
+                        } else if !accepted {
                             // The verifier itself judged this result not
                             // ready, and a non-Accept verdict may not
                             // auto-save (user decision). The result stays on

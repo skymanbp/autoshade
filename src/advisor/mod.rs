@@ -342,6 +342,30 @@ pub struct ProposeContext<'a> {
     pub calibrated_frame: bool,
 }
 
+/// The top-level keys of a proposal reply that the response schema does not
+/// define, REMOVED before the strict parse and returned for the caller's
+/// disclosure.
+///
+/// `EditRecipe` is `deny_unknown_fields`, so one stray key from an endpoint
+/// that ignores the strict schema failed the whole paid parse and dropped the
+/// analysis to the heuristic baseline. The schema is the contract the model
+/// was given, so a key outside it is either noise or an echo of the engine's
+/// own fields (an ADJUST or revision envelope shows the whole recipe JSON):
+/// neither is an answer, and the engine re-establishes its own fields after
+/// the parse (the calibration stamp, the ADJUST carry-over).
+pub(crate) fn drop_unknown_recipe_keys(v: &mut serde_json::Value) -> Vec<String> {
+    let Some(obj) = v.as_object_mut() else { return Vec::new() };
+    let schema = catalogue::edit_recipe_schema();
+    let Some(props) = schema.get("properties").and_then(serde_json::Value::as_object) else {
+        return Vec::new();
+    };
+    let unknown: Vec<String> = obj.keys().filter(|k| !props.contains_key(*k)).cloned().collect();
+    for key in &unknown {
+        obj.remove(key);
+    }
+    unknown
+}
+
 /// A revision reply's ABSENT schema keys, taken from the recipe it revises.
 ///
 /// The strict schema makes every key required, so a schema-honouring endpoint

@@ -19,6 +19,7 @@ use crate::xmp;
 // What a revision round of the analysis chain shows the proposer, and how its
 // reply is read against the answer it revises.
 mod advise;
+pub use advise::analysis_fell_back;
 
 /// The TASTE dials one develop is asked for — the two independent axes plus the
 /// reference library's opt-in images.
