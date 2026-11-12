@@ -52,6 +52,17 @@ if [ "${ran:-0}" -ne "${#names[@]}" ]; then
 fi
 
 if [ "$mode" = all ] && [ "$index" -eq 0 ]; then
-  cargo test --locked "$@" --bins --tests
+  # `--bins --test '*'`, not `--bins --tests`. `--tests` is every target with
+  # `test = true`, the library among them: it ran the whole library suite a
+  # second time, unsharded, inside this one job (run 43247169220: 273 minutes
+  # on Linux after the shard's own 30, and macOS cut off at six hours). The
+  # glob names the integration tests under tests/ and nothing else. Guarded,
+  # as the shard's own count is: the library's test program starting in this
+  # step is an error.
+  cargo test --locked "$@" --bins --test '*' 2>&1 | tee "$work/rest"
+  if grep -q 'unittests src/lib\.rs' "$work/rest"; then
+    echo "::error::shard 0's non-library step ran the library's tests again"
+    exit 1
+  fi
   cargo test --locked "$@" --doc
 fi
