@@ -72,10 +72,14 @@ and reference-pair gate before it shipped.
   walk are gone; each had been one consequence of the rule, read on one
   class with its own numbers.
 - **A proposal the law refuses is repaired, not thrown away.** A class the
-  rule refuses is re-estimated from the cells' own asks under the rule, and
-  where no single control can be moved on its own it is scaled toward
-  neutral as a whole until the rule admits it. The report says which class
-  was re-estimated or scaled and by how much.
+  rule refuses is either re-estimated from the cells' own asks under the
+  rule or scaled toward neutral as a whole until the rule admits it —
+  whichever leaves the picture closer to the target. The report says which
+  class was re-estimated or scaled and by how much.
+- **A colour spread thin across brightness still has a say.** A grey road
+  or a pale wall can cover a real part of the picture and still be only a
+  sliver at any one brightness. Such areas are now heard together, so a
+  control that would tint them is held back.
 - **The curve's freedom follows the evidence.** Where the pixels pair, every
   knot of a tone curve is a free coordinate of the solve, so the solver can
   shape a curve the stages did not propose. Where only the distributions can
@@ -220,9 +224,11 @@ and reference-pair gate before it shipped.
 - **Nine real pairs against v1.17.1** — eleven fits, with the reference pair
   at three strengths and the night pair from its RAW and from its processed
   master — each fitted by the released v1.17.1 command line and by this
-  build and compared against its target: every one reads closer to its
-  target over the whole frame than v1.17.1's, and every finished photo was
-  looked at beside its target and v1.17.1's.
+  build and compared against its target: every fit of the same scene reads
+  closer to its target over the whole frame than v1.17.1's; the one pair
+  whose target is a different photograph, where a pixel-by-pixel distance
+  means nothing, takes the target's dusk on its ground and keeps its own
+  sky. Every finished photo was looked at beside its target and v1.17.1's.
 - **Every mechanism in the law has a toy that reads it**, each pinned to the
   reading on this tree with the attribution written beside the number: the
   withheld-sky toy keeps its untrusted range at identity, the calibration

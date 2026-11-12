@@ -1293,23 +1293,60 @@ impl<'c, 'a> Joint<'c, 'a> {
         }
     }
 
-    /// One class of `p` repaired, `p` refused on it: with `refit`, the
-    /// class RE-ESTIMATED from the cells' asks under its law
-    /// ([`Joint::ask_fit`]) and kept when the whole is no longer refused on
-    /// it; otherwise, or failing that, the class SCALED toward the base
-    /// ([`scale_class`]) to the largest fraction the whole is admitted at on
-    /// it, by bisection ([`REPAIR_BISECTIONS`]; the base of the class at
-    /// λ = 0 is admitted for it by construction). "On it" is the class's OWN
-    /// verdict ([`Joint::refused_on`]), whatever another class reads at the
-    /// trial: another class's refusal is that class's repair. Returns the fraction of
-    /// the estimate kept: 1.0 for the re-estimate, λ for the scaling. Used
-    /// by [`Joint::repair`] on the start and by [`Joint::descend`] on a step
-    /// refused on a class the other coordinates' move put past its law
+    /// One class of `p` repaired, `p` refused on it: of its repairs
+    /// ([`Joint::class_repairs`] — the class re-estimated from its asks, and
+    /// the class scaled toward the base) the one that reads the lower J*, a
+    /// tie the re-estimate's. A repair restores admissibility at the least
+    /// loss of the LOOK; what each control earns against its price is the
+    /// elimination's to read ([`Joint::eliminate`]), so F does not choose
+    /// here: a re-estimate of fewer degrees of freedom reads the lower F
+    /// beside a stage's estimate that reads the better look. Returns the
+    /// fraction of the estimate kept: 1.0 for the re-estimate, λ for the
+    /// scaling.
+    fn repair_class(&self, p: &mut Point, class: Refusal, refit: bool) -> f32 {
+        let repairs = self.class_repairs(p, class, refit);
+        // `min_by` keeps the first of equal readings: the re-estimate.
+        match repairs.into_iter().min_by(|a, b| a.1.j.total_cmp(&b.1.j)) {
+            Some((repaired, _, lambda)) => {
+                *p = repaired;
+                lambda
+            }
+            None => 0.0,
+        }
+    }
+
+    /// The repairs of one class of `p`, `p` refused on it, each with its
+    /// reading and the fraction of the estimate it keeps — the re-estimate
+    /// first. With `refit`, the class RE-ESTIMATED from the cells' asks under
+    /// its law ([`Joint::ask_fit`]; 1.0), where that moved it and the whole
+    /// is no longer refused on it; and always the class SCALED toward the
+    /// base ([`scale_class`]) to the largest fraction λ the whole is admitted
+    /// at on it, by bisection ([`REPAIR_BISECTIONS`]; the base of the class
+    /// at λ = 0 is admitted for it by construction). "On it" is the class's
+    /// OWN verdict ([`Joint::refused_on`]), whatever another class reads at
+    /// the trial: another class's refusal is that class's repair.
+    ///
+    /// Both are admitted on the class, so both are READ and the caller
+    /// chooses (J144, 2026-11-12). Until then the re-estimate was taken wherever it
+    /// was admitted, unread, and the scaling only failing that: a stage's
+    /// tone refused by a hair was replaced whole by a fit of the cells' asks
+    /// that read several times worse, and the descent that followed never
+    /// came back (the roundtrip toy: J* 0.00775 as proposed, refused on
+    /// luma[0.00-0.06] for 0.0725 ln against 0.0705 — under one output
+    /// code — and 0.02999 as it entered the descent; the atmosphere toy
+    /// 0.00910 → 0.05743, gates/j144). A shape refused on DIRECTION in a
+    /// cell is refused at every λ, its scaling is the class's base, and the
+    /// re-estimate reads the better look: what the re-estimation exists for
+    /// (the haze pair, 2026-11-08) is decided as before.
+    ///
+    /// Used by [`Joint::repair`] on the start and by [`Joint::descend`] on a
+    /// step refused on a class the other coordinates' move put past its law
     /// (gates/j109: the re-estimate alone read worse on F than the class
     /// did, and the step was lost; scaled, the class keeps most of its work
     /// and the step is admitted).
-    fn repair_class(&self, p: &mut Point, class: Refusal, refit: bool) -> f32 {
+    fn class_repairs(&self, p: &Point, class: Refusal, refit: bool) -> Vec<(Point, Eval, f32)> {
         let ctx = self.ctx;
+        let mut out: Vec<(Point, Eval, f32)> = Vec::new();
         if refit {
             let full = self.ask_fit(p, class);
             let ef = self.eval(&full);
@@ -1321,13 +1358,12 @@ impl<'c, 'a> Joint<'c, 'a> {
             // admitted together and refused apart, gates/j120).
             let moved = without_class(ctx.base, &full.recipe, class) != full.recipe;
             if moved && !self.refused_on(&full, &ef.px, class) {
-                *p = full;
-                return 1.0;
+                out.push((full, ef, 1.0));
             }
         }
         let coords = class_coords(class, p);
         let (mut lo, mut hi) = (0.0f32, 1.0f32);
-        let mut kept: Option<Point> = None;
+        let mut kept: Option<(Point, Eval)> = None;
         for _ in 0..REPAIR_BISECTIONS {
             let mid = 0.5 * (lo + hi);
             let mut trial = p.clone();
@@ -1337,15 +1373,22 @@ impl<'c, 'a> Joint<'c, 'a> {
                 hi = mid;
             } else {
                 lo = mid;
-                kept = Some(trial);
+                kept = Some((trial, e));
             }
         }
-        *p = kept.unwrap_or_else(|| {
+        let (scaled, es) = kept.unwrap_or_else(|| {
             let mut at_base = p.clone();
             scale_class(&mut at_base, &coords, 0.0, ctx);
-            at_base
+            let e = self.eval(&at_base);
+            (at_base, e)
         });
-        lo
+        out.push((scaled, es, lo));
+        if crate::config::live_env_os("AUTOSHADE_G_TRACE").is_some() {
+            for (_, e, lambda) in &out {
+                eprintln!("G repair candidate {class:?} at {lambda:.3}: J* {:.5} price {:.3} F {:.5}", e.j, e.price, e.f());
+            }
+        }
+        out
     }
 
     /// The frame a class's work is read FROM for `p` ([`without_class`]),
@@ -1640,13 +1683,12 @@ impl<'c, 'a> Joint<'c, 'a> {
                             if !others.is_empty() {
                                 let mut moved = self.apply(p, &others);
                                 if moved.recipe != p.recipe {
-                                    // Re-estimated, or scaled toward the base
-                                    // where the re-estimate is worse on F
-                                    // (gates/j109).
-                                    for refit in [true, false] {
-                                        let mut repaired = moved.clone();
-                                        self.repair_class(&mut repaired, class, refit);
-                                        let e = self.eval(&repaired);
+                                    // Re-estimated or scaled toward the base,
+                                    // the lower F first: the step is accepted
+                                    // on F (gates/j109, J144).
+                                    let mut repairs = self.class_repairs(&moved, class, true);
+                                    repairs.sort_by(|a, b| a.1.f().total_cmp(&b.1.f()));
+                                    for (repaired, e, _) in repairs {
                                         if self.refusal(&repaired, &e.px).is_none() && e.f() < best.f() {
                                             moved = repaired;
                                             reestimated = true;

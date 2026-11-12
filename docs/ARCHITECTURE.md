@@ -4452,26 +4452,41 @@ last candidate is asked first of the next and a class's frame without it is
 kept by the recipe it renders — the same verdict at less than its cost): the
 control-validity law of
 `fit::validity`. A class of controls may not leave any evidence cell worse,
-on the axes it moves, than it found it. A cell is a source-luma bin × hue
-band (17 × 8, plus a neutral band under chroma 0.06) that holds at least
-`EVIDENCE_MIN_SHARE` of the evidence mass and `SUPPORT_MIN_PIXELS` pixels;
-its ASK is the weighted median of target − before over the cell's paired
-pixels, or the quantile-matched change between the before and target
-populations where the frame does not pair, with a standard error; its MOVE
+on the axes it moves, than it found it. A cell is the set of source pixels
+a class cannot act on separately: the partition source-luma bin × hue band
+(17 × 8, plus a neutral band under chroma 0.06), merged along the axis the
+class cannot tell apart (2026-11-09) — the tone on the 17 brightness ranges,
+the white balance on the nine hue bands, the chroma dials on hue band × the
+grade wheels' three regions, the channel curves on the fine grid. A cell
+stands on `EVIDENCE_MIN_SHARE` of the evidence mass and `SUPPORT_MIN_PIXELS`
+pixels, and the units of a grid short of that are POOLED along brightness,
+neighbours first, until the pool stands (2026-11-12): a population spread
+thin over brightness — a grey ramp that is an eighth of the frame and 0.8 %
+of it in each of fifteen ranges — had no cell on the fine grid, and the
+channel curves stained it unheard. A cell's ASK is the weighted median of
+target − before over its paired pixels, or the quantile-matched change
+between the before and target populations where the frame does not pair
+(a population ask stands for the cell only where the members that have one
+carry the majority of its readable weight, 2026-11-12), with a standard
+error; its MOVE
 is the class's own work on the cell; "worse" is `|move − ask| > |ask| + se`.
 The tone is read on brightness (ln linear luma), the white balance on its
 two log-gain axes, the chroma dials and the channel curves on brightness and
 the sRGB chroma as a Cartesian vector at the hue. A cell no evidence speaks for on a class's axes that
 the class moves anyway is BLIND: refused under `VetoPolicy::Withhold`,
 disclosed under `Disclose` (`FIT_NOTE_VETO_DISCLOSED`, the report capped).
-A start the law refuses is not emptied: the refused class is RE-ESTIMATED
-from the law's own asks — its coordinates descend on the ask misfit
-`Σ mass · |move − ask|²` (`validity::Cells::asks` / `misfit`,
-`Joint::ask_fit`) — and only where that is still refused SCALED toward the
-base until it is admitted (`Joint::repair`, six bisections); the report
-names the class and the fraction kept (`FIT_NOTE_SEED_SCALED`). Scaling
-alone kept the stages' shape, and a shape refused on direction in one cell
-stayed refused at every fraction (2026-11-08). The law replaces, as
+A start the law refuses is not emptied: the refused class is both
+RE-ESTIMATED from the law's own asks — its coordinates descend on the ask
+misfit `Σ mass · |move − ask|²` (`validity::Cells::asks` / `misfit`,
+`Joint::ask_fit`) — and SCALED toward the base to the largest fraction the
+law admits (six bisections), and the repair keeps the one that reads the
+lower J* (`Joint::class_repairs`, 2026-11-12; until then the re-estimate
+was kept wherever it was admitted, unread, and a stage's tone refused by
+less than one output code was replaced by an estimate that read several
+times worse); the report names the class and the fraction kept
+(`FIT_NOTE_SEED_SCALED`). Scaling alone kept the stages' shape, and a shape
+refused on direction in one cell stayed refused at every fraction
+(2026-11-08): there the re-estimate reads the better look and is kept. The law replaces, as
 code, the luma and hue unsupported-range vetoes of the global solve, the
 white balance's foreign-hue and rotation gates and its 2026-11-01
 shared-component rule, and the four cast gates (ratio, foreign hue, rotation,

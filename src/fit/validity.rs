@@ -21,7 +21,10 @@
 //!   grade wheels' three regions, the channel curves (which act per channel
 //!   and do tell hues apart) on the fine grid. A cell has standing when it carries
 //!   [`EVIDENCE_MIN_SHARE`] of the presence mass and [`SUPPORT_MIN_PIXELS`]
-//!   pixels. The judge weights are the presence weights (R11).
+//!   pixels; the units of a grid short of that are POOLED along brightness
+//!   until the pool has it (J145, [`Cells`]), so a population spread over
+//!   brightness is still heard. The judge weights are the presence weights
+//!   (R11).
 //! * The **axes** are the class's own: brightness as ln linear luma (the tone,
 //!   the chroma dials, the curves); the white balance's Kelvin and tint as
 //!   `ln R − ln B` and `ln G − (ln R + ln B)/2` on linear RGB (the axes
@@ -186,6 +189,22 @@ fn reading(samples: &mut Vec<(f32, f32)>, axis: Axis, level: f32) -> Option<(f32
     let m = weighted_median(samples);
     let se = median_se(samples, m);
     Some((m, (se * se + code_variance(axis, level)).sqrt()))
+}
+
+/// Do the members with a population ask carry the MAJORITY of the weight of
+/// the members the axis can be read on? `samples` are the cell's population
+/// asks on one slot `(ask, weight)`, NaN where the member's brightness range
+/// has no target population; a member is readable where its before
+/// coordinate `before` is finite and its population weight `pw` is positive.
+fn population_majority(samples: &[(f32, f32)], members: &[u32], before: &[f32], pw: &dyn Fn(usize) -> f32) -> bool {
+    let asked: f64 = samples.iter().filter(|&&(v, w)| v.is_finite() && w > 0.0).map(|&(_, w)| w as f64).sum();
+    let readable: f64 = members
+        .iter()
+        .map(|&i| i as usize)
+        .filter(|&i| before[i].is_finite() && pw(i) > 0.0)
+        .map(|i| pw(i) as f64)
+        .sum();
+    asked >= 0.5 * readable
 }
 
 /// Quantile-matched target value for every source sample (the population
@@ -397,12 +416,56 @@ impl Cells {
             format!("luma[{:.2}-{:.2}]", b0 as f32 / EVIDENCE_LUMA_BINS as f32, (b1 + 1) as f32 / EVIDENCE_LUMA_BINS as f32)
         };
         let band_label = |band: usize| if band == 0 { "neutral".to_string() } else { crate::recipe::HSL_BANDS[band - 1].to_string() };
-        let cell = |label: String, members: Vec<u32>| -> Option<Cell> {
-            let mass: f32 = members.iter().map(|&i| w[i as usize]).sum();
-            let standing = (members.len() as f32) >= SUPPORT_MIN_PIXELS
+        let mass_of = |members: &[u32]| -> f32 { members.iter().map(|&i| w[i as usize]).sum() };
+        let standing = |members: &[u32]| -> bool {
+            (members.len() as f32) >= SUPPORT_MIN_PIXELS
                 && total > 0.0
-                && (mass as f64) / total >= EVIDENCE_MIN_SHARE as f64;
-            standing.then_some(Cell { label, members, mass })
+                && (mass_of(members) as f64) / total >= EVIDENCE_MIN_SHARE as f64
+        };
+        // The units of ONE population along brightness, pooled where they
+        // have no standing alone (J145, 2026-11-12): a unit with standing is
+        // its own cell; the units without are pooled in brightness order —
+        // neighbours first — and each pool is a cell as soon as it has
+        // standing, a last pool short of it joining the pool before it. Only
+        // a population whose units without standing stay under it TOGETHER
+        // has no cell for them. Until then a unit without standing was not
+        // read at all, and a population SPREAD over brightness had no voice
+        // on the finest grid: the canyon toy's grey ramp is an eighth of the
+        // frame, 0.8 % in each of fifteen ranges; the channel curves that
+        // carried the rocks and the sky stained it by 19.6 codes of 255 (it
+        // matched the target to begin with; v1.17.1 left it at 9.2), and the
+        // law admitted them on every cell it could hear (gates/j145).
+        // `units`: (first range, last range, members), in brightness order.
+        let pooled = |units: Vec<(usize, usize, Vec<u32>)>| -> Vec<(usize, usize, Vec<u32>)> {
+            let mut out: Vec<(usize, usize, Vec<u32>)> = Vec::new();
+            let mut pool: Option<(usize, usize, Vec<u32>)> = None;
+            let mut last_pool: Option<usize> = None;
+            for (b0, b1, members) in units {
+                if standing(&members) {
+                    out.push((b0, b1, members));
+                    continue;
+                }
+                if members.is_empty() {
+                    continue;
+                }
+                let open = pool.get_or_insert_with(|| (b0, b1, Vec::new()));
+                open.1 = b1;
+                open.2.extend(members);
+                if standing(&open.2) {
+                    last_pool = Some(out.len());
+                    out.extend(pool.take());
+                }
+            }
+            if let (Some((_, b1, members)), Some(at)) = (pool, last_pool) {
+                out[at].1 = out[at].1.max(b1);
+                out[at].2.extend(members);
+            }
+            out.sort_by_key(|unit| unit.0);
+            out
+        };
+        let cell = |label: String, members: Vec<u32>| -> Cell {
+            let mass = mass_of(&members);
+            Cell { label, members, mass }
         };
         // The grade wheels' region of a brightness range: the render's own
         // split at the default grade, read at the range's centre.
@@ -413,33 +476,58 @@ impl Cells {
         };
         let region_name = ["shadows", "midtones", "highlights"];
         // Tone: per brightness range, the hue bands merged.
-        let by_range: Vec<Cell> = (0..EVIDENCE_LUMA_BINS)
-            .filter_map(|bin| cell(range_label(bin, bin), (0..9).flat_map(|band| fine[bin * 9 + band].iter().copied()).collect()))
-            .collect();
-        // White balance: per hue band, the brightness ranges merged.
+        let by_range: Vec<Cell> = pooled(
+            (0..EVIDENCE_LUMA_BINS)
+                .map(|bin| (bin, bin, (0..9).flat_map(|band| fine[bin * 9 + band].iter().copied()).collect()))
+                .collect(),
+        )
+        .into_iter()
+        .map(|(b0, b1, members)| cell(range_label(b0, b1), members))
+        .collect();
+        // White balance: per hue band, the brightness ranges merged (one unit
+        // per population: nothing to pool along).
         let by_band: Vec<Cell> = (0..9)
-            .filter_map(|band| cell(band_label(band), (0..EVIDENCE_LUMA_BINS).flat_map(|bin| fine[bin * 9 + band].iter().copied()).collect()))
+            .map(|band| (band, (0..EVIDENCE_LUMA_BINS).flat_map(|bin| fine[bin * 9 + band].iter().copied()).collect::<Vec<u32>>()))
+            .filter(|(_, members)| standing(members))
+            .map(|(band, members)| cell(band_label(band), members))
             .collect();
-        // Chroma dials: hue band × grade region.
-        let mut by_region_band: Vec<Cell> = Vec::new();
-        for (region, name) in region_name.iter().enumerate() {
-            let bins: Vec<usize> = (0..EVIDENCE_LUMA_BINS).filter(|&bin| region_of(bin) == region).collect();
-            let (Some(&b0), Some(&b1)) = (bins.first(), bins.last()) else { continue };
-            for band in 0..9 {
-                let members: Vec<u32> = bins.iter().flat_map(|&bin| fine[bin * 9 + band].iter().copied()).collect();
-                if let Some(c) = cell(format!("{} {}/{}", name, range_label(b0, b1), band_label(band)), members) {
-                    by_region_band.push(c);
-                }
+        // Chroma dials: hue band × grade region, a band's regions pooled.
+        let region_bins: Vec<Vec<usize>> =
+            (0..3).map(|region| (0..EVIDENCE_LUMA_BINS).filter(|&bin| region_of(bin) == region).collect()).collect();
+        let region_label = |b0: usize, b1: usize| {
+            let (r0, r1) = (region_of(b0), region_of(b1));
+            if r0 == r1 { region_name[r0].to_string() } else { format!("{}+{}", region_name[r0], region_name[r1]) }
+        };
+        let mut by_region_band: Vec<(usize, usize, Cell)> = Vec::new();
+        for band in 0..9 {
+            let units: Vec<(usize, usize, Vec<u32>)> = region_bins
+                .iter()
+                .filter_map(|bins| {
+                    let (b0, b1) = (*bins.first()?, *bins.last()?);
+                    Some((b0, b1, bins.iter().flat_map(|&bin| fine[bin * 9 + band].iter().copied()).collect()))
+                })
+                .collect();
+            for (b0, b1, members) in pooled(units) {
+                let label = format!("{} {}/{}", region_label(b0, b1), range_label(b0, b1), band_label(band));
+                by_region_band.push((b0, band, cell(label, members)));
             }
         }
+        by_region_band.sort_by_key(|(b0, band, _)| (*b0, *band));
+        let by_region_band: Vec<Cell> = by_region_band.into_iter().map(|(_, _, c)| c).collect();
         // Channel curves: the fine grid — a curve acts per channel, so at one
         // brightness it does tell hues apart (a red lift warms the rocks and
         // turns a pale sky violet, the sickness the law refuses on the sky's
-        // own cell).
-        let fine_cells: Vec<Cell> = (0..EVIDENCE_LUMA_BINS)
-            .flat_map(|bin| (0..9).map(move |band| (bin, band)))
-            .filter_map(|(bin, band)| cell(format!("{}/{}", range_label(bin, bin), band_label(band)), fine[bin * 9 + band].clone()))
-            .collect();
+        // own cell) — a hue band's ranges pooled.
+        let mut fine_cells: Vec<(usize, usize, Cell)> = Vec::new();
+        for band in 0..9 {
+            let units: Vec<(usize, usize, Vec<u32>)> =
+                (0..EVIDENCE_LUMA_BINS).map(|bin| (bin, bin, fine[bin * 9 + band].clone())).collect();
+            for (b0, b1, members) in pooled(units) {
+                fine_cells.push((b0, band, cell(format!("{}/{}", range_label(b0, b1), band_label(band)), members)));
+            }
+        }
+        fine_cells.sort_by_key(|(b0, band, _)| (*b0, *band));
+        let fine_cells: Vec<Cell> = fine_cells.into_iter().map(|(_, _, c)| c).collect();
         let grids = [by_range, by_band, by_region_band, fine_cells];
         let target = coords_of(&tp[..n]);
         let target_bin = tp[..n].iter().map(|p| evidence_luma_bin(luma601(p)) as u8).collect();
@@ -563,6 +651,20 @@ impl Cells {
                         } else {
                             Vec::new()
                         };
+                        // A population ask speaks for the cell only where the
+                        // members that HAVE one are the majority of those the
+                        // axis can be read on — the paired side's own rule
+                        // (`use_paired`), on this side. A colour ask exists
+                        // per brightness range and a cell of the white
+                        // balance or the chroma dials spans ranges, so
+                        // without it a sliver in a populated range answered
+                        // for a cell whose bulk has no target population
+                        // (the strip fixture: 3.4 % of the Blue cell), and
+                        // the cell the law calls blind never was.
+                        if !use_paired && !population_majority(&ask_samples, members, bcol[slot], &pw) {
+                            complete = false;
+                            break;
+                        }
                         match reading(&mut ask_samples, axis, level) {
                             Some(a) => asks.push(a),
                             None => {

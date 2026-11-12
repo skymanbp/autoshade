@@ -1919,8 +1919,8 @@ rotation and shared-component gates — each had been one consequence of it, rea
 descent along the finite-difference gradient of J* moves the free coordinates together at steps 8/4/2/1 and a
 coordinate polish follows at 2/1, each control is held against its re-polished absence on F, the base recipe is a
 candidate with no degrees of freedom that ships when the solve is no better, and a start the law refuses is
-re-estimated from the law's own asks and, where still refused, scaled toward the base until it is admitted (disclosed
-by class and fraction); no stage shrinks, halves or
+repaired class by class — re-estimated from the law's own asks, or scaled toward the base to the largest fraction it
+admits, whichever reads the lower J* (disclosed by class and fraction); no stage shrinks, halves or
 holds its own estimate, and the projection, the cast→WB hand-off walk, the stage and terminal do-no-harm are retired.
 
 Atmosphere mode is entered because structure diverges; its instruments are the
@@ -1991,8 +1991,10 @@ and zero-confidence fields are conservation-tested to change nothing.
   (may an analysis search the library) and `AUTOSHADE_STYLE_DESCRIBE` (may a
   build write look phrases). `--embed`/`--no-embed`, `--describe` and the GUI
   preferences travel on the request; nothing writes the process environment.
-- Control-validity law (`fit::validity`): a cell is a source-luma bin × hue band that
-  stands on `EVIDENCE_MIN_SHARE` of the evidence mass and `SUPPORT_MIN_PIXELS` pixels; a
+- Control-validity law (`fit::validity`): a cell is a source-luma bin × hue band, merged per class along
+  the axis the class cannot tell apart, that
+  stands on `EVIDENCE_MIN_SHARE` of the evidence mass and `SUPPORT_MIN_PIXELS` pixels (units short
+  of that are pooled along brightness until the pool stands); a
   class's move on a cell is admitted while `|move − ask| ≤ |ask| + se`; a cell with no ask on
   the class's axes is blind once its displacement passes `UNSUPPORTED_RANGE_MOVE` (**the cell
   floors are the evidence model's own; the law itself has no tuned threshold**).
