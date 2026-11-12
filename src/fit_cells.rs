@@ -227,6 +227,40 @@ struct CellReading {
     converged: bool,
     diverged: bool,
     aligned: bool,
+    /// The means the verdict was read from — before, after, target — kept
+    /// for the trace ([`PairedCells::refused_trace`]).
+    means: [[f32; 3]; 3],
+}
+
+/// J147 (v1.18.0). One cell's reading of ONE move, for a consumer whose
+/// control changes brightness and colour together (the colour field): did
+/// the mean land closer, how far from its target did it land, and does the
+/// move point toward the target — as a whole, along its tone, along its
+/// colour ([`MoveAxis`]). One measurement ([`PairedCells::moves`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CellMove {
+    /// The mean landed strictly closer than it started ([`CONVERGE_MARGIN`]).
+    pub(crate) converged: bool,
+    /// Chebyshev distance from the mean to its target after the move.
+    pub(crate) landed: f32,
+    pub(crate) toward_whole: bool,
+    pub(crate) toward_tone: bool,
+    pub(crate) toward_colour: bool,
+}
+
+impl CellMove {
+    /// The whole-move verdict (R34): closer, and the whole move inside the
+    /// line of the whole ask.
+    pub(crate) fn vouched(self) -> bool {
+        self.converged && self.toward_whole
+    }
+
+    /// Closer, and toward the target along the tone AND along the colour,
+    /// each read on its own axis: the move goes where its target lies on
+    /// both, and only mixes the two otherwise than the ask does.
+    pub(crate) fn vouched_by_axis(self) -> bool {
+        self.converged && self.toward_tone && self.toward_colour
+    }
 }
 
 impl PairedCells {
@@ -352,7 +386,7 @@ impl PairedCells {
     }
 
     /// Which cell an analysis pixel sits in — the index into
-    /// [`Self::verdicts`], so a per-pixel consumer and the region verdict
+    /// [`Self::moves`], so a per-pixel consumer and the region verdict
     /// cannot disagree about which cell answered for a pixel.
     pub(crate) fn cell_of(&self, i: usize) -> Option<usize> {
         self.of_pixel.get(i).copied()
@@ -389,21 +423,66 @@ impl PairedCells {
         Self::fold(&self.measure(before, after, region, axis))
     }
 
-    /// R34. The per-CELL verdicts behind [`Self::vouch`]'s shares, for the
-    /// consumers that admit pixel by pixel rather than region by region: one
-    /// entry per cell, `None` where the cell was not read, `Some(converged &&
-    /// aligned)` where it was.
+    /// R34 / J147. The per-CELL view behind [`Self::vouch`]'s shares, for the
+    /// consumer that admits cell by cell rather than region by region (the
+    /// colour field): every cell's [`CellMove`] for one move, `None` where
+    /// the cell was not read.
     ///
-    /// Same pass, same numbers: a pixel can never be admitted by a cell the
+    /// Same pass, same numbers: a cell can never be admitted on a reading the
     /// region verdict counted the other way, because there is only one
-    /// measurement and these are two views of it.
-    pub(crate) fn verdicts(
+    /// measurement and these are two views of it — [`CellMove::vouched`] is
+    /// the whole-move verdict the region folds, and the direction test is
+    /// asked again along each axis of the same three means.
+    pub(crate) fn moves(
         &self,
         before: &[[f32; 3]],
         after: &[[f32; 3]],
         region: Option<&[f32]>,
-    ) -> Vec<Option<bool>> {
-        Self::cellwise(self.measure(before, after, region, MoveAxis::Full))
+    ) -> Vec<Option<CellMove>> {
+        self.measure(before, after, region, MoveAxis::Full)
+            .into_iter()
+            .map(|reading| {
+                reading.map(|r| {
+                    let [b, a, t] = &r.means;
+                    CellMove {
+                        converged: r.converged,
+                        landed: distance(a, t),
+                        toward_whole: r.aligned,
+                        toward_tone: aligned(b, a, t, MoveAxis::Tone),
+                        toward_colour: aligned(b, a, t, MoveAxis::Colour),
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// The cells [`Self::moves`] read and refused whole, one line each for the
+    /// fit trace (`AUTOSHADE_FIT_TRACE`): the cell's column and row, the three
+    /// means its verdict was read from in 8-bit display codes, which half of
+    /// the verdict failed, and the direction test asked again along the tone
+    /// and the colour axis alone.
+    pub(crate) fn refused_trace(&self, before: &[[f32; 3]], after: &[[f32; 3]]) -> Vec<String> {
+        let codes = |p: &[f32; 3]| p.map(|c| (c * 255.0 * 10.0).round() / 10.0);
+        self.measure(before, after, None, MoveAxis::Full)
+            .iter()
+            .enumerate()
+            .filter_map(|(cell, reading)| {
+                let r = reading.as_ref().filter(|r| !(r.converged && r.aligned))?;
+                let [b, a, t] = &r.means;
+                Some(format!(
+                    "cell c{} r{}: before {:?} after {:?} target {:?} converged {} aligned {} (tone alone {}, colour alone {})",
+                    cell % CELLS_X,
+                    cell / CELLS_X,
+                    codes(b),
+                    codes(a),
+                    codes(t),
+                    r.converged,
+                    r.aligned,
+                    aligned(b, a, t, MoveAxis::Tone),
+                    aligned(b, a, t, MoveAxis::Colour),
+                ))
+            })
+            .collect()
     }
 
     fn fold(readings: &[Option<CellReading>]) -> CellVouch {
@@ -428,10 +507,6 @@ impl PairedCells {
             aligned: share(aligned),
             read,
         }
-    }
-
-    fn cellwise(readings: Vec<Option<CellReading>>) -> Vec<Option<bool>> {
-        readings.into_iter().map(|r| r.map(|r| r.converged && r.aligned)).collect()
     }
 
     /// The one pass both public verdicts are taken from.
@@ -499,6 +574,7 @@ impl PairedCells {
                     converged: da + CONVERGE_MARGIN < db,
                     diverged: da > db + fit::UNSUPPORTED_RANGE_MOVE,
                     aligned: aligned(&b, &a, t, axis),
+                    means: [b, a, *t],
                 })
             })
             .collect()

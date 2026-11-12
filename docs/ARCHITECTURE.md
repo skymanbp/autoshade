@@ -4783,7 +4783,8 @@ preview on the per-pixel ruler, worst of four corpus pairs 0.001832, hence
 hue and a structural term beside the distance; 1.8e-3 from 0.001786 on the
 estimation weights); the nine bare
 1e-4 margins, the tone rulers', the bands' end state and the zones' frame
-allowance all read it. A LOCAL correction (zone, tile, free mask, band set,
+allowance all read it, and since J146 the colour field's per-zone guard does
+too. A LOCAL correction (zone, tile, free mask, band set,
 range set, zone tint) ships when it earns `FIT_QUANT` on its own population —
 the objective over the region's own present pixels and its own worst band —
 and the frame is a guard that may not rise by more than `FIT_QUANT`
@@ -5392,7 +5393,7 @@ carried, so admitting pixel by pixel lets a converged minority delete a
 refusal its own region disagrees with (measured: a frame whose cells read 0.337
 converged / 0.663 diverged lifted a one-sided Blue band's veto). The region's
 verdict is therefore folded FIRST (`vouch`, `CellVouch`), and the per-cell view
-(`verdicts`) goes only to the one consumer that chooses a vertex per cell; the
+(`moves`) goes only to the one consumer that chooses a vertex per cell; the
 arm that lifted a veto cell by cell inside a vouched region left with the
 global cast gate it served (v1.18.0, below). One pass, one set of
 numbers, so a pixel can never be admitted by a cell the region verdict counted
@@ -5450,7 +5451,23 @@ threshold. Four sites consumed it (the second retired in v1.18.0):
     RENDERED and put to the cells: an admitted cell takes its vertices (its
     column, the vertex rows that refine its row, every luma bin —
     `fit_field::cell_vertex_spans`), every other cell keeps pass A's, and a field that admits no cell
-    is the pre-R34 field byte for byte. Two do-no-harm checks follow, the
+    is the pre-R34 field byte for byte. Since v1.18.0 (J147) a READ cell that
+    refuses the whole of pass B is asked again along the axes the field moves
+    (`fit_cells::PairedCells::moves`, `fit_zoned::field::cell_take`): it takes
+    the whole of pass B when it landed closer and points toward the target
+    along tone and along colour, each read on its own axis; failing that, pass
+    B's colour over pass A's tone or its tone over pass A's colour
+    (`compose_axes`), whichever lands closer, when that part alone is vouched
+    on its axis. It is the zones' rule — a control vouched along the axis it
+    moves — at the one stage that was still asked all or nothing, and every
+    candidate is a part of the pixel-solved pass B put to the same cell means.
+    The whole-move angle holds brightness and colour to one proportion: on
+    the reference pair at 0.65 it refused a sky cell whose pass B landed
+    closer (13.3 -> 11.5 codes from its target mean) and was toward the
+    target on both axes (cosines 1.00 and 0.87, 0.36 on the whole move), the
+    cell kept pass A — nothing — inside a block its neighbours corrected, and
+    showed as a greenish patch (`FIELD_AXIS_ADMITTED` counts such cells,
+    printed only when there are any). Two do-no-harm checks follow, the
     frame's and a per-ZONE one read off the attached zone masks through
     `render::preview_mask_coverage`, because a field that pays for the sky out of the
     land wins on the frame and loses the picture. Since 2026-09-24 both checks
@@ -5467,7 +5484,15 @@ threshold. Four sites consumed it (the second retired in v1.18.0):
     the field is solved again around it
     (`FIELD_ZONE_PINNED` names the zone before the field, under the first solve
     and under the field that ships). The re-solve faces the same two checks; a
-    zone still regressed after its pin gives the field back as before. Zones are
+    zone still regressed after its pin gives the field back as before.
+    "Regressed" is read at the fit's own margin (v1.18.0, J146): the per-zone
+    check is a guard, as the frame is to a local correction
+    (`fit::ships_local`), and a zone is regressed when the field raises its
+    own reading by more than `FIT_QUANT`. Under R1 any rise refused, and the
+    reference pair at 0.65 gave its whole solved field back for a free mask's
+    0.009720 -> 0.010004, 0.15 of the margin: whole-frame deltaE 10.28 where
+    v1.17.1 read 4.70, and 4.35 in the next round with the guard at its
+    margin. Zones are
     pinned only once they regress, because the field does real work inside
     settled zones: pinning every zone before the first solve took the night
     pair from its master at 0.85 to deltaE 11.15 and ripple 7.40, against 5.11

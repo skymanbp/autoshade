@@ -2479,10 +2479,16 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       were read on that pairing instead, and {admitted} took the support-free \
       solve on the same cell-mean verdict the measured cells take it on.",
         " 颜色场的布局准入：有 {read} 个像素级证据完全读不到的单元位于分割器在两帧里都找到的同一区域内，改按该区域配对来读；其中 {admitted} 个按与已测单元相同的格均值裁定采用了不带结构支持项的求解。"),
+    (" Colour field axis admission: of the cells that refused it whole, {whole} \
+      took the support-free solve on the direction read along tone and along \
+      colour separately, {colour} took its colour alone and {tone} its tone \
+      alone, each landing closer to the target's own cell mean; only the others \
+      kept the support-weighted solve.",
+        " 颜色场的分轴准入：在整体拒绝该求解的单元中，有 {whole} 个按影调与颜色两个方向分别判读后采用了不带结构支持项的求解，{colour} 个只采用了它的颜色部分，{tone} 个只采用了它的影调部分，每一个都让本单元的均值更接近目标自身的单元均值；只有其余单元保留带结构支持项的求解。"),
     (" The solved colour field was given back: it improved the frame but moved \
-      the {label} zone {before} -> {after}, and the field may not cost an \
-      attached zone anything (per-zone do-no-harm check).",
-        " 已解出的颜色场被退回：它让整幅画面更接近目标，但把 {label} 分区从 {before} 变成 {after}，而颜色场不允许让已附加的分区变差（逐分区不使画面变差的检查）。"),
+      the {label} zone {before} -> {after}, a loss past the fit's own rounding, \
+      and the field may not cost an attached zone that (per-zone do-no-harm check).",
+        " 已解出的颜色场被退回：它让整幅画面更接近目标，但把 {label} 分区从 {before} 变成 {after}，超出了反推自身的取整误差，而颜色场不允许让已附加的分区变差这么多（逐分区不使画面变差的检查）。"),
     (" The solved colour field moved the {label} zone {before} -> {first}, a \
       loss the field may not cause an attached zone, so that zone was pinned to its own \
       render and the field solved again around it: with the field it ships the \

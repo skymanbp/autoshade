@@ -174,7 +174,7 @@ fn the_cells_of_a_repainted_region_admit_the_support_free_field() {
     );
     let pass_a = LocalField::solve(&current, &target, w, h, &report.evidence)
         .expect("the analysis field solves");
-    let (merged, admitted, read, _) =
+    let (merged, admitted, read, _, by_axis) =
         admit_cells(&current, &target, w, h, &report.evidence, pass_a.clone(), 0.60, &[], None);
     assert!(read > 0, "the instrument was consulted: {admitted} of {read}");
     assert!(admitted > 0, "the repainted cells must be admitted: {admitted} of {read}");
@@ -184,11 +184,97 @@ fn the_cells_of_a_repainted_region_admit_the_support_free_field() {
                 .any(|span| merged.grid[span.clone()] != pass_a.grid[span])
         })
         .collect();
-    assert_eq!(moved.len(), admitted, "exactly the admitted cells took pass B");
+    assert_eq!(
+        moved.len(),
+        admitted + by_axis.cells(),
+        "exactly the admitted cells took pass B, whole or by axis ({by_axis:?})"
+    );
     assert!(
         moved.iter().all(|cell| cell % crate::fit_cells::CELLS_X >= crate::fit_cells::CELLS_X / 4),
         "…and they are the repainted ones, not the untouched left edge: {moved:?}"
     );
+}
+
+/// A Custom-role linear mask over the repainted right half, as the
+/// multi-region route attaches one.
+fn right_half_region() -> crate::recipe::LocalAdjustment {
+    crate::recipe::LocalAdjustment {
+        mask: crate::recipe::MaskGeometry::Linear { zero_x: 0.49, zero_y: 0.5, full_x: 0.51, full_y: 0.5 },
+        name: "region-1".into(),
+        role: crate::recipe::MaskRole::Custom,
+        amount: 1.0,
+        ..Default::default()
+    }
+}
+
+/// J147. The admission ladder of one read cell, rung by rung. The whole of
+/// pass B on its own verdict first; then the whole of it when it landed
+/// closer and points toward the target along tone and along colour apart
+/// (the measured cell: closer, 0.36 on the whole move); then one part alone
+/// on its own axis — the closer landing when both are vouched; and nothing
+/// for a cell no candidate takes closer.
+/// MUTATION: drop the `vouched_by_axis` rung in `cell_take` — the second
+/// assertion fails.
+#[test]
+fn the_admission_ladder_of_one_cell() {
+    let reading = |converged: bool, landed: f32, whole: bool, tone: bool, colour: bool| CellMove {
+        converged,
+        landed,
+        toward_whole: whole,
+        toward_tone: tone,
+        toward_colour: colour,
+    };
+    let refused = reading(false, 0.046, false, true, true);
+    assert_eq!(cell_take(reading(true, 0.01, true, true, true), None, None), CellTake::Whole);
+    assert_eq!(
+        cell_take(reading(true, 0.045, false, true, true), None, None),
+        CellTake::WholeByAxis,
+        "closer and toward on each axis: the whole move is taken"
+    );
+    // The whole move overshot (not closer): a part alone, on its own axis.
+    let colour_alone = Some(reading(true, 0.025, false, false, true));
+    let tone_alone = Some(reading(true, 0.020, false, true, false));
+    assert_eq!(cell_take(refused, None, colour_alone), CellTake::Colour);
+    assert_eq!(cell_take(refused, tone_alone, None), CellTake::Tone);
+    assert_eq!(cell_take(refused, tone_alone, colour_alone), CellTake::Tone, "the closer landing of the two");
+    assert_eq!(
+        cell_take(refused, Some(reading(true, 0.030, false, true, false)), colour_alone),
+        CellTake::Colour,
+        "the closer landing of the two"
+    );
+    // A part read on the WRONG axis, or one that did not land closer, is not taken.
+    assert_eq!(cell_take(refused, colour_alone, tone_alone), CellTake::Nothing, "each part answers on its own axis");
+    assert_eq!(
+        cell_take(refused, Some(reading(false, 0.01, true, true, true)), Some(reading(false, 0.01, true, true, true))),
+        CellTake::Nothing,
+        "a cell nothing takes closer takes nothing"
+    );
+    assert_eq!(cell_take(refused, None, None), CellTake::Nothing);
+}
+
+/// J147. A composed vertex carries the tone of one vertex and the colour of
+/// the other: its EV and slope and the level its gains share (their Rec.601
+/// mean) are the tone's, its gains' offsets from that level the colour's.
+/// Composing a vertex with itself returns it, and the gains stay inside the
+/// bound.
+#[test]
+fn a_composed_vertex_carries_one_tone_and_the_other_colour() {
+    let level = |v: &[f32; 5]| 0.299 * v[1] + 0.587 * v[2] + 0.114 * v[3];
+    let (b, a) = ([-0.26f32, -0.15, -0.16, -0.03, -0.02], [0.02f32, 0.03, 0.01, -0.02, 0.0]);
+    assert_eq!(compose_axes(&b, &b, 0.35), b);
+    let tone_of_b = compose_axes(&b, &a, 0.35);
+    assert_eq!((tone_of_b[0], tone_of_b[4]), (b[0], b[4]), "EV and slope are the tone's");
+    assert!((level(&tone_of_b) - level(&b)).abs() < 1e-6, "the gains' level is the tone's");
+    for c in 1..4 {
+        let (got, want) = (tone_of_b[c] - level(&tone_of_b), a[c] - level(&a));
+        assert!((got - want).abs() < 1e-6, "channel {c}: the offset from the level is the colour's");
+    }
+    let colour_of_b = compose_axes(&a, &b, 0.35);
+    assert_eq!((colour_of_b[0], colour_of_b[4]), (a[0], a[4]));
+    assert!((colour_of_b[2] - colour_of_b[3] - (b[2] - b[3])).abs() < 1e-6, "pass B's green against its blue");
+    // Inside the bound the solve was held to.
+    let wide = compose_axes(&[0.0, 0.35, 0.35, 0.35, 0.0], &[0.0, 0.35, -0.35, -0.35, 0.0], 0.35);
+    assert!(wide[1..4].iter().all(|g| g.abs() <= 0.35), "{wide:?}");
 }
 
 /// The per-zone do-no-harm judges EVERY mask the recipe carries. A Custom-role
@@ -198,13 +284,7 @@ fn the_cells_of_a_repainted_region_admit_the_support_free_field() {
 fn the_field_do_no_harm_judges_a_custom_region_mask_too() {
     let (src, tgt) = (repainted_right_half(false), repainted_right_half(true));
     let (current, target, w, _h, mut report) = field_probe(&src, &tgt);
-    report.recipe.masks.push(crate::recipe::LocalAdjustment {
-        mask: crate::recipe::MaskGeometry::Linear { zero_x: 0.49, zero_y: 0.5, full_x: 0.51, full_y: 0.5 },
-        name: "region-1".into(),
-        role: crate::recipe::MaskRole::Custom,
-        amount: 1.0,
-        ..Default::default()
-    });
+    report.recipe.masks.push(right_half_region());
     let (s_img, _) = fit::analysis_pair(&src, &tgt);
     assert_eq!(zone_regressed(&s_img, &report, &current, &target), None, "unchanged pixels hurt no mask");
     let mut hurt = current.clone();
@@ -217,6 +297,61 @@ fn the_field_do_no_harm_judges_a_custom_region_mask_too() {
         .expect("the region mask's own residual grew past the tolerance");
     assert_eq!(label, "region-1");
     assert!(now > was + crate::fit::FIT_QUANT, "{was} -> {now}");
+}
+
+/// J146: the per-zone check is a GUARD and reads `FIT_QUANT`, both ways. The
+/// region's pixels are pushed against the repaint (the target's right half is
+/// warmer; the push takes red down and blue up) by a step FOUND on the
+/// objective, so that the region's own reading rises by a part of FIT_QUANT:
+/// a rise the objective cannot tell from its own rounding, and the check
+/// names no mask. The same push grown until the rise is past FIT_QUANT is
+/// refused, by the mask's name. From R1 until 2026-11-12 the first half
+/// refused too ("a loss of any size"), and a real pair gave its whole solved
+/// colour field back for a free mask's rise of 0.15 of FIT_QUANT (round V10,
+/// the reference pair at strength 0.65; gates/j146).
+/// MUTATION: restore `now > was` in `zone_regressed` — the first half fails.
+#[test]
+fn the_field_do_no_harm_reads_the_fits_own_rounding_both_ways() {
+    let (src, tgt) = (repainted_right_half(false), repainted_right_half(true));
+    let (_, target, w, _h, mut report) = field_probe(&src, &tgt);
+    report.recipe.masks.push(right_half_region());
+    let (s_img, _) = fit::analysis_pair(&src, &tgt);
+    // The frame the check itself starts from, so the rise read here is the
+    // rise it reads.
+    let base = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
+    let pushed = |step: f32| -> Vec<[f32; 3]> {
+        let mut out = base.clone();
+        for (i, px) in out.iter_mut().enumerate() {
+            if i % w as usize >= w as usize / 2 {
+                *px = [(px[0] - step).max(0.0), px[1], (px[2] + step).min(1.0)];
+            }
+        }
+        out
+    };
+    let reading = |px: &[[f32; 3]]| {
+        zone_reading(&s_img, &report, "region-1", px, &target).expect("the mask covers the right half")
+    };
+    let was = reading(&base);
+    let rise = |step: f32| reading(&pushed(step)) - was;
+    let quant = crate::fit::FIT_QUANT;
+    // The steps are found, not pinned: the reading is the objective's own.
+    let step_past = |part: f32| (1..=400u16).map(|k| f32::from(k) * 2.5e-4).find(|s| rise(*s) > part * quant);
+    let small = step_past(0.25).expect("some push raises the region's reading");
+    let large = step_past(2.0).expect("a larger push raises it past the margin");
+    let (under, over) = (rise(small), rise(large));
+    eprintln!(
+        "FIELD_GUARD was {was:.6}; step {small:.5} rises {under:.6}, step {large:.5} rises {over:.6} (FIT_QUANT {quant})"
+    );
+    assert!(under < 0.75 * quant, "premise: the small push stays under the margin ({under} of {quant})");
+    assert_eq!(
+        zone_regressed(&s_img, &report, &pushed(small), &target).map(|hit| hit.0),
+        None,
+        "a rise of {under} is inside the fit's own rounding ({quant}) and costs no zone"
+    );
+    let (label, before, after, _) = zone_regressed(&s_img, &report, &pushed(large), &target)
+        .expect("a rise past the fit's own rounding is refused");
+    assert_eq!(label, "region-1");
+    assert!(after - before > quant, "{before} -> {after}");
 }
 
 /// A pair the field solver cannot fit (every evidence weight zero) says so
@@ -245,7 +380,7 @@ fn a_field_no_cell_vouches_is_the_support_weighted_field_byte_for_byte() {
     let Some(pass_a) = LocalField::solve(&current, &target, w, h, &report.evidence) else {
         return;
     };
-    let (merged, admitted, _, _) =
+    let (merged, admitted, _, _, _) =
         admit_cells(&current, &target, w, h, &report.evidence, pass_a.clone(), 0.60, &[], None);
     assert_eq!(admitted, 0, "a matched pair asks for no recolour");
     assert_eq!(merged.grid, pass_a.grid, "so the shipped grid is the analysis grid");
@@ -315,7 +450,7 @@ fn unread_cells(
     let cells = crate::fit_cells::PairedCells::build(target, w, h, &report.evidence)
         .expect("the textured half carries weight");
     let unread: Vec<usize> = cells
-        .verdicts(current, &pass_a.render(current), None)
+        .moves(current, &pass_a.render(current), None)
         .iter()
         .enumerate()
         .filter_map(|(cell, verdict)| verdict.is_none().then_some(cell))
@@ -354,11 +489,11 @@ fn a_cell_the_pixel_evidence_cannot_read_is_read_on_its_region_pairing() {
     let pass_a = LocalField::solve(&current, &target, w, h, &report.evidence)
         .expect("the analysis field solves");
     let unread = unread_cells(&current, &target, w, h, &report, &pass_a);
-    let (without, _, _, none) =
+    let (without, _, _, none, _) =
         admit_cells(&current, &target, w, h, &report.evidence, pass_a.clone(), 0.60, &[], None);
     assert_eq!(none, LayoutAdmission::default(), "no pairing: nothing is read on one");
     let pairing = top_third_pairing(w, h);
-    let (merged, _, _, paired) =
+    let (merged, _, _, paired, _) =
         admit_cells(&current, &target, w, h, &report.evidence, pass_a.clone(), 0.60, &pairing, None);
     assert_eq!(paired.read, unread.len(), "every unread cell inside the pairing was read on it: {paired:?}");
     assert!(paired.admitted > 0, "the smooth recolour is admitted: {paired:?}");

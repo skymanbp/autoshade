@@ -7485,9 +7485,13 @@ fn a_zone_whose_target_is_a_gains_recolour_does_not_read_as_a_tint() {
 /// weight) and the field solved again. Until v1.18.0 that re-solve had to
 /// hold the zone within the 0.02 a zone could cost, and it did, so the field
 /// shipped. R1 made the per-zone half of the field's do-no-harm "a loss of
-/// any size refuses" (`field::zone_regressed`): the re-solve still lifts the
-/// stripes (the zone reads 0.005899 -> 0.007474 on it), so the field is given
-/// back, says which zone it would have cost, and ships nothing.
+/// any size refuses" (`field::zone_regressed`); since J146 (2026-11-12) it is
+/// a guard and reads FIT_QUANT, as every other guard of the fit does. The
+/// re-solve still lifts the stripes past that (re-read on the J146 engine,
+/// gates/j146: the zone 0.005688 -> 0.008412, a cost of 1.43 FIT_QUANT), so
+/// the field is given back, says which zone it would have cost, and ships
+/// nothing. The guard's other side — a rise under FIT_QUANT names no zone —
+/// is `field::tests::the_field_do_no_harm_reads_the_fits_own_rounding_both_ways`.
 #[test]
 fn a_zone_the_pinned_field_still_regresses_takes_the_field_back() {
     pinned_zone_fixture(None, "field-pin");
@@ -7498,8 +7502,9 @@ fn a_zone_the_pinned_field_still_regresses_takes_the_field_back() {
 /// full weight must reach the support-free pass B that most cells take, not
 /// pass A alone: the re-solve then hears the zone as it hears the
 /// full-evidence one, and the zone's cost on it reads alike (measured
-/// 0.001618 against 0.001575 at full evidence, RULING-1180-int-r8) — and is
-/// given back by the same law.
+/// 0.002752 against 0.002724 at full evidence on the J146 engine, gates/j146;
+/// 0.001618 against 0.001575 at RULING-1180-int-r8) — and is given back by
+/// the same guard, each cost past FIT_QUANT.
 #[test]
 fn a_pinned_zone_is_heard_at_full_weight_by_both_field_solves() {
     let (low_before, low_after) = pinned_zone_fixture(Some(0.1), "field-pin-low");
@@ -7574,7 +7579,11 @@ fn pinned_zone_fixture(zone_evidence: Option<f32>, name: &str) -> (f32, f32) {
         "the give-back names the zone: {regressed:?}"
     );
     let (before, after) = (read(regressed, "before"), read(regressed, "after"));
-    assert!(after > before, "premise: the re-solved field costs the zone ({before} -> {after})");
+    eprintln!("PIN_FIXTURE {name}: the zone {before:.6} -> {after:.6} under the pinned re-solve");
+    assert!(
+        after - before > fit::FIT_QUANT,
+        "premise: the re-solved field costs the zone more than the guard's margin ({before} -> {after})"
+    );
     assert!(
         !report.notes.iter().any(|n| n.key == crate::rationale::keys::FIELD_ZONE_PINNED),
         "a pin that did not hold is not reported as shipped: {}",

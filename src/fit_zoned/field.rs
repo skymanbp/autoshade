@@ -3,6 +3,7 @@
 use image::DynamicImage;
 
 use crate::fit::{self, FitReport};
+use crate::fit_cells::CellMove;
 use crate::fit_field::{smooth_3tap_luma, FieldSolveOpts, LocalField};
 use crate::render;
 use super::range::{RANGE_MAX_BANDS, RANGE_MIN_EVIDENCE_SHARE};
@@ -439,7 +440,7 @@ pub(super) fn attach_colour_field(
     // (label, the zone before the field, the zone under the first solve)
     let mut pinned: Vec<(String, f32, f32)> = Vec::new();
     let mut first = Some(pass_a);
-    let (solved, admitted, read, paired, field, err_with, after) = loop {
+    let (solved, admitted, read, paired, by_axis, field, err_with, after) = loop {
         let solve_target: Vec<[f32; 3]> = (0..n)
             .map(|i| std::array::from_fn(|c| target_pixels[i][c] + pin[i] * (current[i][c] - target_pixels[i][c])))
             .collect();
@@ -462,7 +463,7 @@ pub(super) fn attach_colour_field(
             };
             pass
         };
-        let (solved, admitted, read, paired) =
+        let (solved, admitted, read, paired, by_axis) =
             admit_cells(&current, &solve_target, w, h, &evidence, pass, budget.field_gain, &layout, sky);
         // Rendered from the field the recipe will CARRY — rounded the way
         // `ColourField::round` stores it — so the do-no-harm verdicts and
@@ -491,10 +492,10 @@ pub(super) fn attach_colour_field(
         // …and the do-no-harm the FRAME ruler cannot do. A field that pays for
         // the sky out of the land wins on the frame and loses the picture, and
         // with pass B's wider gains that trade is newly affordable. Every
-        // attached zone is re-measured on its own membership, and any loss there
-        // refuses ([`zone_regressed`]).
+        // attached zone is re-measured on its own membership, and a loss past
+        // the objective's own rounding there refuses ([`zone_regressed`]).
         match zone_regressed(&s_img, report, &after, &target_pixels) {
-            None => break (solved, admitted, read, paired, field, err_with, after),
+            None => break (solved, admitted, read, paired, by_axis, field, err_with, after),
             Some((label, was, now, weights)) => {
                 if pinned.iter().any(|(l, _, _)| *l == label) || pinned.len() >= report.recipe.masks.len() {
                     note(report, crate::rationale::keys::FIELD_ZONE_REGRESSED, vec![
@@ -533,6 +534,12 @@ pub(super) fn attach_colour_field(
     if paired.read > 0 {
         note(report, crate::rationale::keys::FIELD_LAYOUT_ADMITTED, vec![
             ("read", paired.read.to_string()), ("admitted", paired.admitted.to_string()),
+        ]);
+    }
+    if by_axis.cells() > 0 {
+        note(report, crate::rationale::keys::FIELD_AXIS_ADMITTED, vec![
+            ("whole", by_axis.whole.to_string()), ("colour", by_axis.colour.to_string()),
+            ("tone", by_axis.tone.to_string()),
         ]);
     }
     let realized = realized_share(solved.global, solved.ceiling, err_with)
@@ -601,14 +608,44 @@ pub(super) fn attach_colour_field(
 /// field. Cells the fine reading reads keep their own admission, on the
 /// pass B that now carries the pairing's weight; no pairing, no change —
 /// the field is R34's byte for byte.
+///
+/// J147 (v1.18.0). A READ cell that refuses the whole of pass B is asked
+/// again along the axes the field moves. The field changes brightness and
+/// colour together, and the whole-move direction test (`fit_cells`'
+/// `MoveAxis::Full`) holds the two to one proportion: a move that is toward
+/// the target in brightness and toward it in colour, but mixes them
+/// otherwise than the ask does, reads as sideways. Refused, the cell kept
+/// pass A — in re-synthesised content, nothing — inside a block its
+/// neighbours corrected, and showed as a patch of the uncorrected render.
+/// Round V11, the reference pair at strength 0.65, sky cell column 6 row 2:
+/// mean 119.8/105.3/92.0 (8-bit codes) before, 123.3/98.4/91.9 under pass B,
+/// target 111.8/92.0/88.8 — closer (13.3 -> 11.5), darker as asked (cosine
+/// 1.00 on the tone axis), less green as asked (0.87 on the colour axis),
+/// and refused at 0.36 on the whole move; the cell kept a green cast its
+/// neighbours lost. Two cells of the top row refused a pass B that removed
+/// the same cast and darkened too far (117.6/113.5/104.3 -> 110.9/97.6/97.0
+/// against 122.7/105.7/102.7). v1.17.1 and round V9 solved a brighter global
+/// recipe on this pair and left no such patch. So a refused cell takes what
+/// its own means vouch ([`cell_take`]): the whole of pass B when it landed
+/// closer and points toward the target along tone and along colour, each
+/// read on its own axis; failing that, pass B's colour over pass A's tone or
+/// its tone over pass A's colour ([`compose_axes`]) — whichever lands
+/// closer — when that part alone, rendered, lands closer and points toward
+/// the target on its axis. It is the zones' rule, a control vouched along
+/// the axis it moves (2026-10-21), at the one stage still asked all or
+/// nothing. Every candidate is a part of the pixel-solved pass B, rendered
+/// and put to the same cell means, so the cells still only lift a veto and
+/// name no value; a cell no candidate takes closer keeps pass A, as before,
+/// and the two do-no-harm checks judge the merged field as they judge every
+/// field.
 #[allow(clippy::too_many_arguments)]
 fn admit_cells(
     current: &[[f32; 3]], target: &[[f32; 3]], width: u32, height: u32,
     evidence: &fit::EvidenceModel, pass_a: LocalField, gain: f32, layout: &[f32], sky: Option<&[f32]>,
-) -> (LocalField, usize, usize, LayoutAdmission) {
+) -> (LocalField, usize, usize, LayoutAdmission, AxisAdmission) {
     let Some(cells) = crate::fit_cells::PairedCells::build(target, width, height, evidence)
     else {
-        return (pass_a, 0, 0, LayoutAdmission::default());
+        return (pass_a, 0, 0, LayoutAdmission::default(), AxisAdmission::default());
     };
     let paired = (layout.len() == current.len() && layout.iter().any(|m| *m > 0.0)).then(|| {
         let blind = evidence.structure_blind(target);
@@ -631,53 +668,180 @@ fn admit_cells(
         crate::fit_field::TIKHONOV, crate::fit_field::SMOOTH, crate::fit_field::ITERATIONS,
         FieldSolveOpts { gain, local_support: false, refine: true }, sky, &pass_a.frame,
     ) else {
-        return (pass_a, 0, 0, LayoutAdmission::default());
+        return (pass_a, 0, 0, LayoutAdmission::default(), AxisAdmission::default());
     };
     let rendered = pass_b.render(current);
-    let verdicts = cells.verdicts(current, &rendered, None);
-    let paired_verdicts = paired
-        .as_ref()
-        .and_then(|(_, blind)| cells.with_layout(blind, layout))
-        .map(|paired_cells| paired_cells.verdicts(current, &rendered, None));
+    let trace = crate::config::live_env_os("AUTOSHADE_FIT_TRACE").is_some();
+    if trace {
+        for line in cells.refused_trace(current, &rendered) {
+            eprintln!("field admission refused {line}");
+        }
+    }
+    // The cells the fine reading could not read AT ALL are read on the
+    // pairing, and take pass B on the same verdict a fine-read cell takes it
+    // on. One reading of one render: the fine cells' and, where they abstain,
+    // the pairing's (the flag says which).
+    let paired_cells = paired.as_ref().and_then(|(_, blind)| cells.with_layout(blind, layout));
+    let read_cells = |after: &[[f32; 3]]| -> Vec<Option<(CellMove, bool)>> {
+        let fine = cells.moves(current, after, None);
+        let coarse = paired_cells.as_ref().map(|p| p.moves(current, after, None));
+        fine.iter()
+            .enumerate()
+            .map(|(cell, reading)| match reading {
+                Some(reading) => Some((*reading, true)),
+                None => coarse.as_ref().and_then(|c| c[cell]).map(|reading| (reading, false)),
+            })
+            .collect()
+    };
+    let whole = read_cells(&rendered);
+    // J147: the one-axis candidates — pass B's tone over pass A's colour, and
+    // its colour over pass A's tone — rendered only when a read cell refused
+    // the whole move, and read by the same cells.
+    let one_axis = whole.iter().flatten().any(|(reading, _)| !reading.vouched()).then(|| {
+        let part = |tone_of_b: bool| {
+            let mut field = pass_b.clone();
+            for (b, a) in field.grid.iter_mut().zip(&pass_a.grid) {
+                *b = if tone_of_b { compose_axes(b, a, gain) } else { compose_axes(a, b, gain) };
+            }
+            field
+        };
+        let (tone, colour) = (part(true), part(false));
+        let (tone_read, colour_read) = (read_cells(&tone.render(current)), read_cells(&colour.render(current)));
+        (tone, colour, tone_read, colour_read)
+    });
     let mut merged = pass_a;
     let (mut admitted, mut read) = (0usize, 0usize);
     let mut paired_read = LayoutAdmission::default();
+    let mut by_axis = AxisAdmission::default();
     // A cell owns its column's vertices on the vertex rows that refine it, all
     // luma bins — which is why `fit_cells` takes its geometry from this grid
     // rather than choosing one.
-    for (cell, verdict) in verdicts.iter().enumerate() {
-        let admit = match verdict {
-            Some(vouched) => {
-                read += 1;
-                if *vouched {
+    for (cell, reading) in whole.iter().enumerate() {
+        let Some((whole_move, fine)) = *reading else {
+            continue;
+        };
+        if fine {
+            read += 1;
+        } else {
+            paired_read.read += 1;
+        }
+        let part_of = |parts: &[Option<(CellMove, bool)>]| parts[cell].map(|(reading, _)| reading);
+        let take = cell_take(
+            whole_move,
+            one_axis.as_ref().and_then(|(_, _, tone_read, _)| part_of(tone_read)),
+            one_axis.as_ref().and_then(|(_, _, _, colour_read)| part_of(colour_read)),
+        );
+        if trace && take != CellTake::Whole {
+            eprintln!(
+                "field admission cell c{} r{} takes {take:?}",
+                cell % crate::fit_cells::CELLS_X,
+                cell / crate::fit_cells::CELLS_X
+            );
+        }
+        let source = match (take, one_axis.as_ref()) {
+            (CellTake::Whole, _) => {
+                if fine {
                     admitted += 1;
-                }
-                *vouched
-            }
-            None => {
-                // The fine reading could not read this cell at all: inside
-                // the pairing it is read on the pairing, and takes pass B on
-                // the same verdict a fine-read cell takes it on.
-                let Some(Some(vouched)) = paired_verdicts.as_ref().map(|v| v[cell]) else {
-                    continue;
-                };
-                paired_read.read += 1;
-                if vouched {
+                } else {
                     paired_read.admitted += 1;
                 }
-                vouched
+                &pass_b
             }
+            (CellTake::WholeByAxis, _) => {
+                by_axis.whole += 1;
+                &pass_b
+            }
+            (CellTake::Colour, Some((_, colour, ..))) => {
+                by_axis.colour += 1;
+                colour
+            }
+            (CellTake::Tone, Some((tone, ..))) => {
+                by_axis.tone += 1;
+                tone
+            }
+            _ => continue,
         };
-        if !admit {
-            continue;
-        }
         for span in crate::fit_field::cell_vertex_spans(cell) {
-            if merged.grid.len() >= span.end && pass_b.grid.len() >= span.end {
-                merged.grid[span.clone()].clone_from_slice(&pass_b.grid[span]);
+            if merged.grid.len() >= span.end && source.grid.len() >= span.end {
+                merged.grid[span.clone()].clone_from_slice(&source.grid[span]);
             }
         }
     }
-    (merged, admitted, read, paired_read)
+    (merged, admitted, read, paired_read, by_axis)
+}
+
+/// J147. What a READ cell takes of the support-free solve ([`cell_take`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CellTake {
+    /// Pass B's vertices, on the whole move's own verdict (R34).
+    Whole,
+    /// Pass B's vertices: the whole move landed closer and points toward the
+    /// target along its tone and along its colour, each read on its own axis.
+    WholeByAxis,
+    /// Pass B's colour over pass A's tone.
+    Colour,
+    /// Pass B's tone over pass A's colour.
+    Tone,
+    /// Pass A's vertices, unchanged.
+    Nothing,
+}
+
+/// J147. The admission ladder of one read cell. `whole` is the cell's reading
+/// of pass B's render; `tone` and `colour` its readings of the one-axis
+/// candidates' renders (`None` when none was rendered). The whole move on
+/// its own verdict first, as since R34; then the whole move vouched along
+/// each axis; then one part alone, vouched on its own axis — the one that
+/// lands closer when both are. Every rung needs the cell's mean to land
+/// strictly closer to its target, so a cell nothing takes closer takes
+/// nothing.
+fn cell_take(whole: CellMove, tone: Option<CellMove>, colour: Option<CellMove>) -> CellTake {
+    if whole.vouched() {
+        return CellTake::Whole;
+    }
+    if whole.vouched_by_axis() {
+        return CellTake::WholeByAxis;
+    }
+    let tone = tone.filter(|part| part.converged && part.toward_tone);
+    let colour = colour.filter(|part| part.converged && part.toward_colour);
+    match (tone, colour) {
+        (Some(tone), Some(colour)) if tone.landed < colour.landed => CellTake::Tone,
+        (_, Some(_)) => CellTake::Colour,
+        (Some(_), None) => CellTake::Tone,
+        (None, None) => CellTake::Nothing,
+    }
+}
+
+/// J147. One vertex carrying the TONE of `tone` and the COLOUR of `colour`.
+/// A vertex is `[ev, gain_r, gain_g, gain_b, slope]` and a pixel's change is
+/// `ln2·c·ev + c·gain_c + (c − guide)·slope` (`fit_field`): EV and the slope
+/// change brightness, and so does the level the three gains share — their
+/// Rec.601 mean, the weight `fit_field` reads a gain's brightness with —
+/// while what each gain holds beyond that level changes colour. The tone is
+/// `ev`, `slope` and the gains' level; the colour is the gains' offsets from
+/// their own level; `compose_axes(v, v, _)` is `v`. The composed gains stay
+/// inside the per-channel bound the solve was held to.
+fn compose_axes(tone: &[f32; 5], colour: &[f32; 5], gain: f32) -> [f32; 5] {
+    let level = |v: &[f32; 5]| fit::luma601(&[v[1], v[2], v[3]]);
+    let lift = level(tone) - level(colour);
+    let channel = |c: usize| (colour[c] + lift).clamp(-gain, gain);
+    [tone[0], channel(1), channel(2), channel(3), tone[4]]
+}
+
+/// J147. The read cells that refused the whole of pass B and took it by
+/// axis: `whole` on the direction read along tone and colour apart, `colour`
+/// and `tone` one part alone. All zero on a field no cell refused, and the
+/// disclosure is then not printed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct AxisAdmission {
+    pub(super) whole: usize,
+    pub(super) colour: usize,
+    pub(super) tone: usize,
+}
+
+impl AxisAdmission {
+    pub(super) fn cells(self) -> usize {
+        self.whole + self.colour + self.tone
+    }
 }
 
 /// R42. What the layout reading did: the cells the fine reading could not
@@ -776,8 +940,18 @@ fn field_testimony(evidence: &fit::EvidenceModel, layout: &PairedLayout) -> (fit
 
 
 /// The per-ZONE half of the field's do-no-harm: the first attached mask whose
-/// own look distance the field made worse at all (a loss of any size, R1), or
-/// `None` if it hurt none of them. EVERY mask the fit
+/// own look distance the field raised by more than [`fit::FIT_QUANT`], or
+/// `None` if it cost none of them that much. It is a GUARD, and it reads the
+/// one margin every guard of the fit reads (R19: a local correction "may not
+/// raise the frame's reading by more than FIT_QUANT"): a rise the objective
+/// cannot tell from its own rounding is no rise. From R1 until 2026-11-12
+/// (J146) any rise at all refused — the bare margin FIT_QUANT replaced
+/// everywhere else. Round V10, the reference pair at strength 0.65: the
+/// field was solved, a free mask of 0.086 of the frame read 0.009720 ->
+/// 0.010004 under the pinned re-solve, 0.15 of FIT_QUANT, and the whole
+/// field was given back for it — whole-frame deltaE 10.28 against v1.17.1's
+/// 4.70, while the same pair at 0.85 and at 1.0 attached theirs
+/// (gates/j146). EVERY mask the fit
 /// carries is judged — the two zone roles, and the Custom-role region masks
 /// of the multi-region route; until 2026-09-24 the role filter left the
 /// check inert on that route.
@@ -801,8 +975,9 @@ fn zone_regressed(
         // does (2026-11-07: hue and structure are gates, not terms); its seams
         // stay with the boundary / ramp rulers and its structural gate is the
         // existing D threshold only.
-        // R1: a loss of any size refuses — the field may not cost an attached zone.
-        (now > was).then_some((label, was, now, weights))
+        // A guard reads FIT_QUANT (R19, J146): the field may not cost an
+        // attached zone more than the objective's own rounding.
+        (now - was > fit::FIT_QUANT).then_some((label, was, now, weights))
     })
 }
 

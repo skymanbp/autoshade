@@ -24,6 +24,12 @@ fn cells_of(source: &[[f32; 3]], target: &[[f32; 3]], w: u32, h: u32) -> PairedC
     PairedCells::build(target, w, h, &evidence).expect("a populated pair builds cells")
 }
 
+/// Every cell's whole-move verdict: `Some(closer and toward)` where the cell
+/// was read.
+fn verdicts(cells: &PairedCells, before: &[[f32; 3]], after: &[[f32; 3]]) -> Vec<Option<bool>> {
+    cells.moves(before, after, None).into_iter().map(|reading| reading.map(CellMove::vouched)).collect()
+}
+
 /// Lift every pixel by `by`.
 fn lifted(source: &[[f32; 3]], by: f32) -> Vec<[f32; 3]> {
     source.iter().map(|p| p.map(|v| (v + by).clamp(0.0, 1.0))).collect()
@@ -32,6 +38,45 @@ fn lifted(source: &[[f32; 3]], by: f32) -> Vec<[f32; 3]> {
 /// The left half of the frame, as a soft region membership.
 fn left_half(w: u32, h: u32) -> Vec<f32> {
     (0..(w * h) as usize).map(|i| f32::from((i as u32 % w) < w / 2)).collect()
+}
+
+/// J147. One cell's reading of one move names the direction along the whole
+/// move, its tone and its colour apart. The three means are a real cell's
+/// (round V11, the reference pair at strength 0.65, sky cell column 6 row 2,
+/// 8-bit codes): the colour field's support-free solve took it closer (13.3
+/// -> 11.5), darker as its target asks and less green as its target asks,
+/// and the whole-move angle refused it (cosine 0.36 in linear light) because
+/// the move mixes the two otherwise than the ask does. Every pixel of the
+/// three frames carries the same texture, so every cell reads those means.
+#[test]
+fn a_cell_move_is_read_along_tone_and_colour_apart() {
+    let (w, h) = (96u32, 64u32);
+    let frame = |codes: [f32; 3]| -> Vec<[f32; 3]> {
+        (0..w * h)
+            .map(|i| {
+                let texture = 0.03 * (((i % w) * 7 + (i / w) * 13) % 5) as f32 / 4.0 - 0.015;
+                codes.map(|c| c / 255.0 + texture)
+            })
+            .collect()
+    };
+    let (before, after, target) =
+        (frame([119.8, 105.3, 92.0]), frame([123.3, 98.4, 91.9]), frame([111.8, 92.0, 88.8]));
+    let cells = cells_of(&before, &target, w, h);
+    let moves = cells.moves(&before, &after, None);
+    let read: Vec<CellMove> = moves.iter().flatten().copied().collect();
+    assert!(!read.is_empty(), "premise: the pair's cells are read");
+    for reading in &read {
+        assert!(reading.converged, "the cell landed closer: {reading:?}");
+        assert!(!reading.toward_whole, "premise: the whole-move angle refuses it: {reading:?}");
+        assert!(reading.toward_tone && reading.toward_colour, "toward its target on each axis: {reading:?}");
+        assert!(!reading.vouched() && reading.vouched_by_axis(), "{reading:?}");
+        assert!((reading.landed * 255.0 - 11.5).abs() < 0.2, "landed {} codes off", reading.landed * 255.0);
+    }
+    // A move away from the target in brightness is toward it on no reading.
+    let brighter = frame([127.0, 111.6, 97.5]);
+    for reading in cells.moves(&before, &brighter, None).iter().flatten() {
+        assert!(!reading.converged && !reading.toward_tone && !reading.vouched_by_axis(), "{reading:?}");
+    }
 }
 
 /// The positive case: an edit that moves the whole frame toward its target is
@@ -171,7 +216,7 @@ fn the_per_cell_verdicts_are_the_same_measurement_as_the_region_verdict() {
     let (source, target, w, h) = pair(0.12, -0.12);
     let cells = cells_of(&source, &target, w, h);
     let after = lifted(&source, 0.08);
-    let verdicts = cells.verdicts(&source, &after, None);
+    let verdicts = verdicts(&cells, &source, &after);
     assert_eq!(verdicts.len(), CELLS_X * CELLS_Y, "one entry per cell");
     let frame = cells.vouch(&source, &after, None);
     assert_eq!(
@@ -279,17 +324,17 @@ fn the_layout_reading_raises_weight_only_inside_the_pairing_and_only_upward() {
     }
     let cells = PairedCells::build(&target, w, h, &evidence).expect("the left half carries weight");
     let after = lifted(&source, 0.05);
-    let fine = cells.verdicts(&source, &after, None);
+    let fine = verdicts(&cells, &source, &after);
     assert!(
         fine.iter().enumerate().all(|(c, v)| v.is_none() == (c % CELLS_X >= CELLS_X / 2)),
         "premise: the blinded half is unread and the other half read: {fine:?}"
     );
     let blind = evidence.structure_blind(&target);
     let none = cells.with_layout(&blind, &vec![0.0; n]).expect("the fine weight still carries");
-    assert_eq!(none.verdicts(&source, &after, None), fine, "an empty pairing changes nothing");
+    assert_eq!(verdicts(&none, &source, &after), fine, "an empty pairing changes nothing");
     let pairing: Vec<f32> = (0..n).map(|i| f32::from(right(i))).collect();
     let paired = cells.with_layout(&blind, &pairing).expect("the pairing carries weight");
-    let read = paired.verdicts(&source, &after, None);
+    let read = verdicts(&paired, &source, &after);
     assert!(read.iter().all(|v| *v == Some(true)), "every cell is read now and vouches the lift: {read:?}");
     assert!(
         read.iter().zip(&fine).enumerate().filter(|(c, _)| c % CELLS_X < CELLS_X / 2).all(|(_, (a, b))| a == b),

@@ -1241,6 +1241,16 @@ pub mod keys {
          not read at all lie inside a region the segmenter found in both frames and \
          were read on that pairing instead, and {admitted} took the support-free \
          solve on the same cell-mean verdict the measured cells take it on.";
+    /// J147. The read cells that refused the WHOLE support-free solve and
+    /// took it by axis: on the direction read along tone and colour apart, or
+    /// one part alone on its own axis's verdict. Printed only when there were
+    /// such cells, so every other pair's rationale is unchanged.
+    pub const FIELD_AXIS_ADMITTED: &str =
+        " Colour field axis admission: of the cells that refused it whole, {whole} \
+         took the support-free solve on the direction read along tone and along \
+         colour separately, {colour} took its colour alone and {tone} its tone \
+         alone, each landing closer to the target's own cell mean; only the others \
+         kept the support-weighted solve.";
     pub const FIELD_WITHHELD: &str =
         " No colour field was attached: the frame it renders, {with}, is not \
          more than {margin} better than the frame this fit already reached \
@@ -1256,8 +1266,8 @@ pub mod keys {
     /// wins on the frame and loses the picture.
     pub const FIELD_ZONE_REGRESSED: &str =
         " The solved colour field was given back: it improved the frame but moved \
-         the {label} zone {before} -> {after}, and the field may not cost an \
-         attached zone anything (per-zone do-no-harm check).";
+         the {label} zone {before} -> {after}, a loss past the fit's own rounding, \
+         and the field may not cost an attached zone that (per-zone do-no-harm check).";
     /// v1.17.0. The first half of that check no longer gives the field back on
     /// its own: the zone is pinned (the solve asked to leave it where the zone
     /// stage put it) and the field solved again, and the check judges that.
