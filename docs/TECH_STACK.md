@@ -2217,6 +2217,10 @@ than the pre-call state; model weights remain outside the repository.
   `--release` trips were already optimised; the CI debug-asserts trip
   (`cargo test --lib`) now runs in this profile and still fires the asserts.
 - The build workflow checks default and GUI feature sets on Ubuntu and macOS.
+  Since v1.18.0 its test jobs, and the release run's battery, split the library's
+  tests over eight runners each (`scripts/ci_test_shard.sh`: every test in exactly
+  one shard, nothing skipped), because the new solver's toy fits take one runner
+  past three hours.
   The published binary artifacts are the Windows builds, two universal macOS
   archives — the app bundle and the command line on its own (the bundle has
   shipped since v1.2.0) — and, since v1.2.4, a Linux x64 command-line archive

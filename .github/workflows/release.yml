@@ -351,8 +351,17 @@ jobs:
   # the debug profile (the dist build is --release --target <triple>, so
   # nothing was reused) and doubled the macOS wall time. Release profile —
   # the canonical battery mode, and the profile the assets above ship in.
+  #
+  # Eight shards since v1.18.0, the same split as `build.yml`'s test job
+  # (`scripts/ci_test_shard.sh`: every library test in exactly one shard,
+  # shard 0 also the CLI, contract, doc and GUI tests and the Metal
+  # measurement). `publish` needs every shard.
   macos-battery:
     needs: guard
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
@@ -367,10 +376,16 @@ jobs:
           echo "rust-toolchain.toml pins $want; rustc reports $got"
           test "$want" = "$got" || { echo "::error::the pin was not honoured"; exit 1; }
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Batteries
-        run: |
-          cargo test --locked --release
-          cargo test --locked --release --features gui --bin autoshade-gui
+        with:
+          shared-key: battery-release
+      - name: Batteries, shard ${{ matrix.shard }} of 8
+        shell: bash
+        run: bash scripts/ci_test_shard.sh ${{ matrix.shard }} 8 all --release
+      - name: Batteries (gui feature)
+        if: matrix.shard == 0
+        run: cargo test --locked --release --features gui --bin autoshade-gui
+      # The steps below run on shard 0 only: one measurement per release.
+      #
       # A49: the Metal path, MEASURED. M2 routed all five sidecars through one
       # `cuda -> mps -> cpu` ladder and v1.2.0 shipped saying the Metal arm was
       # unmeasured — no timing, no memory figure, and no answer to whether
@@ -384,9 +399,11 @@ jobs:
       # interpreter of our own is brought rather than someone else's manager
       # overridden — the same reasoning as the sidecar self-test above.
       - uses: actions/setup-python@v7
+        if: matrix.shard == 0
         with:
           python-version: '3.12'
       - name: Metal (MPS) measurement
+        if: matrix.shard == 0
         run: |
           python3 -m pip install --quiet --disable-pip-version-check torch==2.14.0 torchvision==0.29.0
           python3 scripts/mps_probe.py

@@ -63,11 +63,19 @@ jobs:
   # 33294497854) while the same release-mode suite finishes in minutes; it
   # also tested a binary in a profile nothing ever ships. debug_assert!
   # coverage lives in the dedicated job below instead.
+  #
+  # Eight shards per runner kind since v1.18.0 (`scripts/ci_test_shard.sh`):
+  # the new solver's toy fits took one runner past three hours on the library
+  # alone (run 43119864352, cancelled unfinished at 3 h 23 min; v1.17.1's
+  # whole job was 31 minutes) and a job is cut off at six. Every library test
+  # is in exactly one shard; shard 0 also runs the CLI's tests, the contract
+  # tests and the doc tests, and the GUI bin's. Nothing is skipped.
   test:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -81,13 +89,19 @@ jobs:
           got=$(rustc --version | cut -d' ' -f2)
           echo "rust-toolchain.toml pins $want; rustc reports $got"
           test "$want" = "$got" || { echo "::error::the pin was not honoured"; exit 1; }
+      # One cache per runner kind, shared by its shards: they build the same
+      # test programs, and a cache per shard would be eight copies of one.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: cargo test (default features)
-        run: cargo test --locked --release
+        with:
+          shared-key: test-release
+      - name: cargo test (default features), shard ${{ matrix.shard }} of 8
+        shell: bash
+        run: bash scripts/ci_test_shard.sh ${{ matrix.shard }} 8 all --release
       # The gui feature only adds dependencies (Cargo.toml [features]; no
       # cfg(feature = "gui") outside src/bin/gui), so this trip runs the GUI
       # bin's own tests only — lib/CLI/contract suites are the default trip's.
       - name: cargo test (gui feature)
+        if: matrix.shard == 0
         run: cargo test --locked --release --features gui --bin autoshade-gui
 
   # fit/render carry debug_assert!s that only fire with debug assertions on — a
@@ -96,8 +110,12 @@ jobs:
   # above stay in the profile that ships. Since 2026-09-11 the `test` profile
   # compiles at opt-level 2 (Cargo.toml `[profile.test]`), which keeps
   # debug-assertions and overflow-checks ON — so this trip still fires them,
-  # only faster.
+  # only faster. Eight shards, as above (the library alone: `lib`).
   debug-asserts:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -112,5 +130,8 @@ jobs:
           echo "rust-toolchain.toml pins $want; rustc reports $got"
           test "$want" = "$got" || { echo "::error::the pin was not honoured"; exit 1; }
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: cargo test (lib, debug profile)
-        run: cargo test --locked --lib
+        with:
+          shared-key: test-debug
+      - name: cargo test (lib, debug profile), shard ${{ matrix.shard }} of 8
+        shell: bash
+        run: bash scripts/ci_test_shard.sh ${{ matrix.shard }} 8 lib
