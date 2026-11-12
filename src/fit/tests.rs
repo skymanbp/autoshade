@@ -2451,16 +2451,47 @@ fn the_atmosphere_solve_drops_target_content_no_source_answers_for() {
     // +0.69 EV outright — the corresponding half's cells ask 0 EV and the
     // tone is scaled toward the base (+0.29, 2026-11-07) — but it still
     // sits above the truth the restricted solve lands on.
-    assert!(
-        whole.recipe.exposure_ev > CORRESPONDING_TRUE_EV + 0.20,
-        "premise: the invented block is brighter and pulls the whole-frame exposure up: {}",
-        whole.recipe.exposure_ev
+    // 2026-11-12: the brightening is read on the PICTURE, not on one dial.
+    // Since the asks' curve (J142, 2026-11-11) the whole-frame solve carries
+    // the invented block's brightness in the master curve with the exposure
+    // at 0 (117 -> 145, 129 -> 161, 155 -> 193 of 255, the curve the identity
+    // under 63: gates/j145), and a premise that read the exposure dial alone
+    // called a brightened frame unmoved. The reading is what an exposure
+    // does to a frame — the mean linear luma of the developed source against
+    // as shot, in EV — whichever control carries it; the corresponding rows'
+    // own reading is printed beside it.
+    let lift_ev = |recipe: &EditRecipe, rows: std::ops::Range<u32>| -> f32 {
+        let mean = |img: &DynamicImage| -> f64 {
+            let rgb = img.to_rgb8();
+            let (mut sum, mut n) = (0.0f64, 0.0f64);
+            for (_, y, p) in rgb.enumerate_pixels() {
+                if rows.contains(&y) {
+                    let lin = p.0.map(|c| render::srgb_to_linear(c as f32 / 255.0));
+                    sum += (0.299 * lin[0] + 0.587 * lin[1] + 0.114 * lin[2]) as f64;
+                    n += 1.0;
+                }
+            }
+            sum / n
+        };
+        (mean(&render::develop_preview(&src, recipe)) / mean(&render::develop_preview(&src, &EditRecipe::default()))).log2() as f32
+    };
+    let (whole_lift, paired_lift) = (lift_ev(&whole.recipe, 0..96), lift_ev(&paired.recipe, 0..96));
+    eprintln!(
+        "ATMOSPHERE_DROPS frame lift: whole {whole_lift:+.3} EV (dial {}), paired {paired_lift:+.3} EV (dial {}); corresponding rows: whole {:+.3}, paired {:+.3}",
+        whole.recipe.exposure_ev,
+        paired.recipe.exposure_ev,
+        lift_ev(&whole.recipe, INVENTED_ROWS..96),
+        lift_ev(&paired.recipe, INVENTED_ROWS..96)
     );
     assert!(
-        (paired.recipe.exposure_ev - CORRESPONDING_TRUE_EV).abs() < 0.20,
+        whole_lift > CORRESPONDING_TRUE_EV + 0.20,
+        "premise: the invented block is brighter and pulls the whole-frame solve's brightness up: {whole_lift:+.3} EV"
+    );
+    assert!(
+        (paired_lift - CORRESPONDING_TRUE_EV).abs() < 0.20
+            && (paired.recipe.exposure_ev - CORRESPONDING_TRUE_EV).abs() < 0.20,
         "the restricted solve must recover the corresponding region's exposure \
-             {CORRESPONDING_TRUE_EV:.2}: whole {}, paired {}",
-        whole.recipe.exposure_ev,
+             {CORRESPONDING_TRUE_EV:.2}: whole {whole_lift:+.3} EV, paired {paired_lift:+.3} EV (dial {})",
         paired.recipe.exposure_ev
     );
 }
@@ -4294,10 +4325,49 @@ fn wb_clamp_stays_on_the_manifold_and_never_invents_tint() {
     );
     eprintln!("WB_CLAMP free {free_k:.0}/{free_tint:+.1} clamped {clamped_k:.0}/{clamped_tint:+.1} lambda {lambda:.4}");
     dump_recipe("wb_clamp 0.85", &report);
-    assert!(report.recipe.tint.abs() <= free_tint.abs());
-    assert!(report.recipe.temperature_k.is_some());
-    assert_eq!(report.recipe.temperature_k, Some(clamped_k));
-    assert_eq!(report.recipe.tint, clamped_tint);
+    // 2026-11-12 (the joint solve; user ruling 2026-11-06: the stages
+    // propose, the joint objective decides). Until the joint solve what
+    // shipped WAS the stage's clamped estimate, and this test pinned the two
+    // equal, tint included. The solve now moves the white balance's two
+    // coordinates on J* inside the law and the budget: on this pair the
+    // estimate sits on the search's 40 000 K bound, unclamped (lambda 1),
+    // with tint +14.1, and the solve keeps the Kelvin and settles the tint at
+    // +16.4 (J* 0.3325 -> 0.2521, gates/j145). The clamp's manifold is
+    // pinned above on `budgeted_wb`, the function that owns it; what the
+    // SOLVE owes is a white balance that fits the strength budget and that
+    // the law admits on every hue band's cell — a tint no cell asks for is a
+    // refusal there.
+    let shipped_k = report.recipe.temperature_k.expect("the white balance ships");
+    assert!(
+        wb_gains_fit_budget(render::wb_gains(anchor, shipped_k, report.recipe.tint), budget),
+        "the shipped white balance fits the strength budget: {shipped_k} K, tint {}",
+        report.recipe.tint
+    );
+    {
+        use super::joint::{without_class, Refusal};
+        use super::validity::{Cells, Class};
+        let (s_img, t_img) = analysis_pair(&src, &target);
+        let sp = pixels_of(&render::develop_preview(&s_img, &EditRecipe::default()));
+        let tp = pixels_of(&t_img);
+        // The cells of the solve itself: the report carries the model it was
+        // judged on (the structure-blind frame model in Atmosphere, the
+        // paired one in Full), so no second model is built here.
+        let cells = Cells::new(&sp, &tp, &report.evidence);
+        let frame = without_class(&EditRecipe::default(), &report.recipe, Refusal::WhiteBalance);
+        let before_px = pixels_of(&render::develop_preview(&s_img, &frame));
+        let after_px = pixels_of(&render::develop_preview(&s_img, &report.recipe));
+        let verdict = cells.judge(Class::WhiteBalance, &before_px, &after_px);
+        eprintln!(
+            "WB_CLAMP shipped {shipped_k:.0}/{:+.1}: {}",
+            report.recipe.tint,
+            cells.describe(Class::WhiteBalance, &verdict)
+        );
+        assert!(
+            verdict.refused.is_empty(),
+            "the white balance that ships moves no hue band's cell against its ask: {}",
+            cells.describe(Class::WhiteBalance, &verdict)
+        );
+    }
 }
 
 /// A white balance the strength budget admits but the evidence does not: the
@@ -4545,7 +4615,9 @@ fn haze_pair() -> (DynamicImage, DynamicImage) {
 ///   haze → clean (evidence-limited) 0.1937 → 0.0426
 ///   canyon warm (violet class)      0.1796 → 0.0437   LANDS since v1.2.3
 ///   canyon gold (rotation class)    0.2768 → 0.2768   refused, unchanged
-///                                   (LANDS since v1.18.0: 0.2688 → 0.0493)
+///                                   (landed 2026-11-08 to 2026-11-12:
+///                                   0.2688 → 0.0493; refused again since
+///                                   J145: 0.2688 → 0.1214)
 ///   hazy canyon → vivid warm        0.4913 → 0.4554
 ///
 /// Look error and reported confidence beside them, same run (the two
@@ -4557,7 +4629,9 @@ fn haze_pair() -> (DynamicImage, DynamicImage) {
 ///                                        do-no-harm, 2026-10-21)
 ///   canyon gold        0.0547 → 0.0547   confidence 0.250 (whole recipe
 ///                                        reset by the terminal check;
-///                                        v1.18.0: 0.1688 → 0.0704 at 0.630)
+///                                        2026-11-08: 0.1688 → 0.0704 at
+///                                        0.630; since J145, 2026-11-12:
+///                                        0.1685 → 0.0761 at 0.250)
 ///   hazy → vivid warm  0.1286 → 0.0964   confidence 0.250
 ///
 /// Measured on SIX REAL (RAW, finished JPEG) pairs off the user's library,
@@ -4586,11 +4660,12 @@ fn haze_pair() -> (DynamicImage, DynamicImage) {
 ///     lands on the 0.25 confidence floor, so on that fixture the two
 ///     readings agree.
 ///   * THE REFUSAL CLASS is a separate claim, and since v1.2.3 it has ONE
-///     member (NONE since v1.18.0, 2026-11-08: canyon gold lands too — the
-///     mixer's Orange rotation carries its cast and no terminal reset
-///     stands behind a neutral recipe; see its block below. The policy —
-///     a one-sided reading is a refusal, not a miss — is `JointFarCause`'s,
-///     not a fixture's): canyon gold, 0.2768 → 0.2768, i.e. 2.8× JOINT_FAR_ERR —
+///     member (none from 2026-11-08 to 2026-11-12, while channel curves
+///     carried canyon gold's sky into the target's gold and stained its
+///     grey ramp with it; one again since J145 heard the ramp — see its
+///     block below. The policy — a one-sided reading is a refusal, not a
+///     miss — is `JointFarCause`'s, not a fixture's): canyon gold,
+///     0.2768 → 0.2768, i.e. 2.8× JOINT_FAR_ERR —
 ///     the solver withheld one-sided movement and the terminal do-no-harm
 ///     check reset the whole recipe (look error 0.0547 → 0.0547). Its
 ///     refusal note must be emitted and the miss note must not be. Canyon
@@ -4640,6 +4715,7 @@ fn joint_family_is_calibrated_on_the_fixture_set() {
     // JOINT_FAR_ERR, with the recipe fitting 0.0547 -> 0.0133 and never
     // reset to neutral — a disclosed partial fit rather than a no-op.
     let mut reached_max = 0.0f32;
+    let mut refusal_max = 0.0f32;
     // Canyon GOLD was the refusal band's last member; canyon warm left it
     // in v1.2.3 and is asserted where it went, below. RE-PINNED (v1.18.0,
     // J84, 2026-11-08): the mixer's Orange rotation carries the canyon-gold
@@ -4680,24 +4756,37 @@ fn joint_family_is_calibrated_on_the_fixture_set() {
         // 0.2688 -> 0.0874 (under JOINT_FAR_ERR again — no FAR classification
         // of either kind, as J84 read it). J111's 0.1200 / 0.1977 was the
         // refit returning the base and the base passing as the repair.
+        // RE-PINNED 2026-11-12 (J145, gates/j145): BACK IN THE REFUSAL BAND,
+        // where it stood until 2026-11-08. The landings above were carried
+        // by channel curves that rotated the pale sky into the target's gold
+        // and stained the grey ramp with it (19.6 codes of 255 on 55b4737,
+        // the ramp matching the target to begin with;
+        // `cast_must_not_rotate_the_sky_into_a_target_native_hue` was red
+        // while they shipped). With the ramp heard — its ranges pooled into
+        // cells with standing — the curves are refused on it, the mixer's
+        // rotation still carries the rocks, and the sky's gold, which no
+        // global control delivers without the ramp, is withheld: 0.1685 ->
+        // 0.0761 at the 0.25 floor, joint reading 0.2688 -> 0.1214, over
+        // JOINT_FAR_ERR and classified a REFUSAL (the sky's hue band is
+        // one-sided), never a miss.
         assert!(
-            (report.err_after - 0.0694).abs() < FIT_QUANT
-                && (report.recipe.confidence - 0.345).abs() < 0.02,
-            "{name}'s landing moved off the measured 0.0694 / 0.345: {} -> {} at {}",
+            (report.err_after - 0.0761).abs() < FIT_QUANT
+                && (report.recipe.confidence - 0.25).abs() < 0.02,
+            "{name}'s landing moved off the measured 0.0761 / 0.250: {} -> {} at {}",
             report.err_before, report.err_after, report.recipe.confidence
         );
         assert!(
-            (after - 0.0874).abs() < 0.01,
-            "…and its joint reading off the measured 0.0874: {before:.4} -> {after:.4}"
+            (after - 0.1214).abs() < 0.01,
+            "…and its joint reading off the measured 0.1214: {before:.4} -> {after:.4}"
         );
-        assert!(!report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_REFUSED), "{name} is no longer a refusal: {}", report.recipe.rationale);
-        assert!(!report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_MISS), "{name}: nor a miss: {}", report.recipe.rationale);
+        assert!(report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_REFUSED), "{name}: refusal FAR note missing: {}", report.recipe.rationale);
+        assert!(!report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_MISS), "{name}: a refusal emitted the miss note: {}", report.recipe.rationale);
         assert!(
             after <= before + crate::fit_zoned::JOINT_DRIFT_TOL,
             "{name}: the fit must not push the joint reading past the drift \
                  tolerance ({before:.4} -> {after:.4})"
         );
-        reached_max = reached_max.max(after);
+        refusal_max = refusal_max.max(after);
     }
     {
         // Canyon warm LEFT the refusal band in v1.2.3 (CAST-2). Its cast
@@ -4817,7 +4906,7 @@ fn joint_family_is_calibrated_on_the_fixture_set() {
     // the policy assertion is the typed-note split above, not a ceiling
     // derived from this observed maximum.
     let (_, _, look) = read(&hazy_canyon_source(), &vivid_warm_target());
-    eprintln!("JOINT_REFUSAL_MEASURED worst=(the refusal band is empty on the fixture set since v1.18.0); reached={reached_max:.4}");
+    eprintln!("JOINT_REFUSAL_MEASURED worst={refusal_max:.4}; reached={reached_max:.4}");
     // THE REAL-PAIR ANCHORS, recorded as literals because the photographs
     // cannot ship (RAW + finished JPEG off the user's library, measured
     // through `autoshade match` on 2026-08-17 — the table in this test's
@@ -4984,13 +5073,19 @@ fn an_empty_colour_stage_is_explained() {
 }
 
 /// R23-6 A-5: the disclosure names controls for THIS pair, not the
-/// blanket sentence every fit carries. The canyon-gold pair's residual
-/// WAS a per-band hue move the solver had no dial for; since the mixer
-/// solves a band's rotation (Orange -18 here) the pair is reproduced
-/// (J* 0.1688 -> 0.0704, residual not colour-shaped: gates/j78, 2026-11-08),
-/// so the disclosure must NOT fire on it — a disclosure on a landed pair
-/// is the blanket sentence again. The positive case, a finished render
-/// that leaves a colour-shaped residual and a note naming the mixer, is
+/// blanket sentence every fit carries. On the canyon-gold pair the mixer's
+/// rotation carries the rocks (Red and Orange -18) and nothing global can
+/// carry the pale sky into the target's gold: the channel curves that did
+/// rotated it 171° and stained the grey ramp by 19.6 codes of 255 (55b4737;
+/// `cast_must_not_rotate_the_sky_into_a_target_native_hue` was red while
+/// they shipped), and with them this test read the pair as reproduced and
+/// pinned the disclosure SILENT (J* 0.1688 -> 0.0704, gates/j78,
+/// 2026-11-08). With the ramp heard (J145, 2026-11-12) the curves are
+/// refused, the pair lands where the rocks take it (0.1685 -> 0.0761), the
+/// sky's residual is colour-shaped, and the disclosure fires and names the
+/// mixer — as it did until 2026-11-08 (gates/j145). It must NOT fire on a
+/// pair the solver reproduces: a disclosure that always fires is the blanket
+/// sentence again. A second positive case, on a finished zoned render, is
 /// `fit_zoned::tests::unrepresented_note_is_derived_from_the_finished_zoned_render`.
 #[test]
 fn the_unsolvable_controls_are_named_for_this_pair() {
@@ -5023,14 +5118,16 @@ fn the_unsolvable_controls_are_named_for_this_pair() {
             rep.recipe.blue_curve.len()
         );
     }
-    assert!(rep.err_after < 0.5 * rep.err_before, "premise: canyon gold is reproduced now: {} -> {}", rep.err_before, rep.err_after);
-    assert!(
-        !rep.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_UNREPRESENTED),
-        "a reproduced pair must not claim a missing control: {}",
-        rep.recipe.rationale
-    );
-    // Nor on a synthetic pair the solver reproduces exactly —
-    // a disclosure that always fires is the blanket sentence again.
+    assert!(rep.err_after < rep.err_before, "premise: canyon gold lands where the rocks take it: {} -> {}", rep.err_before, rep.err_after);
+    let note = rep
+        .notes
+        .iter()
+        .find(|n| n.key == crate::rationale::keys::FIT_NOTE_UNREPRESENTED)
+        .unwrap_or_else(|| panic!("no specific disclosure: {}", rep.recipe.rationale));
+    let controls = &note.args.iter().find(|(k, _)| *k == "controls").expect("arg").1;
+    assert!(controls.contains("hsl"), "expected the colour mixer named, got {controls}");
+    // And it must NOT fire on a synthetic pair the solver reproduces
+    // exactly — a disclosure that always fires is the blanket sentence again.
     let src = synth();
     let truth = EditRecipe {
         exposure_ev: 0.35,
@@ -5975,14 +6072,30 @@ fn tone_stage_keeps_withheld_luma_range_at_identity() {
     // renders, gates/v2-withheld). Before that nothing shipped (0.0467 either
     // way, gates/j121-tests) and, once the curve was proposed, the
     // elimination took an absence the law refuses (gates/v1-withheld).
-    // MUTATION (J139): repair the absence as a start is repaired
-    // (`repair_with(.., REPAIR_REFITS)` in `Joint::absence`) and the exposure
-    // is dropped.
-    assert!(report.err_after < report.err_before, "the tone that holds the withheld top serves the paired bottom: {} -> {}", report.err_before, report.err_after);
+    // MUTATION (J139), as it read until 2026-11-12: repair the absence as a
+    // start is repaired (`repair_with(.., REPAIR_REFITS)` in
+    // `Joint::absence`) and the exposure is dropped.
+    // RE-PINNED 2026-11-12 (gates/j145). The start that wins is no longer
+    // the stage's. The asks' own curve (J142) — the withheld ranges where
+    // they stand, the paired bottom on its cells' asks — enters as a start
+    // of its own, needs no exposure beside it and reads 0.0467 -> 0.0094 on
+    // [tone curve], F 0.02083 against 0.03072 for the stage's start. The
+    // exposure is 0 because the recipe that ships never had one, and "the
+    // exposure stays" pinned a start that lost. J139's mutation was run
+    // again on this code: the stage's start ends on [shadows, tone curve] at
+    // 0.0227 as before, the asks' curve still wins at 0.0094, and neither
+    // this toy's shipped recipe nor any of the 120 quick fit tests tells the
+    // two eliminations apart (gates/j145, mut-j139-*). What J139 changed
+    // that can still be read is the elimination's cost — 18 renders against
+    // 878 on this toy's stage start, p36 and p39 not ending a fit — and the
+    // real pairs' rounds read it. The claim here is the landing: the tone
+    // that holds the withheld top serves the paired bottom no worse than it
+    // did on 2026-11-11.
     assert!(
-        report.recipe.exposure_ev != 0.0,
-        "the exposure stays: its absence is read where the law admits it, not re-estimated into another recipe: {}",
-        report.recipe.rationale
+        report.err_after <= 0.0155 + FIT_QUANT,
+        "the tone that holds the withheld top serves the paired bottom no worse than the 0.0155 of 2026-11-11: {} -> {}",
+        report.err_before,
+        report.err_after
     );
     eprintln!("WITHHELD_TONE err {} -> {}", report.err_before, report.err_after);
     assert!(report.evidence.globally_same_content);

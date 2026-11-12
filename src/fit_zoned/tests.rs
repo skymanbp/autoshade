@@ -2563,7 +2563,15 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
     // RE-PINNED for v1.18.0 step 1: `sky` 0.006 -> 0.004 on both zones,
     // `sky+land` 0.007 on both (its land zone the fourth entry).
     // RE-PINNED (v1.18.0, J84, 2026-11-08): all five at 0.006 (gates/j79).
-    let expected = [0.006f32, 0.006, 0.006, 0.006, 0.006];
+    // RE-PINNED 2026-11-12 (gates/j145; one sky zone per fixture since
+    // 2026-11-09, both read 0.007 then): both at 0.009. The kept rim follows
+    // the candidate, and the candidate the global recipe under the zone (see
+    // the candidates' own pin below): on `sky` that recipe is the white
+    // balance alone since the elimination (J129) — 8850 K, twelve controls
+    // dropped as unearned — and reads 0.009 before and after J143–J145; on
+    // `sky+land` it read 0.006 before them. Both under the 0.012 ceiling,
+    // the colour rank stopping the shrink on it (asserted below).
+    let expected = [0.009f32, 0.009];
     for ((fixture, role, rim), expected) in measured.iter().zip(expected) {
         assert!(
             (*rim - expected).abs() <= 0.002,
@@ -2604,7 +2612,15 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
     // one sky zone per fixture): the candidates' raw rims 0.0500 / 0.0580 and
     // the shared shrinks k 0.167 / 0.128 (0.0440 / 0.155 and 0.0280 / 0.186
     // with two sky bands and a land zone on the pre-law global).
-    let expected_candidates = [("sky", 0.0500f32, 0.167f32), ("sky+land", 0.0580, 0.128)];
+    // RE-PINNED 2026-11-12 (gates/j145): 0.0540 at k 0.161 and 0.0490 at
+    // k 0.153. `sky` moved between J122 and J142 with the global recipe
+    // under it and not with J143–J145 (the same reading on 55b4737).
+    // `sky+land` read 0.0350 at k 0.148 on 55b4737, its tone entering the
+    // solve at 0.08 of its re-estimate; the repair now keeps the candidate
+    // that reads the lower J* (J144), the tone and the channel curves enter
+    // at 0.48, two controls are dropped as unearned where nine were, and the
+    // candidate reads 0.0490.
+    let expected_candidates = [("sky", 0.0540f32, 0.161f32), ("sky+land", 0.0490, 0.153)];
     for ((fixture, before, k), (want_fixture, want_before, want_k)) in
         candidates.iter().zip(expected_candidates)
     {
@@ -3881,12 +3897,26 @@ fn local_quality_gate_passes_every_accepted_fixture_zone() {
         "the accepted zoned fixture was lost: {}",
         report.recipe.rationale
     );
-    let passed = report
+    // 2026-11-12: this counted the pass verdicts against the masks that
+    // ship. A zone that passes this gate is still judged on its own pixels
+    // afterwards (`fit::ships_local`, R19), so the verdicts can outnumber the
+    // masks: on this fixture the land passes here (texture ratio 1.003) and
+    // is dropped there, its own pixels reading 0.02387 -> 0.02459 under the
+    // global white balance (gates/j145, the joint solve since 2026-11-09).
+    // The claim is the gate's: no zone ships without its pass verdict.
+    let passed: Vec<&str> = report
         .notes
         .iter()
         .filter(|n| n.key == crate::rationale::keys::ZONE_QUALITY_PASSED)
-        .count();
-    assert_eq!(passed, report.recipe.masks.len(), "every accepted zone needs a pass verdict");
+        .filter_map(|n| n.args.iter().find(|(k, _)| *k == "label").map(|(_, v)| v.as_str()))
+        .collect();
+    for mask in &report.recipe.masks {
+        assert!(
+            passed.iter().any(|label| label.starts_with(mask.role.tag())),
+            "every accepted zone needs a pass verdict: {:?} among {passed:?}",
+            mask.role
+        );
+    }
     assert!(
         !report.notes.iter().any(|n| {
             n.key == crate::rationale::keys::ZONE_QUALITY_TEXTURE_FAILED
@@ -4720,27 +4750,38 @@ fn a_zone_survives_the_sidecar_round_trip_byte_for_byte() {
     sky_mask.save(mask_path.path()).unwrap();
     let mut report = zone_stage_report(&src, &tgt);
     attach_zones(&src, &tgt, &mut report, &sky_mask, &sky_mask, &mask_path);
-    // The fit's own masks, carrying one exactly-representable dial — see
-    // the ÷100 note above.
-    let zones: Vec<crate::recipe::LocalAdjustment> = report
-        .recipe
-        .masks
-        .iter()
-        .filter(|m| m.role.is_zone())
-        .map(|m| crate::recipe::LocalAdjustment {
-            mask: m.mask.clone(),
-            role: m.role,
-            inverted: m.inverted,
-            name: m.name.clone(),
+    // The two zones as the zone stage BUILDS them — one Select Sky component
+    // over the claimed raster (`attach::sky_land_geometry`, the one place
+    // the carrier is made), the land its `inverted` adjustment — carrying one
+    // exactly-representable dial (see the ÷100 note above). Until 2026-11-12
+    // they were read off the fit, on the premise that it attached both; under
+    // the joint solve (2026-11-09) the global recipe explains this fixture's
+    // land, the land zone is dropped on its own pixels, and the premise
+    // stopped the test before its subject. What the fit does attach must BE
+    // one of these two, to the byte.
+    let geometry = super::attach::sky_land_geometry(&sky_mask, &mask_path);
+    let zones: Vec<crate::recipe::LocalAdjustment> = [(MaskRole::ZoneSky, false), (MaskRole::ZoneLand, true)]
+        .into_iter()
+        .map(|(role, inverted)| crate::recipe::LocalAdjustment {
+            mask: geometry.clone(),
+            role,
+            inverted,
             exposure_ev: -0.75,
             ..Default::default()
         })
         .collect();
-    assert_eq!(zones.len(), 2, "premise: the fit attached both zones");
-    assert!(
-        zones.iter().any(|m| m.role == MaskRole::ZoneLand && m.inverted),
-        "premise: one of them is the INVERTED land zone"
-    );
+    let attached: Vec<&crate::recipe::LocalAdjustment> =
+        report.recipe.masks.iter().filter(|m| m.role.is_zone()).collect();
+    assert!(!attached.is_empty(), "premise: the fit attached a zone");
+    for m in &attached {
+        assert!(
+            zones.iter().any(|z| z.mask == m.mask && z.role == m.role && z.inverted == m.inverted && z.name == m.name),
+            "a zone the fit attached is not the stage's own carrier: {:?} inverted {} {:?}",
+            m.role,
+            m.inverted,
+            m.mask
+        );
+    }
     // Every render below is of a recipe whose ONLY content is the mask, so
     // nothing a global control does on the round trip can be mistaken for
     // something the mask did.
