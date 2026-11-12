@@ -4149,34 +4149,86 @@ fn a_coherent_sky_cast_the_controls_carry_as_a_gain_ships_without_a_fan() {
 }
 
 /// [`two_temperature_coast`]: a target whose sky really is two colour
-/// temperatures. Every size of the per-channel cast that would carry it
-/// sorts the sky into a hue fan by brightness — each slice a cell moved
-/// against its own ask — so under the one validity law no such cast is
-/// admitted as proposed, the repair scales it to what the cells admit, and
-/// what ships does not fan the sky or make the look worse. The retired fan
-/// gate refused this pair outright and said so; the law reads the same
-/// picture claim without a gate of its own.
+/// temperatures — its hue a function of its own brightness, 50° from the
+/// dark end to the bright end. The v1.2.3 fan gate could not tell a spread
+/// the TARGET carries from one the channel curves invent, refused this pair
+/// outright and named that refusal its deliberate cost; until 2026-11-12
+/// this test pinned the cost ("what ships does not fan the sky", the 15°
+/// edge read on the delivered frame). Under the one validity law
+/// (2026-11-07) each brightness range of the sky is a cell with its own ask:
+/// a curve that takes a range TOWARD its target is admitted there, one that
+/// takes it away is refused there. So the claim is the law's, read on the
+/// picture (restated 2026-11-12 by the user's ruling, gates/j145): the
+/// delivered sky follows the target's own gradient and never passes it —
+/// no band of the frame ends farther from its target than the source left
+/// it, a sky band ends nearer, the delivered spread is no wider than the
+/// target's own, and the solve does no harm. Read on 582aa1e: the bright
+/// half of the sky 1.6 and 5.8 codes from its target as shot, 0.2 and 0.2
+/// delivered; the dark half and the ground where they were; the delivered
+/// sky's spread 19.0° under the target's own. [`delivered_fan_of`] is
+/// printed, not asserted: it reads the spread an edit ADDS, and here the
+/// target asks for one.
 #[test]
-fn a_cast_that_fans_at_every_size_ships_no_fan() {
+fn a_two_temperature_sky_is_followed_never_past_the_targets_own_gradient() {
     let src = coast(false);
     let tgt = two_temperature_coast();
     let rep = fit_recipe(&src, &tgt);
     let shipped = delivered_fan_of(&src, &tgt, &rep);
+    let as_shot = render::develop_preview(&src, &EditRecipe::default());
     let delivered = render::develop_preview(&src, &rep.recipe);
-    let spread = hue_spread_across_luma(&delivered, 0..64);
-    let curves = !(rep.recipe.red_curve.is_empty() && rep.recipe.green_curve.is_empty() && rep.recipe.blue_curve.is_empty());
+    let (spread, own) = (hue_spread_across_luma(&delivered, 0..64), hue_spread_across_luma(&tgt, 0..64));
+    // Mean distance from the target, in the delivered frame's own 8-bit
+    // codes, over one band of rows (16 rows: four bands of sky, four of
+    // ground).
+    const BAND_ROWS: u32 = 16;
+    let target = tgt.to_rgb8();
+    let miss = |img: &image::RgbImage, band: u32| -> f64 {
+        let (mut sum, mut n) = (0.0f64, 0.0f64);
+        for y in band * BAND_ROWS..(band + 1) * BAND_ROWS {
+            for x in 0..img.width() {
+                let (p, q) = (img.get_pixel(x, y), target.get_pixel(x, y));
+                for (a, b) in p.0.iter().zip(q.0.iter()) {
+                    sum += (*a as f64 - *b as f64).abs();
+                    n += 1.0;
+                }
+            }
+        }
+        sum / n
+    };
+    let bands = target.height() / BAND_ROWS;
+    let (shot, out) = (as_shot.to_rgb8(), delivered.to_rgb8());
+    // Half a code: the rounding of an 8-bit delivery, nothing wider.
+    const ROUNDING: f64 = 0.5;
+    let no_band_farther = |img: &image::RgbImage| (0..bands).all(|b| miss(img, b) <= miss(&shot, b) + ROUNDING);
     eprintln!(
-        "TWO_TEMPERATURE_COAST shipped fan {shipped:.2} sky spread {spread:.2} curves {curves} err {:.5} -> {:.5} :: {}",
-        rep.err_before, rep.err_after, rep.recipe.rationale
+        "TWO_TEMPERATURE_COAST shipped fan {shipped:.2} sky spread {spread:.2} (target's own {own:.2}) err {:.5} -> {:.5} bands {:?} :: {}",
+        rep.err_before,
+        rep.err_after,
+        (0..bands).map(|b| format!("{:.1}->{:.1}", miss(&shot, b), miss(&out, b))).collect::<Vec<_>>(),
+        rep.recipe.rationale
     );
-    assert!(shipped < FAN_VISIBLE_DEG, "the shipped frame fans {shipped:.1}° against the {FAN_VISIBLE_DEG}° edge");
-    assert!(spread < FAN_VISIBLE_DEG as f64, "the delivered sky fanned {spread:.1}° across luminance");
+    assert!(no_band_farther(&out), "a band of the frame ends farther from its target than the source left it");
+    assert!(
+        (0..bands / 2).any(|b| miss(&out, b) + 1.0 < miss(&shot, b)),
+        "no band of the sky ends nearer its target: the gradient the target carries is not followed"
+    );
+    assert!(spread <= own, "the delivered sky spreads {spread:.1}° across brightness, past the target's own {own:.1}°");
     assert!(
         rep.err_after <= rep.err_before + FIT_QUANT,
         "the solve does no harm: {} -> {}",
         rep.err_before,
         rep.err_after
     );
+    // The predicate is not vacuous: the same frame pushed the OTHER way —
+    // every pixel as far from its target again as the source stands — fails
+    // it.
+    let mut away = shot.clone();
+    for (p, q) in away.pixels_mut().zip(target.pixels()) {
+        for (a, b) in p.0.iter_mut().zip(q.0.iter()) {
+            *a = (2 * *a as i32 - *b as i32).clamp(0, 255) as u8;
+        }
+    }
+    assert!(!no_band_farther(&away), "premise: a sky moved away from its target fails the band check");
 }
 
 /// The fan class on every fixture that ever provoked it (DEF-1,

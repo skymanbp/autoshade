@@ -2612,15 +2612,26 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
     // one sky zone per fixture): the candidates' raw rims 0.0500 / 0.0580 and
     // the shared shrinks k 0.167 / 0.128 (0.0440 / 0.155 and 0.0280 / 0.186
     // with two sky bands and a land zone on the pre-law global).
-    // RE-PINNED 2026-11-12 (gates/j145): 0.0540 at k 0.161 and 0.0490 at
-    // k 0.153. `sky` moved between J122 and J142 with the global recipe
-    // under it and not with J143–J145 (the same reading on 55b4737).
+    // RE-PINNED 2026-11-12 (gates/j145): `sky` 0.0540 at k 0.161. It moved
+    // between J122 and J142 with the global recipe under it and not with
+    // J143–J145 (the same reading on 55b4737).
     // `sky+land` read 0.0350 at k 0.148 on 55b4737, its tone entering the
     // solve at 0.08 of its re-estimate; the repair now keeps the candidate
-    // that reads the lower J* (J144), the tone and the channel curves enter
-    // at 0.48, two controls are dropped as unearned where nine were, and the
-    // candidate reads 0.0490.
-    let expected_candidates = [("sky", 0.0540f32, 0.161f32), ("sky+land", 0.0490, 0.153)];
+    // that reads the lower J* (J144) and the tone and the channel curves
+    // enter at 0.48. Its candidate is read PER C RUNTIME, because the global
+    // recipe under it is. The same sources (582aa1e and d233a87, online runs
+    // 43187491910 and 43205602770) end the elimination without tint,
+    // temperature and vibrance on glibc and on Apple's libm — 0.0450 at
+    // k 0.148 on all three runner kinds, both runs — and without tint and
+    // vibrance, the temperature kept, on the MSVC runtime — 0.0490 at
+    // k 0.153. The repairs' λ (tone 0.48, curves 0.48, chroma 1.00) and the
+    // kept rim (0.009) are the same on all of them. The last bits of the
+    // transcendental functions are the runtime's (the note on
+    // `dehaze_split_is_bit_identical_to_the_pre_split_golden`), and a solve
+    // that compares objective readings can end on another recipe for them.
+    // Each runtime is held to its own reading, at the tolerance below.
+    let sky_land = if cfg!(target_env = "msvc") { (0.0490f32, 0.153f32) } else { (0.0450, 0.148) };
+    let expected_candidates = [("sky", 0.0540f32, 0.161f32), ("sky+land", sky_land.0, sky_land.1)];
     for ((fixture, before, k), (want_fixture, want_before, want_k)) in
         candidates.iter().zip(expected_candidates)
     {
@@ -4590,11 +4601,26 @@ fn zoned_orchestration_attaches_the_sky_mask_and_improves_the_zone() {
         report.recipe.rationale
     );
     // RE-PINNED 2026-11-09 (gates/j121–j122-tests; the joint solve under
-    // the law): the global's own mixer now carries the rock's warm shift and
-    // leaves the grey column alone; what the land zone finds left over is
-    // under FIT_QUANT on its own pixels and it is dropped (or solves to
+    // the law): the global's own mixer carried the rock's warm shift and
+    // left the grey column alone; what the land zone found left over was
+    // under FIT_QUANT on its own pixels and it was dropped (or solved to
     // neutral) — on J118 it still attached inverted. The land is a reading
     // here; the claim is the sky's warm recolour above and the carrier below.
+    // READ BY PICTURE 2026-11-12 (gates/j145, the ZRENDER lines; mean
+    // distance from the target in codes of 255 over the grey column / the
+    // rock / the sky; as shot 0.0 / 6.7 / 45.3). Since the elimination (J129)
+    // the global recipe is the white balance alone, 8850 K. It carries the
+    // rock (6.7 -> 2.0) and takes the grey column with it (0.0 -> 8.0): the
+    // column is the same grey as the source sky and sits with it in one cell
+    // of the white balance's grid, where the sky's side is the majority and
+    // asks for more warmth than the move delivers, so the law admits it.
+    // With the sky zone on it the frame reads 8.0 / 2.0 / 32.3. The released
+    // v1.17.1 read 32.3 / 3.7 / 11.7 on this pair: its global recipe rendered
+    // every such grey [237, 182, 161], the column with the sky. No global
+    // control tells the two greys apart, so the sky's gold reaches the frame
+    // only through the zone, and the zone's share is its rim budget
+    // (`ZONE_BOUNDARY_RIM_MAX`); the column's 8.0 is a quarter of what the
+    // release moved it.
     eprintln!(
         "ZONED_ATTACH land: {:?}",
         report.recipe.masks.iter().filter(|m| m.role == MaskRole::ZoneLand).map(|m| (m.inverted, m.exposure_ev)).collect::<Vec<_>>()
