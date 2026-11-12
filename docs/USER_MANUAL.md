@@ -892,7 +892,9 @@ the pixel evidence could not read at all — a featureless sky the target
 re-synthesised smooth reads as "texture gone" to the structural instrument — is
 read on the region pairing instead when it lies inside a region the segmenter
 found in both frames, and takes the second solve on the same cell-mean verdict
-as the measured cells; a second rationale line counts those.
+as the measured cells; a second rationale line counts those. So is a cell the
+pixel evidence reads on only a minority of its pixels: a few surviving patches
+of texture do not answer for the area around them.
 The field is then dropped whole if it makes the frame worse, or if it improved
 the frame by making the sky or the land zone worse.
 

@@ -341,3 +341,43 @@ fn the_layout_reading_raises_weight_only_inside_the_pairing_and_only_upward() {
         "the half the fine reading read keeps its own verdicts"
     );
 }
+
+/// J148. A reading's share of a cell is the mass its pixels vote with over
+/// the cell's PRESENT pixels — those the target does not clip: a fine reading
+/// that weighs a quarter of one cell reads 0.25 there and 1 wherever it
+/// weighs every pixel, a cell whose target clips over half of it is still
+/// weighed whole by a reading that weighs the rest, and the pairing lifts the
+/// quarter to the whole cell.
+/// MUTATION: in `cell_shares`, count as present only the pixels the reading
+/// weighs — every share reads 1.
+#[test]
+fn a_reading_weighs_a_share_of_each_cell() {
+    let (source, mut target, w, h) = pair(0.05, 0.05);
+    let n = (w * h) as usize;
+    let (cw, ch) = (w as usize / CELLS_X, h as usize / CELLS_Y);
+    let at = |i: usize| (i % w as usize, i / w as usize);
+    // Cell 1 (second column, top row): the target clips over its left half.
+    for (i, pixel) in target.iter_mut().enumerate() {
+        let (x, y) = at(i);
+        if y < ch && (cw..cw + cw / 2).contains(&x) {
+            *pixel = [1.0; 3];
+        }
+    }
+    let mut evidence = fit::evidence_model_for(&source, &target, w, h);
+    // Every pixel present, but for cell 0 (top left), weighed on a quarter.
+    evidence.source_presence_weights = (0..n)
+        .map(|i| {
+            let (x, y) = at(i);
+            f32::from(!(x < cw && y < ch) || (x < cw / 2 && y < ch / 2))
+        })
+        .collect();
+    let cells = PairedCells::build(&target, w, h, &evidence).expect("the pair builds cells");
+    let fine = cells.cell_shares();
+    assert!((fine[0] - 0.25).abs() < 1e-6, "a quarter of cell 0 is weighed: {}", fine[0]);
+    assert!((fine[1] - 1.0).abs() < 1e-6, "cell 1's unclipped half is weighed whole: {}", fine[1]);
+    assert!(fine[2..].iter().all(|s| (s - 1.0).abs() < 1e-6), "every other cell is weighed whole: {fine:?}");
+    let blind = evidence.structure_blind(&target);
+    let paired = cells.with_layout(&blind, &vec![1.0; n]).expect("the pairing carries weight");
+    let lifted = paired.cell_shares();
+    assert!((lifted[0] - 1.0).abs() < 1e-6, "the pairing weighs the whole of cell 0: {}", lifted[0]);
+}

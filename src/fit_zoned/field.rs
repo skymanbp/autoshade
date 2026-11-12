@@ -672,27 +672,53 @@ fn admit_cells(
     };
     let rendered = pass_b.render(current);
     let trace = crate::config::live_env_os("AUTOSHADE_FIT_TRACE").is_some();
-    if trace {
-        for line in cells.refused_trace(current, &rendered) {
-            eprintln!("field admission refused {line}");
-        }
-    }
-    // The cells the fine reading could not read AT ALL are read on the
-    // pairing, and take pass B on the same verdict a fine-read cell takes it
-    // on. One reading of one render: the fine cells' and, where they abstain,
-    // the pairing's (the flag says which).
+    // WHICH reading speaks for a cell (J148): one that weighs the majority of
+    // the cell's present pixels (`fit_cells::CELL_MAJORITY`) — the fine
+    // reading first; the pairing's where the fine one cannot read the cell or
+    // weighs only a minority of it; neither where neither does, an unread
+    // cell, which keeps pass A as an unread cell always has. A cell's verdict
+    // moves every vertex the cell owns, and until J148 the fine reading spoke
+    // wherever it weighed any pixel at all: 17.2 % of a sky cell refused a
+    // pass B that takes the whole cell from 23.2 codes off its target to 3.9.
+    // One reading of one render per cell (the flag says which).
     let paired_cells = paired.as_ref().and_then(|(_, blind)| cells.with_layout(blind, layout));
+    let fine_share = cells.cell_shares();
+    let paired_share = paired_cells.as_ref().map(|p| p.cell_shares());
+    let pairing_share = |cell: usize| paired_share.as_ref().map_or(0.0, |share| share[cell]);
     let read_cells = |after: &[[f32; 3]]| -> Vec<Option<(CellMove, bool)>> {
         let fine = cells.moves(current, after, None);
         let coarse = paired_cells.as_ref().map(|p| p.moves(current, after, None));
-        fine.iter()
-            .enumerate()
-            .map(|(cell, reading)| match reading {
-                Some(reading) => Some((*reading, true)),
-                None => coarse.as_ref().and_then(|c| c[cell]).map(|reading| (reading, false)),
+        (0..fine.len())
+            .map(|cell| {
+                let on_pairing = coarse.as_ref().and_then(|c| c[cell]);
+                speaking_reading(fine[cell], fine_share[cell], on_pairing, pairing_share(cell))
             })
             .collect()
     };
+    if trace {
+        let spoke = read_cells(&rendered);
+        let speaker = |cell: usize| spoke[cell].map(|(_, fine)| fine);
+        for (cell, line) in cells.refused_trace(current, &rendered) {
+            if speaker(cell) == Some(true) {
+                eprintln!("field admission refused {line}");
+            }
+        }
+        for (cell, line) in paired_cells.iter().flat_map(|p| p.refused_trace(current, &rendered)) {
+            if speaker(cell) == Some(false) {
+                eprintln!("field admission refused on the pairing {line}");
+            }
+        }
+        for (cell, share) in fine_share.iter().enumerate() {
+            if *share > 0.0 && speaker(cell) != Some(true) {
+                eprintln!(
+                    "field admission cell c{} r{}: the fine reading weighs {share:.3} of the cell, the pairing {:.3}",
+                    cell % crate::fit_cells::CELLS_X,
+                    cell / crate::fit_cells::CELLS_X,
+                    pairing_share(cell),
+                );
+            }
+        }
+    }
     let whole = read_cells(&rendered);
     // J147: the one-axis candidates — pass B's tone over pass A's colour, and
     // its colour over pass A's tone — rendered only when a read cell refused
@@ -768,6 +794,20 @@ fn admit_cells(
         }
     }
     (merged, admitted, read, paired_read, by_axis)
+}
+
+/// J148. WHICH reading speaks for one cell: the fine reading where it weighs
+/// the majority of the cell's present pixels (`fit_cells::CELL_MAJORITY`),
+/// else the pairing's where the pairing does, else none — the cell is not
+/// read. `true` beside a fine reading. A reading that could not read the
+/// cell (`None`) does not speak, whatever it weighs.
+fn speaking_reading(
+    fine: Option<CellMove>, fine_share: f32, pairing: Option<CellMove>, pairing_share: f32,
+) -> Option<(CellMove, bool)> {
+    let speaks = |share: f32| share >= crate::fit_cells::CELL_MAJORITY;
+    fine.filter(|_| speaks(fine_share))
+        .map(|reading| (reading, true))
+        .or_else(|| pairing.filter(|_| speaks(pairing_share)).map(|reading| (reading, false)))
 }
 
 /// J147. What a READ cell takes of the support-free solve ([`cell_take`]).

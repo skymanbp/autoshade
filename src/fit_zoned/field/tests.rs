@@ -207,6 +207,41 @@ fn right_half_region() -> crate::recipe::LocalAdjustment {
     }
 }
 
+/// J148. Which reading speaks for a cell: one that weighs the majority of it.
+/// The fine reading where it does; the pairing's where the fine one weighs a
+/// minority or could not read the cell; none where neither holds the majority
+/// — and a reading that could not read the cell never speaks. The first case
+/// is a measured cell (round V12, the reference pair at 0.65, the top-right
+/// sky cell): the fine reading weighed 0.172 of it and refused pass B, the
+/// pairing weighed 0.998 and takes it.
+/// MUTATION: in `speaking_reading`, let any positive share speak — the
+/// minority's refusal answers for the cell and the first assertion fails.
+#[test]
+fn the_reading_that_speaks_for_a_cell() {
+    let reading = |toward: bool| CellMove {
+        converged: toward,
+        landed: 0.0,
+        toward_whole: toward,
+        toward_tone: toward,
+        toward_colour: toward,
+    };
+    let (refuses, takes) = (reading(false), reading(true));
+    assert_eq!(speaking_reading(Some(refuses), 0.172, Some(takes), 0.998), Some((takes, false)));
+    assert_eq!(
+        speaking_reading(Some(refuses), crate::fit_cells::CELL_MAJORITY, Some(takes), 1.0),
+        Some((refuses, true)),
+        "the line itself is a majority"
+    );
+    assert_eq!(speaking_reading(Some(refuses), 0.9, Some(takes), 1.0), Some((refuses, true)));
+    assert_eq!(
+        speaking_reading(None, 1.0, Some(takes), 1.0),
+        Some((takes, false)),
+        "a cell the fine reading cannot read goes to the pairing"
+    );
+    assert_eq!(speaking_reading(Some(takes), 0.3, Some(takes), 0.4), None, "no majority, no reading");
+    assert_eq!(speaking_reading(Some(takes), 0.3, None, 1.0), None, "a pairing that cannot read it does not speak");
+}
+
 /// J147. The admission ladder of one read cell, rung by rung. The whole of
 /// pass B on its own verdict first; then the whole of it when it landed
 /// closer and points toward the target along tone and along colour apart
@@ -520,6 +555,49 @@ fn a_cell_the_pixel_evidence_cannot_read_is_read_on_its_region_pairing() {
         );
         assert!(after < before, "channel {ch}: the smoothed ninth moved toward its target ({before:.4} -> {after:.4})");
     }
+}
+
+/// J148, the wiring. On the R42 toy, one textured cell the pixel-scale
+/// evidence reads is left weighed on a quarter of its pixels. Without a
+/// pairing the cell is no longer read — one fewer measured cell; with the
+/// pairing over it, it is read on the pairing — one more cell than the
+/// pixel-scale evidence could not read at all.
+/// MUTATION: in `admit_cells`, hand `speaking_reading` a fine share of 1.0.
+#[test]
+fn a_cell_weighed_on_a_minority_is_read_on_its_pairing_or_not_at_all() {
+    let (src, tgt) = (smoothed_top_right_ninth(false), smoothed_top_right_ninth(true));
+    let (current, target, w, h, report) = field_probe(&src, &tgt);
+    let pass_a = LocalField::solve(&current, &target, w, h, &report.evidence)
+        .expect("the analysis field solves");
+    let unread = unread_cells(&current, &target, w, h, &report, &pass_a);
+    let (cw, ch) = (w as usize / crate::fit_cells::CELLS_X, h as usize / crate::fit_cells::CELLS_Y);
+    let at = |i: usize| (i % w as usize, i / w as usize);
+    assert!(!unread.contains(&0), "premise: the top-left cell is read by the pixel-scale evidence");
+    let whole_share = crate::fit_cells::PairedCells::build(&target, w, h, &report.evidence)
+        .expect("the pair builds cells")
+        .cell_shares()[0];
+    assert!(
+        whole_share >= crate::fit_cells::CELL_MAJORITY,
+        "premise: and that evidence weighs the majority of it ({whole_share})"
+    );
+    let mut sliver = report.evidence.clone();
+    for (i, presence) in sliver.source_presence_weights.iter_mut().enumerate() {
+        let (x, y) = at(i);
+        if x < cw && y < ch && !(x < cw / 2 && y < ch / 2) {
+            *presence = 0.0;
+        }
+    }
+    let (_, _, read_whole, ..) =
+        admit_cells(&current, &target, w, h, &report.evidence, pass_a.clone(), 0.60, &[], None);
+    let (_, _, read_sliver, none, _) =
+        admit_cells(&current, &target, w, h, &sliver, pass_a.clone(), 0.60, &[], None);
+    assert_eq!(none, LayoutAdmission::default(), "no pairing: nothing is read on one");
+    assert_eq!(read_sliver + 1, read_whole, "the cell weighed on a quarter is not read");
+    let pairing = top_third_pairing(w, h);
+    let (_, _, read_paired, paired, _) =
+        admit_cells(&current, &target, w, h, &sliver, pass_a.clone(), 0.60, &pairing, None);
+    assert_eq!(read_paired, read_sliver, "the pairing reads it, not the pixel-scale evidence");
+    assert_eq!(paired.read, unread.len() + 1, "one more cell is read on the pairing: {paired:?}");
 }
 
 /// J141's displaced-contour toy at analysis size: a flat sky over a flat land

@@ -5467,7 +5467,23 @@ threshold. Four sites consumed it (the second retired in v1.18.0):
     target on both axes (cosines 1.00 and 0.87, 0.36 on the whole move), the
     cell kept pass A — nothing — inside a block its neighbours corrected, and
     showed as a greenish patch (`FIELD_AXIS_ADMITTED` counts such cells,
-    printed only when there are any). Two do-no-harm checks follow, the
+    printed only when there are any). Since J148 the reading a cell is judged
+    by is one that weighs the MAJORITY of the cell's present pixels
+    (`fit_cells::CELL_MAJORITY`, `PairedCells::cell_shares`,
+    `fit_zoned::field::speaking_reading`): the fine reading where it does, the
+    pairing's where the fine one cannot read the cell or weighs only a
+    minority of it, and none otherwise — the cell is unread and keeps pass A.
+    A cell's verdict moves every vertex the cell owns, and until then the fine
+    reading spoke wherever it weighed any pixel at all. On the reference pair
+    at 0.65 it weighs scattered blocks of the re-synthesised sky: 17.2 % of
+    the top-right cell refused a pass B that takes the whole cell from 23.2
+    codes off its target mean to 3.9 (the minority read 11.2 -> 15.2), 3.9 %
+    of the top-left cell refused another (25.5 -> 3.7 on the whole cell), and
+    the cell J147 was measured on was read on 12.5 % of its pixels, whose
+    target mean (111.8/92.0/88.7) asks darker where the cell's
+    (129.4/102.4/93.9) asks brighter. The first of them showed as a lighter
+    block once J147 gave it pass B's colour alone; J147's ladder stays for a
+    cell that refuses on a majority reading. Two do-no-harm checks follow, the
     frame's and a per-ZONE one read off the attached zone masks through
     `render::preview_mask_coverage`, because a field that pays for the sky out of the
     land wins on the frame and loses the picture. Since 2026-09-24 both checks
@@ -5691,6 +5707,9 @@ sentence (`FIELD_LAYOUT_ADMITTED`), printed only when such cells exist;
 every pair without them is byte-identical. Pinned by
 `a_cell_the_pixel_evidence_cannot_read_is_read_on_its_region_pairing` and
 `the_layout_reading_raises_weight_only_inside_the_pairing_and_only_upward`.
+Since v1.18.0 (J148) a cell the fine reading weighs only a minority of is
+read on the pairing too, and the sentence says so (the colour field stage
+above; `a_cell_weighed_on_a_minority_is_read_on_its_pairing_or_not_at_all`).
 
 **A pixel pair testifies for the colour field only as a pair (J141,
 v1.18.0).** The eyes at the final gate again found what the numbers had not.

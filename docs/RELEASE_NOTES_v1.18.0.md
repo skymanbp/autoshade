@@ -149,6 +149,15 @@ and reference-pair gate before it shipped.
   others and the field could draw the reference's layout onto the photo: a
   dark smudge of sky beside a ridge, or the outline of the reference's
   buildings over another scene.
+- **The colour field's own checks follow the rest of the fit.** A masked
+  area the field leaves worse by less than the fit's rounding no longer
+  sends the whole field back. Each part of the frame is judged on the
+  evidence that covers most of it: before, a few surviving patches of
+  texture in a repainted sky could answer for the whole area around them,
+  and that area kept no correction — a patch of the uncorrected colour
+  inside a corrected sky. And a part that would not take the field's
+  correction whole, brightness and colour together, is asked about each on
+  its own and takes the part that brings it closer to the target.
 - **A mask's colour is read before the zone's tone, and the seam check reads
   it exactly.** A sky or a land zone whose target was tinted through a
   mask's colour control used to come back with part of the tint. The zone's

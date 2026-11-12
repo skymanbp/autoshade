@@ -63,6 +63,21 @@ const ALIGN_COS: f32 = 0.5;
 /// region whose cells mostly moved closer but a third of them sideways is not
 /// a region this edit recovered.
 const VOUCH_MIN_ALIGNED: f32 = 0.70;
+/// J148 (v1.18.0). A reading speaks for a cell only where the pixels it
+/// weighs are at least this share of the cell's present pixels — the majority,
+/// the line `fit::validity` holds a cell's paired ask and its population ask
+/// to. A cell's verdict moves every vertex the cell owns, so every pixel in
+/// it, and a minority's means are not the cell's. Round V12, the reference
+/// pair at strength 0.65 (8-bit codes, Chebyshev distance to the target
+/// mean): in re-synthesised sky the fine reading weighs scattered blocks; in
+/// the top-right cell it weighed 17.2 % of the cell and read the support-free
+/// solve as further from the target (11.2 -> 15.2) while the whole cell reads
+/// it closer (23.2 -> 3.9); in the top-left cell 3.9 % (7.8 -> 11.8 against
+/// 25.5 -> 3.7); and in a third, 12.5 %, whose target mean 111.8/92.0/88.7
+/// asks darker where the cell's 129.4/102.4/93.9 asks brighter. Each verdict
+/// was applied to the whole cell: a green patch in a corrected sky, then a
+/// lighter block.
+pub(crate) const CELL_MAJORITY: f32 = 0.5;
 /// Linear luminance under which a cell mean's chromaticity is not read: a
 /// cell that black has no colour to point anywhere.
 const CHROMATICITY_FLOOR: f32 = 1e-4;
@@ -385,6 +400,23 @@ impl PairedCells {
         self.of_pixel.get(i).map_or(0.0, |&cell| self.trust[cell])
     }
 
+    /// J148. How much of each cell this reading WEIGHS: the mass its pixels
+    /// vote with over the cell's present pixels — those the target does not
+    /// clip, the ones any reading of the cell could weigh. 0 at a cell with
+    /// no such pixel. The consumer that lets a cell's verdict move the whole
+    /// cell asks this first ([`CELL_MAJORITY`]).
+    pub(crate) fn cell_shares(&self) -> Vec<f32> {
+        let cells = CELLS_X * CELLS_Y;
+        let (mut mass, mut present) = (vec![0.0f64; cells], vec![0.0f64; cells]);
+        for (i, &cell) in self.of_pixel.iter().enumerate() {
+            mass[cell] += self.weight[i] as f64;
+            if unclipped(&self.tgt[i]) {
+                present[cell] += 1.0;
+            }
+        }
+        (0..cells).map(|c| if present[c] > 0.0 { (mass[c] / present[c]) as f32 } else { 0.0 }).collect()
+    }
+
     /// Which cell an analysis pixel sits in — the index into
     /// [`Self::moves`], so a per-pixel consumer and the region verdict
     /// cannot disagree about which cell answered for a pixel.
@@ -457,11 +489,11 @@ impl PairedCells {
     }
 
     /// The cells [`Self::moves`] read and refused whole, one line each for the
-    /// fit trace (`AUTOSHADE_FIT_TRACE`): the cell's column and row, the three
-    /// means its verdict was read from in 8-bit display codes, which half of
-    /// the verdict failed, and the direction test asked again along the tone
-    /// and the colour axis alone.
-    pub(crate) fn refused_trace(&self, before: &[[f32; 3]], after: &[[f32; 3]]) -> Vec<String> {
+    /// fit trace (`AUTOSHADE_FIT_TRACE`), with the cell it is about: the
+    /// cell's column and row, the three means its verdict was read from in
+    /// 8-bit display codes, which half of the verdict failed, and the
+    /// direction test asked again along the tone and the colour axis alone.
+    pub(crate) fn refused_trace(&self, before: &[[f32; 3]], after: &[[f32; 3]]) -> Vec<(usize, String)> {
         let codes = |p: &[f32; 3]| p.map(|c| (c * 255.0 * 10.0).round() / 10.0);
         self.measure(before, after, None, MoveAxis::Full)
             .iter()
@@ -469,7 +501,7 @@ impl PairedCells {
             .filter_map(|(cell, reading)| {
                 let r = reading.as_ref().filter(|r| !(r.converged && r.aligned))?;
                 let [b, a, t] = &r.means;
-                Some(format!(
+                let line = format!(
                     "cell c{} r{}: before {:?} after {:?} target {:?} converged {} aligned {} (tone alone {}, colour alone {})",
                     cell % CELLS_X,
                     cell / CELLS_X,
@@ -480,7 +512,8 @@ impl PairedCells {
                     r.aligned,
                     aligned(b, a, t, MoveAxis::Tone),
                     aligned(b, a, t, MoveAxis::Colour),
-                ))
+                );
+                Some((cell, line))
             })
             .collect()
     }
