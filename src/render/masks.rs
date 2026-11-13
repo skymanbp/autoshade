@@ -54,6 +54,14 @@ use super::*;
 /// frame that was already globally white-balanced before the airlight was
 /// estimated, and clarity/texture scale luma while saturation moves chroma.
 ///
+/// **A raster layer's band on a content edge (J149, v1.18.0).** The two
+/// per-pixel passes — dehaze, and the fused pass with its Color tint — weigh
+/// a band pixel by its content's share of the pixel's LIGHT, each channel by
+/// its own, read once on the frame as the mask finds it ([`BandShares`], which
+/// carries the defect, the law and the measurements). Every other pixel is
+/// weighed by the coverage, to the bit what it was; so is every pixel in the
+/// spatial passes.
+///
 /// **Memory** (full-resolution export, 61 MP → 244 MB per f32 plane): the
 /// spatial passes run SEQUENTIALLY and each drops its planes before the next
 /// allocates, so the resident increment is ONE pass's peak, never the sum.
@@ -61,7 +69,12 @@ use super::*;
 /// chained ones for clarity, and the three `detail.rs` documents for each of
 /// its passes — the spatial-pass row of `decode::PIPELINE_BYTES_PER_PIXEL`.
 /// The `!= 0.0` gate on each pass means a mask that does not use an op
-/// allocates nothing for it.
+/// allocates nothing for it. The owed weights are a sparse list read before
+/// the first pass and dropped before the first spatial one allocates, so they
+/// ride beside the frame alone — the mask-band row of the same accounting.
+/// The colour field's own band ([`field_sky_band`]) is read before this pass
+/// and taken after it, so that one list does ride through the spatial passes:
+/// the row after it.
 pub(super) fn apply_masks(
     data: &mut [[f32; 3]],
     w: usize,
@@ -184,6 +197,10 @@ pub(super) fn apply_masks(
             continue;
         };
         let weight_at = |x: usize, y: usize| cover.at(x, y);
+        // What this mask's raster layers owe the pixels on their bands
+        // (J149), read ONCE, here, on the frame as the mask finds it. The two
+        // per-pixel passes below weigh by it.
+        let owed = BandShares::read(&cover, data);
 
         // --- local dehaze pass (runs FIRST — see the pass-order note on this
         //     function for why, and for the two residues vs the global chain) ---
@@ -197,23 +214,22 @@ pub(super) fn apply_masks(
         {
             let (dec, enc) = transfer_luts();
             data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                let mut band = owed.row(y).iter().peekable();
                 for (x, out_px) in row.iter_mut().enumerate() {
-                    let mut wgt = weight_at(x, y);
-                    if wgt <= 0.001 {
+                    let mut wgt = cover.weight_of(x, y, band.next_if(|entry| entry.0 as usize == x));
+                    if wgt.most() <= 0.001 {
                         continue;
                     }
                     let p = *out_px;
                     // Range Mask intersection, same convention as the tone pass.
                     if let Some(rm) = &m.range {
-                        wgt *= range_weight(rm, &p);
-                        if wgt <= 0.001 {
+                        wgt = wgt.scaled(range_weight(rm, &p));
+                        if wgt.most() <= 0.001 {
                             continue;
                         }
                     }
                     let t = dehaze_px(&p, a, dehaze_s, dec, enc);
-                    for c in 0..3 {
-                        out_px[c] = p[c] * (1.0 - wgt) + t[c] * wgt;
-                    }
+                    *out_px = wgt.blend(&p, &t);
                 }
             });
         }
@@ -249,9 +265,10 @@ pub(super) fn apply_masks(
         // --- tone + saturation pass (rows independent → parallel) ---
         if !tone_identity {
         data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            let mut band = owed.row(y).iter().peekable();
             for (x, out_px) in row.iter_mut().enumerate() {
-                let mut wgt = weight_at(x, y);
-                if wgt <= 0.001 {
+                let mut wgt = cover.weight_of(x, y, band.next_if(|entry| entry.0 as usize == x));
+                if wgt.most() <= 0.001 {
                     continue;
                 }
                 let p = *out_px;
@@ -261,8 +278,8 @@ pub(super) fn apply_masks(
                 // sequentially, so a later mask's range sees earlier masks' output;
                 // documented approximation vs LR's fixed reference image).
                 if let Some(rm) = &m.range {
-                    wgt *= range_weight(rm, &p);
-                    if wgt <= 0.001 {
+                    wgt = wgt.scaled(range_weight(rm, &p));
+                    if wgt.most() <= 0.001 {
                         continue;
                     }
                 }
@@ -313,17 +330,18 @@ pub(super) fn apply_masks(
                     let (r2, g2, b2) = hsl_to_rgb((hh + hue_turns).rem_euclid(1.0), ss, ll);
                     t = [r2, g2, b2];
                 }
-                for c in 0..3 {
-                    out_px[c] = p[c] * (1.0 - wgt) + t[c] * wgt;
-                }
+                *out_px = wgt.blend(&p, &t);
                 // The Color tint last, on the blended pixel at the mask's
                 // own weight (see the colour-stage order on this function).
                 if let Some((push, a)) = toning {
-                    *out_px = tint_px(*out_px, push, a * wgt);
+                    *out_px = tint_px(*out_px, push, a * wgt.luma);
                 }
             }
         });
         }
+        // The spatial passes below weigh by the coverage ([`BandShares`], which
+        // passes); the list goes before their planes come.
+        drop(owed);
 
         // --- local clarity / texture (SPATIAL: full-frame luma plane → blur →
         //     detail weighted by the mask, exactly like the NR pass below) ---
@@ -418,13 +436,13 @@ impl Brushes {
 /// its move by (the Range Mask is the pass's own business: it reads the pixel
 /// as that pass finds it).
 pub(super) struct Cover<'a> {
-    m: &'a crate::recipe::LocalAdjustment,
-    bmp: Option<Bmp<'a>>,
-    comp_bmps: Vec<Option<Bmp<'a>>>,
-    unwarp: Option<&'a MaskUnwarp>,
-    w: usize,
-    h: usize,
-    amount: f32,
+    pub(super) m: &'a crate::recipe::LocalAdjustment,
+    pub(super) bmp: Option<Bmp<'a>>,
+    pub(super) comp_bmps: Vec<Option<Bmp<'a>>>,
+    pub(super) unwarp: Option<&'a MaskUnwarp>,
+    pub(super) w: usize,
+    pub(super) h: usize,
+    pub(super) amount: f32,
 }
 
 impl<'a> Cover<'a> {
@@ -502,7 +520,73 @@ pub(super) fn field_sky_coverage(
     frame: MaskFrame<'_>,
     w: usize,
     h: usize,
+    band: &[(u32, f32)],
 ) -> Option<Vec<f32>> {
+    with_field_zone(r, rasters, frame, w, h, |cover, land| {
+        let mut sky: Vec<f32> = (0..w * h)
+            .into_par_iter()
+            .map(|i| {
+                let c = cover.geometry_at(i % w, i / w);
+                if land { 1.0 - c } else { c }
+            })
+            .collect();
+        for &(i, c) in band {
+            if let Some(slot) = sky.get_mut(i as usize) {
+                *slot = c;
+            }
+        }
+        sky
+    })
+}
+
+/// The partition's BAND (J149, v1.18.0). Where the zone's raster steps across
+/// a content edge, a pixel's place in the partition is its CONTENT's — the
+/// coverage of the side it is, or between the two sides' by the share of the
+/// pixel that is each ([`BandShares`], `Owed::by_area`) — and not the area of
+/// it the raster covers: read by that area, the sky's last rows above a
+/// silhouette took a growing share of the land's correction and the land's
+/// first rows of the sky's, a ramp of the two the width of the raster's step.
+/// Read on `data`, the frame as the MASKS find it — the last frame on which
+/// the two contents stand at the levels the photograph recorded; the masks
+/// may leave them at one level, and the field reads the frame they leave.
+/// Each entry is a pixel's index in the frame and its coverage in
+/// [`field_sky_coverage`]'s sense, which takes them. Empty with no zone
+/// mask, no raster of it, or no band on a content edge.
+pub(super) fn field_sky_band(
+    r: &EditRecipe,
+    rasters: &MaskRasterSnapshot,
+    frame: MaskFrame<'_>,
+    w: usize,
+    h: usize,
+    data: &[[f32; 3]],
+) -> Vec<(u32, f32)> {
+    let band = with_field_zone(r, rasters, frame, w, h, |cover, land| {
+        let owed = BandShares::read(cover, data);
+        (0..h)
+            .flat_map(|y| {
+                owed.row(y).iter().map(move |(x, due)| {
+                    let c = due.by_area();
+                    ((y * w) as u32 + *x, if land { 1.0 - c } else { c })
+                })
+            })
+            .collect()
+    });
+    band.unwrap_or_default()
+}
+
+/// The zone mask the colour field's partition is read from
+/// ([`field_sky_coverage`]) as the [`Cover`] of its base geometry on a
+/// `w × h` frame in `frame`, handed to `read` with whether it is the LAND
+/// zone's (the partition is then its inverse). `None` with no zone mask, or
+/// one whose raster cannot be loaded.
+fn with_field_zone<T>(
+    r: &EditRecipe,
+    rasters: &MaskRasterSnapshot,
+    frame: MaskFrame<'_>,
+    w: usize,
+    h: usize,
+    read: impl FnOnce(&Cover<'_>, bool) -> T,
+) -> Option<T> {
     use crate::recipe::MaskRole;
     let (stored, land) = r
         .masks
@@ -527,34 +611,25 @@ pub(super) fn field_sky_coverage(
         rasters
     };
     let cover = Cover::new(m, &brushes, rasters, unwarp.as_ref(), w, h)?;
-    Some(
-        (0..w * h)
-            .into_par_iter()
-            .map(|i| {
-                let c = cover.geometry_at(i % w, i / w);
-                if land { 1.0 - c } else { c }
-            })
-            .collect(),
-    )
+    Some(read(&cover, land))
 }
 
 /// [`field_sky_coverage`] over a preview the fit develops with
 /// [`develop_preview`]: the frame and the rasters that develop reads its masks
-/// in (the frame [`preview_mask_coverage`] reads them in), at the preview's
-/// size — the partition the SHIPPED colour field is solved on, so the fit
-/// solves the read the develop of this preview performs.
+/// in, at the preview's size, and the partition's band read where that
+/// develop reads it — on the preview as its masks find it
+/// (`develop::preview_before_masks`, [`field_sky_band`]). The partition the
+/// SHIPPED colour field is solved on, so the fit solves the read the develop
+/// of this preview performs. A field solved on the plain coverage and
+/// rendered on the band's (the develop's read from J149 on, the fit's not
+/// yet) is solved for one frame and shipped on another along every
+/// silhouette.
 pub(crate) fn preview_field_sky_coverage(reference: &DynamicImage, recipe: &EditRecipe) -> Option<Vec<f32>> {
-    let validated = crate::recipe::ValidatedRecipe::new(recipe);
-    let geom = geometry_profile(&validated);
-    let corrected = super::canvas::plate_corrected(reference);
-    let rasters = best_effort_mask_raster_snapshot(&validated, &crate::diag::dropped());
-    field_sky_coverage(
-        &validated,
-        &rasters,
-        MaskFrame::of_base(&geom, validated.lens_distortion, corrected),
-        reference.width() as usize,
-        reference.height() as usize,
-    )
+    super::develop::preview_before_masks(reference, recipe, |data, (w, h), r, frame| {
+        let rasters = best_effort_mask_raster_snapshot(r, &crate::diag::dropped());
+        let band = field_sky_band(r, &rasters, frame, w, h, data);
+        field_sky_coverage(r, &rasters, frame, w, h, &band)
+    })
 }
 
 /// WHERE a mask chain's output will be sampled — the value that keeps

@@ -331,6 +331,12 @@ fn decode_peak_bytes(need: u64, orientation: image::metadata::Orientation) -> u6
 /// The chain has been tuned to that ceiling deliberately (the A7 batch), so
 /// "12 + 6 + 6" is one path to 24 rather than the whole account.
 ///
+/// v1.18.0 (J149) put one byte on top of it. The band of a zone-owned colour
+/// field's partition is read before the mask pass, on the frame the masks
+/// find, and taken after it (`render`'s `field_sky_band`), so its list — 8 B
+/// an entry, over an eighth of the frame at most — rides through a mask's
+/// spatial passes and the field's own guide, each 24 without it.
+///
 /// A further full-frame stage raises this constant only if it is alive AT THE
 /// SAME TIME as the planes: SEQUENTIAL spatial passes (clarity, texture, the
 /// three Detail passes) each drop their planes before the next allocates
@@ -363,7 +369,7 @@ fn decode_peak_bytes(need: u64, orientation: image::metadata::Orientation) -> u6
 /// `develop_peak_accounts_for_every_pass` — not a pixel count. That
 /// enumeration is what a new stage must update; the 61 MP number never enters
 /// the arithmetic.
-const PIPELINE_BYTES_PER_PIXEL: u64 = 24;
+const PIPELINE_BYTES_PER_PIXEL: u64 = 25;
 
 /// [`decode_peak_bytes`] plus the develop chain's own full-frame buffers —
 /// what the baked develop entry point really allocates for a source of
@@ -3470,7 +3476,13 @@ mod tests {
     /// every source plane to `box_mean_owned`, and colour NR works at 1/s² of
     /// the frame with s ≥ 2; `rgb16_source` BORROWS an already-Rgb16 frame, and
     /// `rotate_straighten` writes an INSCRIBED (never larger) output, so a
-    /// resampler costs exactly one fresh frame.
+    /// resampler costs exactly one fresh frame. A mask band's lists (v1.18.0)
+    /// are entries of 32 B (`render::tests` pins the size) and the colour
+    /// field's of 8, each over at most one pixel in eight of a frame past
+    /// 2^23 pixels (`render::mask_owed`'s `BAND_LIST_SHARE` and
+    /// `BAND_LIST_FLOOR`); the field's guide holds its luma, its horizontal
+    /// pass and its output together, and the partition's plane is allocated
+    /// after the first two are dropped (`render::develop`).
     ///
     /// The one 61 MP peak measured on real hardware in R24
     /// (`render::tests::portrait_rotation_peak_on_a_61mp_frame`, 1384 MB) is
@@ -3480,9 +3492,13 @@ mod tests {
     #[test]
     fn develop_peak_accounts_for_every_pass() {
         use image::metadata::Orientation;
-        let stages: [(&str, u64); 9] = [
+        let stages: [(&str, u64); 13] = [
             ("transcode: to_rgb16 staging 6 + the f32 planes 12", 6 + 12),
+            ("mask band: planes 12 + a mask's owed weights, two lists of 32 B over an eighth of the frame at most 8 + the colour field's band 1", 12 + 8 + 1),
             ("spatial pass: planes 12 + luma 4 + blur_plane's two chained planes 8", 12 + 4 + 8),
+            ("a mask's spatial pass: the same 24 + the colour field's band, a list of 8 B over an eighth of the frame at most 1", 12 + 4 + 8 + 1),
+            ("colour field's guide: planes 12 + luma, its horizontal pass and the output 12 + the field's band 1", 12 + 12 + 1),
+            ("colour field's partition: planes 12 + the guide 4 + the partition's plane 4 + the field's band 1", 12 + 4 + 4 + 1),
             ("sharpening: planes 12 + luma 4 + the Gaussian's intermediate 4 + blur 4", 12 + 4 + 4 + 4),
             ("luminance NR: planes 12 + three of luma / box pass / coefficient planes 12", 12 + 12),
             ("colour NR: planes 12 + eight planes at 1/s², s ≥ 2 — two full planes 8", 12 + 8),
@@ -3660,7 +3676,7 @@ mod tests {
             .save(&png)
             .expect("write fixture");
         let mb = cheap_develop_peak_mb(&png).expect("a readable PNG answers");
-        // 400x300 RGB8: decode 360,000 B + 120,000 px x 24 B = 3,240,000 B.
+        // 400x300 RGB8: decode 360,000 B + 120,000 px x 25 B = 3,360,000 B.
         let want = develop_peak_bytes(
             400 * 300 * 3,
             image::metadata::Orientation::NoTransforms,

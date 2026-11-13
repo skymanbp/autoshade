@@ -529,6 +529,19 @@ the component Invert control complements its shape before composition.
 AI mask rasters are cached with backend provenance, so a better backend forces
 an honest re-derivation instead of presenting an older alpha as its result.
 
+**Mask edges along a silhouette (v1.18.0).** A subject, sky or brush mask has
+a soft edge a few pixels wide. Where that edge lies on an edge in the picture
+— a ridge against the sky — each pixel under it takes the mask's adjustment
+by how much of its light comes from the masked side, read from the picture
+itself: under the edge of a foreground mask a pixel as bright as the sky is
+left alone and one as dark as the foreground is adjusted in full. Lifting a
+dark foreground, or darkening a bright sky, therefore leaves no bright line
+along the ridge. Nothing else changes: a feather wider than about six pixels
+of the mask's own resolution, a linear or radial gradient, and an edge over
+even content — or content too noisy to tell its two sides apart — are
+weighed by coverage, and so are a mask's Clarity, Texture, Sharpness and
+Noise at every pixel. The red overlay shows coverage.
+
 A selected mask's sliders come in Lightroom's groups — **Tone**, **Detail**,
 **Color**, then the mask's own **Curve**; **Hue shift** turns colours by
 ±30° at ±100, and Moiré and Defringe are not rendered.
@@ -1159,6 +1172,10 @@ Lightroom's computed subject/sky/object alpha or arbitrary bitmap alpha, so
 AutoShade preserves the selection intent and clearly re-derives the mask with
 its own local model; generated image variants remain generated pixels until
 reverse-fit produces an editable recipe.
+
+Lightroom draws a mask's edge by its own rules: along a strongly adjusted
+silhouette its rendering of a sidecar and AutoShade's can differ over the few
+pixels of the mask's soft edge (see *Add local masks*).
 
 **The sidecar carries the whole develop (v1.3.1).** Everything above is
 what the Camera Raw settings can say. A sidecar AutoShade writes also carries

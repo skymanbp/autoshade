@@ -1032,7 +1032,18 @@ fn calibration_local_support_is_not_constant() {
 /// again the INPUT — the global recipe the joint solve lands on is a
 /// different render, and the field's ceiling is a function of that render.
 /// The value before the joint solve was 0.127_520_6 (2026-11-04).
-const NUMPY_FIELD_CEILING_CALIBRATION: f32 = 0.041_175_7;
+///
+/// RE-PINNED 2026-11-13 (gates/repin-compare): the same run reported `numpy
+/// ceiling (production objective) = 0.037369` against the Rust port's
+/// 0.037369, on a global figure of 0.080493, with
+/// `max |grid_rust - grid_numpy| = 5.7e-7` and `weight_max_abs_delta = 0.0`.
+/// The solvers agree as before; what moved is the INPUT once more — the
+/// global fit's render, through the changes to the fit between 058512b and
+/// 4a9050b (J139-J148). The test read 0.037_368_5 at 4a9050b already, with
+/// the pin still at 0.041_175_7: it stood red there unseen, because the
+/// calibration corpus is not on the build workflow's machines. The mask
+/// band's law (J149) leaves it where it was, to the last digit printed.
+const NUMPY_FIELD_CEILING_CALIBRATION: f32 = 0.037_368_5;
 /// The largest per-parameter disagreement between the two solvers over all
 /// 3072 vertices: measured 1.0e-5 in the 2026-11-04 J* run, 1.5e-6 in the 2026-11-03 preconditioned run, 6.6e-6 in the 2026-11-03 run before it, 1.0e-5 in the 2026-10-29 run, 6.0e-7 in the 2026-10-21 run (1.50e-5 at the 8-row
 /// grid in 2026-08), bounded here at a legible 1e-4.

@@ -110,6 +110,34 @@ fn develop_preview_inner(
     corrected: bool,
     colour_nr_in_pixels: bool,
 ) -> DynamicImage {
+    with_preview_frame(preview, recipe, diag, frame, film_short_edge, corrected, |data, (w, h), recipe, frame, film| {
+        apply_develop(data, w, h, recipe, diag, frame, film, raw_source, colour_nr_in_pixels);
+        let mut buf = vec![0u8; w * h * 3];
+        buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {
+            o[0] = to_u8(px[0]);
+            o[1] = to_u8(px[1]);
+            o[2] = to_u8(px[2]);
+        });
+        DynamicImage::ImageRgb8(RgbImage::from_raw(w as u32, h as u32, buf).expect("preview buffer size matches"))
+    })
+}
+
+/// The preview develop's own start, and `then` over what it leaves: the
+/// preview's pixels white-balanced, their size, the recipe as the develop
+/// reads it (clamped, its automatic lateral CA solved), the frame its masks
+/// are read in and its film scale. One start for the develop itself
+/// ([`develop_preview_inner`]) and for a reader of a frame inside it
+/// ([`preview_before_masks`]), so the two cannot come to disagree about any
+/// of the five.
+fn with_preview_frame<T>(
+    preview: &DynamicImage,
+    recipe: &EditRecipe,
+    diag: &crate::diag::Diag<'_>,
+    frame: Option<MaskFrame<'_>>,
+    film_short_edge: Option<u32>,
+    corrected: bool,
+    then: impl FnOnce(&mut [[f32; 3]], (usize, usize), &EditRecipe, MaskFrame<'_>, FilmScale) -> T,
+) -> T {
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
     // ValidatedRecipe token (arch item c) replaces four hand-rolled
     // clone+clamp+eprintln triplets that had already drifted apart.
@@ -148,14 +176,37 @@ fn develop_preview_inner(
     // (`SourceFrame::corrected`, decided by the caller).
     let frame = frame.unwrap_or_else(|| MaskFrame::of_base(&geom, recipe.lens_distortion, corrected));
     let film = FilmScale::of(film_short_edge, w as usize, h as usize);
-    apply_develop(&mut data, w as usize, h as usize, recipe, diag, frame, film, raw_source, colour_nr_in_pixels);
-    let mut buf = vec![0u8; (w * h * 3) as usize];
-    buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {
-        o[0] = to_u8(px[0]);
-        o[1] = to_u8(px[1]);
-        o[2] = to_u8(px[2]);
-    });
-    DynamicImage::ImageRgb8(RgbImage::from_raw(w, h, buf).expect("preview buffer size matches"))
+    then(&mut data, (w as usize, h as usize), recipe, frame, film)
+}
+
+/// The frame [`develop_preview`] hands its masks: `preview` through that
+/// develop's own start and its steps before them ([`develop_before_masks`]),
+/// handed to `then` with its size, the recipe as that develop reads it and the
+/// frame its masks are read in. For a reader of what the masks FIND — the
+/// colour field's partition, whose band is read there
+/// (`masks::preview_field_sky_coverage`). Nothing is disclosed: the develop
+/// this stands in for says what there is to say.
+pub(super) fn preview_before_masks<T>(
+    preview: &DynamicImage,
+    recipe: &EditRecipe,
+    then: impl FnOnce(&[[f32; 3]], (usize, usize), &EditRecipe, MaskFrame<'_>) -> T,
+) -> T {
+    with_preview_frame(preview, recipe, &crate::diag::dropped(), None, None, false, |data, (w, h), recipe, frame, film| {
+        let corrected = corrected_map(frame, w, h);
+        develop_before_masks(data, w, h, recipe, corrected.as_ref(), film, false, false);
+        then(data, (w, h), recipe, frame)
+    })
+}
+
+/// The map into a frame the camera stage already corrected
+/// (`MaskFrame::Corrected`, v1.17.0), for the passes that read a stored
+/// POSITION; `None` in every other frame, where the geometry stage that
+/// follows the develop carries them.
+fn corrected_map(frame: MaskFrame<'_>, w: usize, h: usize) -> Option<MaskUnwarp> {
+    match frame {
+        MaskFrame::Corrected { .. } => frame.unwarp((w as f32, h as f32)),
+        _ => None,
+    }
 }
 
 /// The full per-pixel + spatial develop pipeline (everything except WB, crop,
@@ -305,6 +356,25 @@ pub(super) fn apply_develop_with_rasters(
     raw_source: bool,
     colour_nr_in_pixels: bool,
 ) {
+    let corrected = corrected_map(frame, w, h);
+    let corrected = corrected.as_ref();
+    develop_before_masks(data, w, h, r, corrected, film, raw_source, colour_nr_in_pixels);
+    develop_from_masks(data, w, h, r, rasters, frame, film, corrected);
+}
+
+/// The develop up to its masks — steps 0- to 4 — in place: the frame the
+/// masks find. `corrected` is [`corrected_map`]'s answer for the frame.
+#[allow(clippy::too_many_arguments)] // `apply_develop_with_rasters`'s frame less the masks' own two
+fn develop_before_masks(
+    data: &mut [[f32; 3]],
+    w: usize,
+    h: usize,
+    r: &EditRecipe,
+    corrected: Option<&MaskUnwarp>,
+    film: FilmScale,
+    raw_source: bool,
+    colour_nr_in_pixels: bool,
+) {
     // 0-) spot removal (v1.5.0 F9) — Lightroom's `crs:RetouchAreas`, which
     //    this engine re-solves from the frame's own pixels. FIRST, for two
     //    reasons that both say "before", and one measurement that says "here".
@@ -332,11 +402,6 @@ pub(super) fn apply_develop_with_rasters(
     //    the stored areas are mapped into it instead ([`retouch_spots_in`]) —
     //    and so are the other passes below that read a stored POSITION: the
     //    colour field's grid, the pixel layers and the lens blur's rasters.
-    let corrected = match frame {
-        MaskFrame::Corrected { .. } => frame.unwarp((w as f32, h as f32)),
-        _ => None,
-    };
-    let corrected = corrected.as_ref();
     if !r.retouch.is_empty() {
         crate::retouch::heal_planar(data, w, h, &retouch_spots_in(r, w, h, corrected));
     }
@@ -479,6 +544,29 @@ pub(super) fn apply_develop_with_rasters(
     if let Some(p) = detail::SharpenParams::global(r, raw_source) {
         detail::sharpen(data, w, h, &p, film, |_, _, _| 1.0);
     }
+}
+
+/// The develop from its masks on — steps 6 to 10 — in place, on the frame
+/// [`develop_before_masks`] left.
+#[allow(clippy::too_many_arguments)] // `apply_develop_with_rasters`'s frame less the source's own two
+fn develop_from_masks(
+    data: &mut [[f32; 3]],
+    w: usize,
+    h: usize,
+    r: &EditRecipe,
+    rasters: &MaskRasterSnapshot,
+    frame: MaskFrame<'_>,
+    film: FilmScale,
+    corrected: Option<&MaskUnwarp>,
+) {
+    // 6-) the band of the colour field's own partition (J149, v1.18.0), read
+    //    HERE: where the sky zone's raster steps across a content edge the
+    //    partition takes each pixel at its content's coverage, and the two
+    //    contents are told apart on the frame as the masks find it — the masks
+    //    below may leave them at one level (`masks::field_sky_band`). A sparse
+    //    list, so it rides beside the frame through the mask pass.
+    let owned = r.colour_field.as_ref().is_some_and(|f| f.renderable() && !f.owners.is_empty());
+    let field_band = if owned { masks::field_sky_band(r, rasters, frame, w, h, data) } else { Vec::new() };
     // 6) local masked adjustments (linear/radial gradients).
     if !r.masks.is_empty() {
         apply_masks(data, w, h, r, rasters, frame, film);
@@ -495,12 +583,13 @@ pub(super) fn apply_develop_with_rasters(
     //    (deleted, or its raster lost) read plain: with no partition there is no
     //    "own zone" to read on, and the plain read is the field as it was before
     //    the owners existed.
-    let sky = r
-        .colour_field
-        .as_ref()
-        .filter(|f| f.renderable() && !f.owners.is_empty())
-        .and_then(|_| masks::field_sky_coverage(r, rasters, frame, w, h));
-    apply_colour_field_in(data, w, h, r.colour_field.as_ref(), corrected, sky.as_deref());
+    //    The partition's plane is asked for INSIDE, once the guide is built:
+    //    the guide's three planes are this step's peak and two of them are gone
+    //    by then (the colour-field row of `decode::PIPELINE_BYTES_PER_PIXEL`).
+    apply_colour_field_in(data, w, h, r.colour_field.as_ref(), corrected, || {
+        owned.then(|| masks::field_sky_coverage(r, rasters, frame, w, h, &field_band)).flatten()
+    });
+    drop(field_band);
     // 8) the SDR rendition (v1.5.0 F8), the last EDIT because that is what it is: not
     //    another edit but the mapping of the finished edit into the range this
     //    engine can publish. Lightroom derives it from the completed HDR
@@ -596,7 +685,7 @@ pub(crate) fn apply_colour_field(
     frame: &FieldFrame,
     sky: Option<&[f32]>,
 ) {
-    apply_colour_field_in(data, w, h, field, frame.corrected(), sky);
+    apply_colour_field_in(data, w, h, field, frame.corrected(), || sky);
 }
 
 /// The frame a colour field is read in: where each pixel of the frame finds
@@ -727,21 +816,25 @@ pub(crate) fn field_owned_weights(weights: &mut [f32; 8], owners: &[u8; 8], sky_
 /// v1.17.0): the grid is solved on the original frame, so each corrected pixel
 /// reads it at the original-frame point it shows, on the same axis law
 /// (pixel `i` of `n` at grid coordinate `i·(limit − 1)/(n − 1)`). `None` reads
-/// it at the pixel's own place, bit-identically to before.
-fn apply_colour_field_in(
+/// it at the pixel's own place, bit-identically to before. `sky` hands over
+/// the partition ([`apply_colour_field`]'s `sky`) when it is ASKED — after the
+/// guide, whose three planes are this read's peak — so a partition that is a
+/// plane of its own is not held beside them; a field with no owners never asks.
+fn apply_colour_field_in<S: std::ops::Deref<Target = [f32]>>(
     data: &mut [[f32; 3]],
     w: usize,
     h: usize,
     field: Option<&crate::recipe::ColourField>,
     corrected: Option<&MaskUnwarp>,
-    sky: Option<&[f32]>,
+    sky: impl FnOnce() -> Option<S>,
 ) {
     let Some(field) = field.filter(|f| f.renderable()) else { return };
     if w == 0 || h == 0 || data.len() != w * h {
         return;
     }
-    let sky = sky.filter(|s| s.len() == data.len() && !field.owners.is_empty());
     let guide = field_guide_luma(data, w, h);
+    let sky = if field.owners.is_empty() { None } else { sky() };
+    let sky = sky.as_deref().filter(|s| s.len() == data.len());
     let axes = FieldAxes::new(w, h, field.x, field.y, corrected);
     let amount = field.amount.clamp(0.0, 1.0);
     for (i, c) in data.iter_mut().enumerate() {

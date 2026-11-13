@@ -456,11 +456,9 @@ pub(super) fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image
 /// [`crate::recipe::MaskCombine`]). Inversion / amount / range are the
 /// caller's layers, exactly as with the single-geometry `mask_weight`.
 ///
-/// `unwarp` is the frame adaptation ([`MaskFrame`]) — applied PER COMPONENT,
-/// through [`mask_weight_in`], because a correction can hold a post-correction
-/// radial and a pre-correction brush side by side and each must be asked about
-/// in its own frame. Folding the map in at this level instead would have moved
-/// the brush too.
+/// The fold itself is [`Layers::fold`] (`mask_owed.rs`), taken here with each
+/// layer's weight as it is: one composition for the coverage every caller
+/// asks for and for the light shares a band pixel is owed (J149).
 pub(super) fn combined_mask_weight(
     m: &crate::recipe::LocalAdjustment,
     nx: f32,
@@ -470,32 +468,7 @@ pub(super) fn combined_mask_weight(
     unwarp: Option<&MaskUnwarp>,
     dims: (f32, f32),
 ) -> f32 {
-    // A corrected frame's pixel asks about the original-frame point it shows
-    // (`MaskFrame::Corrected`); every geometry, raster and brush included, is
-    // stored in that frame.
-    let (nx, ny) = unwarp.map_or((nx, ny), |u| u.source_point(nx, ny));
-    let mut w = mask_weight_in(&m.mask, nx, ny, base, unwarp, dims);
-    for (c, bmp) in m.components.iter().zip(comp_bmps) {
-        // A raster-backed component with NO raster carries no coverage, and
-        // its inversion must not turn that into the whole frame (an inverted
-        // Add would cover everything at full strength, an inverted Subtract
-        // would wipe the base). The develop already skips the whole
-        // adjustment for a dead raster (the inert contract, recipe.rs
-        // `MaskGeometry::Bitmap`); this is the same rule for every caller
-        // that reaches the combination directly, and until 2026-09-24 the
-        // component's own `inverted` was applied to the missing raster.
-        if bmp.is_none() && is_raster_backed(&c.geometry) {
-            continue;
-        }
-        let cw = mask_weight_in(&c.geometry, nx, ny, *bmp, unwarp, dims);
-        let cw = if c.inverted { 1.0 - cw } else { cw };
-        w = match c.mode {
-            crate::recipe::MaskCombine::Add => 1.0 - (1.0 - w) * (1.0 - cw),
-            crate::recipe::MaskCombine::Subtract => w * (1.0 - cw),
-            crate::recipe::MaskCombine::Intersect => w * cw,
-        };
-    }
-    w
+    Layers { m, base, comps: comp_bmps, unwarp, dims }.fold(nx, ny, |_, w| [w])[0]
 }
 
 /// Coverage map of ONE local adjustment for on-screen display: geometry ×

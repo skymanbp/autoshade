@@ -23,3 +23,5 @@ include!("tests/canvas_start.rs");
 include!("tests/as_shot.rs");
 include!("tests/baked_masters.rs");
 include!("tests/mask_raster_frame.rs");
+include!("tests/mask_band.rs");
+include!("tests/mask_band_frame.rs");

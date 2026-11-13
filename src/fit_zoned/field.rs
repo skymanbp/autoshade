@@ -589,7 +589,8 @@ pub(super) fn attach_colour_field(
 /// the same place on both sides is the same scene in the same place
 /// whatever its texture did, which is all a cell statistic needs
 /// (`fit_cells`'s own doctrine, applied to the one stage that is spatial).
-/// The cells the fine reading could not read AT ALL are then read on the
+/// The cells the fine reading could not read AT ALL — and, since J148
+/// (below), those it weighs only a minority of — are then read on the
 /// pairing (`PairedCells::with_layout`, the same target means) and take
 /// pass B's vertices on the same verdict a fine-read cell takes them on —
 /// converged and aligned against the target's own cell mean — and on no
@@ -605,9 +606,10 @@ pub(super) fn attach_colour_field(
 /// inside a pairing is the statistic the zone stage already ships at
 /// region scale, clouds and all, under the same convergence reading, and
 /// the field's two do-no-harm checks judge the result as they judge every
-/// field. Cells the fine reading reads keep their own admission, on the
-/// pass B that now carries the pairing's weight; no pairing, no change —
-/// the field is R34's byte for byte.
+/// field. Cells the fine reading speaks for keep their own admission, on
+/// the pass B that now carries the pairing's weight; with no pairing the
+/// field is R34's, except that a cell the fine reading weighs only a
+/// minority of is unread since J148 and keeps pass A.
 ///
 /// J147 (v1.18.0). A READ cell that refuses the whole of pass B is asked
 /// again along the axes the field moves. The field changes brightness and
@@ -638,6 +640,30 @@ pub(super) fn attach_colour_field(
 /// name no value; a cell no candidate takes closer keeps pass A, as before,
 /// and the two do-no-harm checks judge the merged field as they judge every
 /// field.
+///
+/// J148 (v1.18.0). WHICH reading speaks for a cell. A cell's verdict moves
+/// every vertex the cell owns, and the fine reading spoke wherever it
+/// weighed any pixel of the cell. In a re-synthesised sky it weighs
+/// scattered blocks, so a sliver answered for the cell around it. The
+/// reference pair at 0.65, round V12 (the admission's planes dumped by a
+/// probe build): the top-right sky cell was read on 17.2 % of its pixels,
+/// which saw pass B move away (11.2 -> 15.2 codes from the target mean)
+/// where the whole cell reads 23.2 -> 3.9; the top-left one on 3.9 %
+/// (7.8 -> 11.8 against 25.5 -> 3.7); and the cell J147's record above was
+/// measured on, on 12.5 % — that sliver's target mean (111.8/92.0/88.7)
+/// asks darker where the cell's (129.4/102.4/93.9) asks brighter. So J147
+/// answered a reading of an eighth of that cell: given pass B's colour
+/// alone, the top-right cell showed as a lighter block. A reading now
+/// speaks for a cell only where it weighs at least
+/// `fit_cells::CELL_MAJORITY` of the cell's present pixels
+/// ([`speaking_reading`]): the fine one first, the pairing's where the fine
+/// one cannot read the cell or weighs a minority of it, none otherwise —
+/// the cell is unread and keeps pass A. It is the line `fit::validity`
+/// holds a cell's paired ask to. Round V13 on the same pair: fourteen cells
+/// change reader, the three sky cells take pass B whole on the pairing, the
+/// lighter block is gone, and the nine cells that still refuse are land
+/// cells whose means sit within two codes of their targets. J147's ladder
+/// stays for those: a cell that refuses on a majority reading.
 #[allow(clippy::too_many_arguments)]
 fn admit_cells(
     current: &[[f32; 3]], target: &[[f32; 3]], width: u32, height: u32,

@@ -2179,6 +2179,8 @@ writes, clarity and texture, the blurs), `masks.rs` (the mask pass and the
 frame a mask is sampled in), `mask_weight.rs` / `mask_falloff.rs` /
 `mask_raster.rs` / `mask_warp.rs` / `brush.rs` (coverage and range masks, the
 measured falloffs, rasters, Lightroom's stored mask frame, the brush),
+`mask_owed.rs` / `mask_band.rs` (what a raster mask's band on a content edge
+is owed and the layer fold; the read that finds it, v1.18.0),
 `geometry.rs` (lens geometry), `orient.rs` (orientation and coordinate frames),
 `resample.rs` (flips, downscale, straightening, the bilinear fetches),
 `base_look.rs` (the camera-matched base look), `export.rs` (delivery colour
@@ -3137,6 +3139,72 @@ the same function the global stage calls, negative branch included. Two delibera
 saturation before local clarity/texture — splitting the fused WB/tone/saturation
 blend to fix either would change the output of every existing partial-weight
 mask.
+
+**A raster mask's band on a content edge (v1.18.0, J149;
+`render/mask_owed.rs`, `render/mask_band.rs`).** A mask pass blends a pixel
+toward its adjusted self by the mask's coverage, and across a raster's step
+the coverage is the AREA of the pixel the raster covers. Along a silhouette
+that step is wider than the content's own edge, so pure pixels of either side
+wear a fractional weight: a sky pixel under 30 % of a land layer takes 30 % of
+the land's lift and lands brighter than both sides — a white rim, which the
+owner saw on the night pair (2026-11-12), where the fit lifts the land 2.5 EV.
+On that pair, both starts rendered at 4096 px and read with no threshold on
+the raster (the render's luma across every crossing of the raster's half
+weight, averaged in groups of 32 crossings; the profile's peak within 7 px
+against the two sides 9 to 14 px out), a rim of more than six codes stood on
+72.3 % and 70.6 % of the silhouette under the area weight, stands on 13.4 %
+and 28.5 % under the law below, and on 11.9 % and 13.6 % of the same frames
+with no mask at all (stars, and lamps on the horizon). The weakness is as old
+as the mask pass: v1.17.1's program draws this recipe with the rim on 70.3 %
+of the master start's silhouette. Its own fit lifted the land 0.9 EV there,
+and its own render reads 13.4 %.
+
+The two per-pixel passes (dehaze, and the fused tone and colour pass with its
+Color tint) now weigh such a pixel by the law the reverse fit's boundary ruler
+already held the render to (R21 (2), `ContentShare`): each content's light
+through its own treatment. For each RASTER layer of the mask — a bitmap, a
+recomputed AI alpha, a brush's stamped dabs; read before the layers are
+composed, because a zone the fit split in bands is its raster intersected
+with a ramp — the frame is read in blocks of the raster's own pixels. A
+raster has sides, where it is flat, and a band, where it steps between them.
+A band block walks the raster's 3 x 3 mean up and down its steepest slope to
+the two plateaus it lies between; each is a side, with its own coverage —
+whatever that is: the fit's sky raster stands below 0.95 on the sky's side
+along 83.2 % and 89.0 % of this silhouette — and its own level in linear
+light. A band pixel's light places it between the two levels, a pixel within
+two of a side's own spreads of that side's level being that side, and it is
+owed each side's coverage for the share of it that is that side's content
+(`render::BandShares`). The frame says where the edge is; the raster only
+says it is near. The pixel is then rendered as each of its two contents is,
+and the two renderings are mixed in linear light, each channel in the share
+of the pixel's light that is that content's. Where a third level stands
+beside the block, the pixel is read along the chain of the three. Where the
+frame's noise leaves a mixture no room between the two levels (twice the two
+sides' grain against half the step), a pixel's own light cannot say what it
+is and the median of its window does, up to three pixels each way; a side's
+grain is bounded by the other's under the photon law, so a lamp's glare
+beside a clean sky is not taken for noise. The answer is trusted on a product
+of ramps — the block's own steepness, both sides in sight, the band crossed
+within the walk's reach (a wider feather is its author's), the two levels a
+code apart and clear of their own spread or far apart in light — and every
+other pixel keeps its coverage to the bit: off the band, inside a drawn
+feather, over content of one level. So does every pixel in the spatial passes
+(clarity, texture, sharpness, noise), which weigh a neighbourhood's detail.
+
+The colour field's sky / land partition reads its zone raster by the same
+law, on the frame as the masks find it, in the develop and in the fit that
+solves the field: read by the raster's coverage, the land's correction ramped
+into the sky's last rows above every silhouette.
+
+The owed weights are a sparse list of 32-byte entries, capped at an eighth of
+the frame (never under 2^20 entries, so a thumbnail's band is read whole) and
+dropped before the spatial passes allocate; the blocks are read in strips of
+a fixed 64 MiB. The field's band, 8 bytes an entry, is read before the mask
+pass and taken after it, and is the one byte a pixel the baked develop's peak
+grew by (`decode::PIPELINE_BYTES_PER_PIXEL`, 24 to 25). Modelled in numpy
+before it was written. The fit renders every candidate through this pass, so
+the law is its forward model as well; the ruler is unchanged. Lightroom
+renders an exported mask by its own law.
 
 **The mask Color tint** (v1.17.0; `toning_amount` / `toning_hue`, Lightroom's
 mask 「颜色」 swatch, `crs:LocalToningSaturation` / `LocalToningHue`) is the last
@@ -6648,6 +6716,20 @@ charge's 90th percentile 0.0114 against the 0.012 ceiling), pinned without a
 global solve by `the_zones_alone_on_the_base_carry_a_mask_colour_tint_whole`
 and, on a law no multiplier describes, by
 `the_soft_rim_reads_a_law_that_is_no_multiplier_through_its_own_full_treatment`.
+
+**The render delivers the share the ruler owes (v1.18.0, J149).** Until
+v1.18.0 the mask pass blended a band pixel by the mask's area weight and this
+ruler was the only place the light form lived. Where a dim side was lifted
+far more than a bright one it read the rim that drew — on the night pair
+0.092 luma against the 0.012 ceiling — and the R37 allowance credited it to
+the target's own boundary (which asked 0.324), whose re-synthesised band
+carries a large step of its own in the same direction. The mask pass now
+delivers that share itself (the mask pass, above), reading a raster's two
+sides where the raster is flat and not by this ruler's two thresholds;
+`boundary.rs` takes the reach and the light fraction from `render` and pins
+its one-code floor to the renderer's at compile time. The ruler itself is
+unchanged: it still says what a band pixel is owed and measures what was
+rendered against it.
 
 **Both rulers also read COLOUR, charged identically.** The same difference in
 differences is taken per channel — for the step ruler on R, G and B directly,

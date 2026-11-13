@@ -176,6 +176,31 @@ and reference-pair gate before it shipped.
   the solve took back, and a refusal prints the cells and the readings the
   decision was made on.
 
+## Masks
+
+- **A mask's soft edge no longer draws a line along a silhouette.** A mask
+  made from a picture of the scene — a sky or subject selection, a painted
+  brush, a zone the reverse fit made — has a soft edge a few pixels wide.
+  Along a ridge against the sky the pixels under that edge are part sky and
+  part land, or wholly one of them under a ramp wider than the real edge.
+  Until now each took the mask's adjustment by how much of the pixel the mask
+  covered, so a strong lift of a dark foreground also lifted the bright sky
+  pixels at its edge and they came out brighter than both sides: a thin
+  white line along the ridge. Darkening a bright sky left a bright line the
+  same way. Each of those pixels now takes the adjustment by how much of its
+  light comes from the masked side, which the picture itself shows: a pixel
+  as bright as the sky beside it is sky, and takes none of the foreground's
+  lift. This holds for Exposure and the other tone sliders, the curves, the
+  colour controls, the Color tint and Dehaze inside a mask. Everything else
+  renders exactly as before: pixels away from such an edge, feathers wider
+  than a few pixels, linear and radial gradients, an edge over even content
+  or content too noisy to tell its two sides apart, and a mask's Clarity,
+  Texture, Sharpness and Noise.
+- **The reverse fit's zones follow the same rule.** The fit already asked
+  this of every sky and land correction when it checked a zone's edge; its
+  renders now do it, so a zone that lifts a dark ground far more than its sky
+  no longer ships with a bright outline.
+
 ## Colour noise reduction
 
 - **Colour noise is taken out of the RAW in the camera's own linear light**,
@@ -269,6 +294,11 @@ and reference-pair gate before it shipped.
 - **Recipes differ from v1.17.1's** on most pairs: the fit judges and admits
   every control by a different measure, so a fit ships fewer controls (those
   that earned nothing are at zero) and different strengths.
+- **A photo with a raster mask renders differently along that mask's edge**
+  where the edge lies on an edge in the picture (Masks, above): an older
+  recipe with a strong local adjustment across a silhouette loses its edge
+  line, and nothing else in the frame changes. Lightroom draws an exported
+  mask by its own rules; its rendering of a sidecar is what it was.
 - **The report carries new lines**: the controls set back to zero, the class
   that was re-estimated or scaled and by how much, the readings a zone
   shipped on, and the full-size re-reading of the finished recipe beside the
@@ -282,8 +312,9 @@ and reference-pair gate before it shipped.
 
 ## Compatibility
 
-Recipes and sidecars written by earlier versions open and render as they
-did. One new recipe field: a colour field fitted over a sky and a land zone
+Recipes and sidecars written by earlier versions open as they did, and
+render as they did except along the soft edge of a raster mask that lies on
+an edge in the picture (Masks, above). One new recipe field: a colour field fitted over a sky and a land zone
 records which of the two each of its points belongs to. v1.17.1 and earlier
 refuse a recipe that carries it, by the field's name; a recipe without it is
 unchanged. A sidecar AutoShade writes now always states

@@ -481,7 +481,8 @@ fn zoned_pass(
 /// found; the multi-region route pairs every class it resolved; the range
 /// fallback has none. The colour field reads it
 /// (`field::attach_colour_field`) for the cells the pixel-scale evidence
-/// cannot read at all.
+/// cannot read at all, and since J148 for those it weighs only a minority
+/// of.
 ///
 /// `split` (J141, v1.18.0) is how far the two partitions DISAGREE about the
 /// pixel: half the summed difference of its memberships on the two sides,

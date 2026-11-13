@@ -2,8 +2,14 @@
 
 use super::*;
 
+// The ruler's band: a zone's weight at or under LOW is settled land, at or
+// over HIGH settled sky. What the ruler owes a pixel between them the
+// renderer now delivers (J149, `render`'s `BandShares`) — reading a raster's
+// two sides where the raster is flat, whatever coverage they stand at.
 pub(super) const ZONE_BOUNDARY_LOW: f32 = 0.05;
 pub(super) const ZONE_BOUNDARY_HIGH: f32 = 0.95;
+// One floor for the ruler's trust in a mixture and the renderer's.
+const _: () = assert!(BOUNDARY_STEP_FLOOR == render::MASK_BAND_STEP_FLOOR);
 const ZONE_BOUNDARY_MID: f32 = 0.5;
 pub(super) const ZONE_BOUNDARY_PERCENTILE: f32 = 0.90;
 const ZONE_BOUNDARY_INTERIOR_MIN: usize = 4;
@@ -608,8 +614,9 @@ struct SideMultipliers {
 /// How far, in analysis pixels, [`ContentShare`] reaches for the settled sky
 /// and settled land a band pixel's content is read between. Past the widest
 /// soft band the night pair's keyed horizon leaves (2-3 px) and inside one
-/// evidence cell (32 px), so the two levels are this boundary's own.
-const CONTENT_REACH: usize = 6;
+/// evidence cell (32 px), so the two levels are this boundary's own. The mask
+/// pass reaches as far for the same two levels (J149).
+const CONTENT_REACH: usize = render::MASK_BAND_REACH;
 
 /// How much of each band pixel is SKY CONTENT, and how surely that can be
 /// told, read once per frame off the reference (the frame rendered WITHOUT the
@@ -642,6 +649,18 @@ const CONTENT_REACH: usize = 6;
 /// have one level: on a night horizon (ref red 39, sky 47, land 11 codes,
 /// a = 0.64, a land gain of x14.5) it owed 97 codes where the light form owes
 /// 53, and the rendered pixel read 47.
+///
+/// J149 (v1.18.0): the mask pass now weighs a band pixel by this share itself
+/// (`render`'s `BandShares`: the same reach and [`light_share`]'s fraction,
+/// taken between the coverage of the raster's two sides — read where the
+/// raster is flat, not by this ruler's two thresholds — per mask on the frame
+/// as that mask finds it, and trusted by the sides' own spread besides).
+/// Until then the render blended by
+/// the AREA weight and this ruler was the only place the light form lived: on
+/// the night pair it read the rim that drew along the buttes (0.092 luma
+/// against a ceiling of 0.012) and R37 credited it to the target's own
+/// boundary. The ruler is unchanged — it still says what is owed and measures
+/// what was rendered against it.
 struct ContentShare {
     /// The luminance light share `b_Y`, trust-blended (`1 − c·(1 − b)`).
     share: Vec<f32>,
@@ -653,9 +672,7 @@ struct ContentShare {
 /// trusted by `c` (1 at a trusted mixture, 0 where the content cannot be told
 /// apart): R21 (2)'s light form ([`ContentShare`]).
 pub(super) fn light_share(area: f32, sky_level: f32, land_level: f32, trust: f32) -> f32 {
-    let (s, l) = (area * sky_level.max(0.0), (1.0 - area) * land_level.max(0.0));
-    let light = if s + l > f32::EPSILON { s / (s + l) } else { area };
-    1.0 - trust * (1.0 - light)
+    1.0 - trust * (1.0 - render::light_fraction(area, sky_level, land_level))
 }
 
 impl ContentShare {

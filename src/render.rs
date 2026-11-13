@@ -58,11 +58,13 @@ mod geometry;
 mod layers;
 mod lens_blur;
 mod luma;
+mod mask_band;
 mod mask_falloff;
 mod mask_raster;
 mod mask_warp;
 mod mask_weight;
 mod mask_gains;
+mod mask_owed;
 mod masks;
 mod orient;
 mod resample;
@@ -195,6 +197,10 @@ pub use mask_weight::{
 };
 pub(crate) use mask_weight::{MASK_SAMPLE_CENTRE};
 use mask_weight::{Bmp, combined_mask_weight};
+// The band of a raster mask (J149): the reverse fit's boundary ruler reads its
+// zones by the mask pass's own reach, step floor and light share.
+pub(crate) use mask_owed::{MASK_BAND_REACH, MASK_BAND_STEP_FLOOR, light_fraction};
+use mask_owed::{Layers, BandShares};
 #[cfg(test)]
 use mask_weight::{mask_weight, mask_weight_in};
 pub use masks::{MaskFrame, corrected_raster_to_sensor, engine_active, sensor_raster_to_corrected, sensor_rgba_to_corrected};
