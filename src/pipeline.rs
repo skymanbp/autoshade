@@ -2922,7 +2922,11 @@ pub const FIT_SOURCE_EDGE: u32 = 2048;
 /// identical pair (the export of the base against the fit's preview of it)
 /// read 0.00235 / 0.00285 on p39 / p40 against the `fit::FIT_QUANT` of the
 /// day, 0.0018 (1.9e-3 since v1.18.0 on the per-pixel ruler; 2.3e-3 under
-/// the pooled one, which the p39 gap cleared by 2 %).
+/// the pooled one, which the p39 gap cleared by 2 %). The plate also keeps
+/// the light the base's own white clamps cut (J151,
+/// `render::canvas::BaseEncoding`): the export never makes that cut — it
+/// clamps what the photo's own tone leaves — so a channel the base curve
+/// lifts past white is there for a candidate to pull down.
 ///
 /// In the FRAME that base develop is in: the sensor frame for a RAW. The fit
 /// draws its zone rasters in its source's frame and they say so

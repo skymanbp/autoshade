@@ -14,6 +14,20 @@ pub(super) fn scale_chroma(px: &mut [f32; 3], l_old: f32, l_new: f32) {
     }
 }
 
+/// [`scale_chroma`] with nothing cut at white: the same ratio on the same
+/// luma, floored at black only. For a caller that has to undo the scaling —
+/// a fit plate's base encoding (`canvas::BaseEncoding`), whose decode is the
+/// encode's inverse only on a value no clamp cut. Equal to [`scale_chroma`]
+/// bit for bit wherever that one's clamp cuts nothing.
+pub(super) fn scale_chroma_open(px: &mut [f32; 3], l_old: f32, l_new: f32) {
+    if l_old > 1e-4 {
+        let k = l_new / l_old;
+        *px = px.map(|v| (v * k).max(0.0));
+    } else {
+        *px = [l_new, l_new, l_new];
+    }
+}
+
 /// The four-tap bilinear read of a SCALAR plane at a fractional position, with
 /// the sample grid clamped at the border.
 ///

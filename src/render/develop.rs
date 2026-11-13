@@ -1007,6 +1007,21 @@ pub(super) fn vignette_gain_lut(r: &EditRecipe) -> Option<Vec<f32>> {
 /// channels) on every preview tick and export; three LUTs replace them. Rows
 /// are independent, so the pass is row-parallel.
 pub(super) fn apply_radial_gain(data: &mut [[f32; 3]], w: usize, h: usize, gain_lut: &[f32]) {
+    radial_gain(data, w, h, gain_lut, false);
+}
+
+/// [`apply_radial_gain`] with nothing cut at white: a channel the gain lifts
+/// past it keeps its value (the exact transfer outside 0..1, [`decode_wide`]
+/// and [`encode_wide`]), so the inverse gain undoes the pass. Equal to
+/// [`apply_radial_gain`] bit for bit wherever that one's clamp cuts nothing.
+/// For a fit plate's base encoding (`canvas::BaseEncoding`).
+pub(super) fn apply_radial_gain_open(data: &mut [[f32; 3]], w: usize, h: usize, gain_lut: &[f32]) {
+    radial_gain(data, w, h, gain_lut, true);
+}
+
+/// The one traversal of the two radial gains above. `open`: nothing is cut
+/// at white.
+fn radial_gain(data: &mut [[f32; 3]], w: usize, h: usize, gain_lut: &[f32], open: bool) {
     if w == 0 || h == 0 {
         return; // par_chunks_mut(0) asserts even on an empty slice (U14)
     }
@@ -1023,7 +1038,11 @@ pub(super) fn apply_radial_gain(data: &mut [[f32; 3]], w: usize, h: usize, gain_
                 continue;
             }
             for c in px.iter_mut() {
-                *c = sample_lut(enc, (sample_lut(dec, *c) * gain).clamp(0.0, 1.0));
+                *c = if open {
+                    encode_wide(enc, decode_wide(dec, *c) * gain)
+                } else {
+                    sample_lut(enc, (sample_lut(dec, *c) * gain).clamp(0.0, 1.0))
+                };
             }
         }
     });

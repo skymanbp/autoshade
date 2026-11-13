@@ -14,7 +14,8 @@
 use std::sync::{Arc, Mutex};
 
 use super::*;
-use super::develop::{apply_radial_gain, vignette_gain_lut};
+use super::develop::{apply_radial_gain, apply_radial_gain_open, vignette_gain_lut};
+use super::luma::scale_chroma_open;
 
 /// The part of a recipe the BASE develop renders: which camera profile, and
 /// which creative Look's colour table. Two recipes with equal parts develop
@@ -259,6 +260,36 @@ struct PlateEntry {
 /// encoding therefore runs between [`Self::encode`] and its pointwise
 /// inverse [`Self::decode`], so the pixels a candidate is rendered on are the
 /// pixels the export would have averaged.
+///
+/// THE WHITE CLAMP (v1.18.0, J151). The develop clamps every channel at
+/// white after each of the two stages, and what a clamp cut no inverse gives
+/// back. Until this version the plate was decoded from the clamped frame, so
+/// wherever the base's curve lifts a channel past white the plate held less
+/// of that channel than the pixels the export develops. The export never
+/// makes that cut — it runs the photo's white balance BEFORE these stages
+/// and clamps what its OWN tone leaves — so a candidate that pulls the
+/// channel down was rendered on less light than the export has. Round V14,
+/// the lantern street (p38, 0.85): the base's develop holds the blue of
+/// 5.74 % of the fit's frame at white, the overcast sky; on those
+/// pixels the fit's own preview of the recipe it shipped read blue
+/// 244.3 in the mean and the export of that recipe
+/// 253.0 (the colour field off in both; over the rest of the
+/// frame the two agree to 0.2 of a code in each channel's mean), and the sky
+/// the fit had matched was rendered with more blue than the target has. The
+/// two stages modelled on that photograph's own pixels (rel1180
+/// fieldproto/plate_model.py, 2026-11-13) put the old plate
+/// 11.0 codes of blue under them where the curve cuts, and the
+/// plate as it is made now within 0.02 of a code.
+///
+/// So the encoding keeps two forms of its stages — the develop's own
+/// ([`Self::develop`], clamped as the develop clamps) and the OPEN one
+/// ([`Self::open`], nothing cut at white, invertible) — and their
+/// difference is what the clamp cut ([`Self::encode`]). A plate is decoded
+/// from the develop's frame with that light put back ([`Self::restore`]),
+/// and a resample carries it through the same resampler beside the frame
+/// ([`Self::resample`]): a resampler is linear, so the parts sum to the
+/// resample of the open frame, through a 16-bit resampler too. Wherever the
+/// clamp cut nothing the difference is exactly zero.
 pub(crate) struct BaseEncoding {
     vignette: Option<Vec<f32>>,
     tone: Option<Vec<f32>>,
@@ -293,13 +324,13 @@ impl BaseEncoding {
         Some(Arc::new(Self { vignette, tone, tone_inverse }))
     }
 
-    /// The base's pointwise stages, as the develop runs them: vignette gain,
-    /// then the tone on the pixel's luma with RGB scaled by the ratio.
-    fn encode(&self, img: &DynamicImage) -> DynamicImage {
-        let (w, h) = (img.width() as usize, img.height() as usize);
-        let mut data = pixels_f32(img);
+    /// The base's pointwise stages as the develop runs them, in place:
+    /// vignette gain, then the tone on the pixel's luma with RGB scaled by the
+    /// ratio — every channel clamped at white after each, by the develop's
+    /// own operators.
+    fn develop(&self, data: &mut [[f32; 3]], w: usize, h: usize) {
         if let Some(lut) = &self.vignette {
-            apply_radial_gain(&mut data, w, h, lut);
+            apply_radial_gain(data, w, h, lut);
         }
         if let Some(lut) = &self.tone {
             data.par_iter_mut().for_each(|px| {
@@ -307,32 +338,131 @@ impl BaseEncoding {
                 scale_chroma(px, l_old, sample_lut(lut, l_old));
             });
         }
-        image_f32(data, w, h)
     }
 
-    /// [`Self::encode`]'s inverse, stage by stage in reverse order: the tone's
-    /// inverse on the luma, then the vignette gain divided out in linear
-    /// light. Exact wherever the encode clipped nothing.
-    fn decode(&self, img: &DynamicImage) -> DynamicImage {
-        let (w, h) = (img.width() as usize, img.height() as usize);
-        let mut data = pixels_f32(img);
-        if let Some(lut) = &self.tone_inverse {
+    /// [`Self::develop`] with nothing cut at white, in place: the same two
+    /// stages through their open operators. Past the luma of white the tone
+    /// is the straight line through its own white point (the identity, under
+    /// the LUT's pinned white), so the map has an inverse everywhere
+    /// ([`Self::decode`]). On a pixel the develop's clamps cut nothing of, it
+    /// is the develop's own value bit for bit.
+    fn open(&self, data: &mut [[f32; 3]], w: usize, h: usize) {
+        if let Some(lut) = &self.vignette {
+            apply_radial_gain_open(data, w, h, lut);
+        }
+        if let Some(lut) = &self.tone {
+            let (white, top) = (luma601(&[1.0; 3]), white_point(lut));
             data.par_iter_mut().for_each(|px| {
                 let l_old = luma601(px);
-                scale_chroma(px, l_old, sample_lut(lut, l_old));
+                let l_new = if l_old <= white { sample_lut(lut, l_old) } else { l_old * top };
+                scale_chroma_open(px, l_old, l_new);
+            });
+        }
+    }
+
+    /// `img` through [`Self::develop`], and beside it what that develop's
+    /// white clamps cut: [`Self::open`]'s result less the develop's, channel
+    /// by channel — `None` when they cut nothing anywhere.
+    fn encode(&self, img: &DynamicImage) -> (Vec<[f32; 3]>, Option<Vec<[f32; 3]>>) {
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        let mut developed = pixels_f32(img);
+        let mut cut = developed.clone();
+        self.develop(&mut developed, w, h);
+        self.open(&mut cut, w, h);
+        cut.par_iter_mut().zip(developed.par_iter()).for_each(|(o, d)| *o = [o[0] - d[0], o[1] - d[1], o[2] - d[2]]);
+        let any = cut.par_iter().any(|p| p.iter().any(|v| *v != 0.0));
+        (developed, any.then_some(cut))
+    }
+
+    /// [`Self::open`]'s inverse, in place, stage by stage in reverse order —
+    /// the tone's inverse on the luma, then the vignette gain divided out in
+    /// linear light — and the result brought inside 0..1, where the pixels a
+    /// develop reads are. The light the develop's clamps cut is the caller's
+    /// to put back first ([`Self::restore`], [`Self::resample`]); on a frame
+    /// without it this is the inverse it always was, exact wherever the
+    /// develop cut nothing.
+    fn decode(&self, data: &mut [[f32; 3]], w: usize, h: usize) {
+        if let (Some(lut), Some(inverse)) = (&self.tone, &self.tone_inverse) {
+            let (white, top) = (luma601(&[1.0; 3]), white_point(lut));
+            data.par_iter_mut().for_each(|px| {
+                let l_old = luma601(px);
+                let l_new = if l_old <= white * top { sample_lut(inverse, l_old) } else { l_old / top };
+                scale_chroma_open(px, l_old, l_new);
             });
         }
         if let Some(lut) = &self.vignette {
             let inverse: Vec<f32> = lut.iter().map(|g| 1.0 / g.max(1e-6)).collect();
-            apply_radial_gain(&mut data, w, h, &inverse);
+            apply_radial_gain_open(data, w, h, &inverse);
         }
+        data.par_iter_mut().for_each(|px| *px = px.map(|v| v.clamp(0.0, 1.0)));
+    }
+
+    /// A plate's pixels from the export's develop of the base (`developed`)
+    /// and that develop before these stages, unsharpened (`bare`, the same
+    /// size): the develop's frame with the light its white clamps cut put
+    /// back, decoded. What the develop did after these stages — the capture
+    /// sharpening — rides `developed` and is decoded with it.
+    pub(super) fn restore(&self, developed: &DynamicImage, bare: &DynamicImage) -> DynamicImage {
+        let (w, h) = (developed.width() as usize, developed.height() as usize);
+        let mut data = pixels_f32(developed);
+        if let (_, Some(cut)) = self.encode(bare) {
+            data.par_iter_mut().zip(cut.par_iter()).for_each(|(d, c)| *d = [d[0] + c[0], d[1] + c[1], d[2] + c[2]]);
+        }
+        self.decode(&mut data, w, h);
         image_f32(data, w, h)
     }
 
-    /// `resample` run where the export runs it: on the encoded pixels.
-    fn resample(&self, img: &DynamicImage, resample: impl FnOnce(&DynamicImage) -> DynamicImage) -> DynamicImage {
-        self.decode(&resample(&self.encode(img)))
+    /// `resample` run where the export runs it — on the encoded pixels — and
+    /// decoded. The light the develop's white clamps cut ([`Self::encode`])
+    /// goes through the same resampler beside the frame, what the open form
+    /// holds above the develop's and what it holds below apart and each
+    /// scaled to its own peak, so a resampler that works in 16 bits carries
+    /// both.
+    fn resample(&self, img: &DynamicImage, resample: impl Fn(&DynamicImage) -> DynamicImage) -> DynamicImage {
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        let (developed, cut) = self.encode(img);
+        let out = resample(&image_f32(developed, w, h));
+        let (ow, oh) = (out.width() as usize, out.height() as usize);
+        let mut data = pixels_f32(&out);
+        if let Some(cut) = &cut {
+            for sign in [1.0f32, -1.0] {
+                let peak = cut.par_iter().map(|p| (p[0] * sign).max(p[1] * sign).max(p[2] * sign)).reduce(|| 0.0, f32::max);
+                if peak <= 0.0 {
+                    continue;
+                }
+                let part: Vec<[f32; 3]> = cut.par_iter().map(|p| p.map(|v| (v * sign).max(0.0) / peak)).collect();
+                let moved = pixels_f32(&resample(&image_f32(part, w, h)));
+                let k = sign * peak;
+                data.par_iter_mut().zip(moved.par_iter()).for_each(|(d, m)| *d = [d[0] + k * m[0], d[1] + k * m[1], d[2] + k * m[2]]);
+            }
+        }
+        self.decode(&mut data, ow, oh);
+        image_f32(data, ow, oh)
     }
+}
+
+/// What a tone LUT maps white to: 1.0 under `build_tone_lut`'s pinned white.
+fn white_point(lut: &[f32]) -> f32 {
+    lut.last().copied().unwrap_or(1.0).max(1e-6)
+}
+
+/// `r` before the stages a [`BaseEncoding`] holds, and unsharpened: the recipe
+/// whose develop is the pixels those stages read. It names what
+/// [`BaseEncoding::of`] reads — the vignette's two gains and every input of
+/// `EditRecipe::has_tone_work` — and [`source_plate`] refuses a recipe this
+/// leaves an encoding on, so an input added there is not missed here in
+/// silence.
+fn before_pointwise(r: &EditRecipe) -> EditRecipe {
+    let mut bare = r.clone();
+    bare.lens_profile.vignette_on = false;
+    bare.lens_vignette = 0.0;
+    (bare.exposure_ev, bare.contrast, bare.highlights) = (0.0, 0.0, 0.0);
+    (bare.shadows, bare.whites, bare.blacks) = (0.0, 0.0, 0.0);
+    (bare.param_shadows, bare.param_darks, bare.param_lights, bare.param_highlights) = (0.0, 0.0, 0.0, 0.0);
+    bare.tone_curve = Vec::new();
+    bare.base_curve = Vec::new();
+    bare.set_resolved("sharpening", 0.0);
+    bare
 }
 
 fn pixels_f32(img: &DynamicImage) -> Vec<[f32; 3]> {
@@ -456,16 +586,32 @@ impl Drop for Plate {
 /// export's own develop of `base` with the lens geometry left for later — so
 /// it carries the RAW's capture sharpening where the export applies it, after
 /// the base's tone and at the working edge — decoded back through `base`'s
-/// pointwise stages ([`BaseEncoding`]), which the preview develop re-applies.
-/// Its candidates are therefore rendered on the pixels the export develops,
-/// and every resample of it runs where the export's does.
+/// pointwise stages ([`BaseEncoding`]), which the preview develop re-applies,
+/// with the light those stages' white clamps cut put back
+/// ([`BaseEncoding::restore`]; read on a second develop, the same one before
+/// those stages). Its candidates are therefore rendered on the pixels the
+/// export develops, and every resample of it runs where the export's does.
 pub fn source_plate(raw: &Path, base: &EditRecipe, edge: u32) -> Result<Plate> {
     let mut develop = base.clone();
     (develop.lens_profile.distortion_on, develop.lens_profile.ca_on) = (false, false);
     let colour_nr = BasePart::of(base).colour_nr();
-    let (developed, _) = render_frame(raw, &develop, None, Some(edge), ExportColorSpace::Srgb, crate::diag::stderr(), colour_nr)?;
+    let render = |recipe: &EditRecipe, sink: &dyn crate::diag::Sink| {
+        render_frame(raw, recipe, None, Some(edge), ExportColorSpace::Srgb, sink, colour_nr).map(|(img, _)| img)
+    };
+    let developed = render(&develop, crate::diag::stderr())?;
     let pixels = match BaseEncoding::of(base) {
-        Some(e) => e.decode(&developed),
+        Some(e) => {
+            let bare = before_pointwise(&develop);
+            if BaseEncoding::of(&bare).is_some() {
+                bail!("the fit source's base still carries a pointwise stage after they were taken out of it");
+            }
+            // It says nothing the develop above has not said.
+            let bare = render(&bare, crate::diag::silent())?;
+            if (bare.width(), bare.height()) != (developed.width(), developed.height()) {
+                bail!("the fit source's two develops differ in size");
+            }
+            e.restore(&developed, &bare)
+        }
         None => developed,
     };
     Ok(Plate::fit_plate(pixels, false, base))

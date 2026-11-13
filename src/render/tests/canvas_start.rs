@@ -285,3 +285,165 @@ fn mean_de76(a: &DynamicImage, b: &DynamicImage) -> f64 {
         .sum::<f64>()
         / n
 }
+
+/// A camera base curve of the lantern pair's shape (v1.18.0, J151): it lifts a
+/// mid-bright luma by a quarter, so a channel a fifth above its pixel's luma
+/// passes white.
+const LIFTING_BASE_JSON: &str =
+    r#"{"version":3,"base_curve":[[0.0,0.0],[0.15,0.29],[0.33,0.58],[0.57,0.83],[0.81,0.96],[1.0,1.0]]}"#;
+
+/// The fit's plate holds the pixels the export develops BEFORE its base's
+/// pointwise stages — also where the base's curve lifts a channel past white
+/// (v1.18.0, J151). The export's develop of the base clamps that channel, and
+/// a plate decoded from the clamped frame alone holds less of it than the
+/// photograph does, so a candidate that pulls the channel down (a warmer
+/// white balance over an overcast sky) is rendered on less light than the
+/// export has. Here a sky whose blue the curve cuts stands beside a grey it
+/// cuts nothing of: the plate made from the develop's frame and the same
+/// develop before the stages is the pixels themselves in both halves, and so
+/// is its analysis thumbnail, the resample every candidate is rendered on.
+///
+/// MUTATION: let `BaseEncoding::encode` report no cut.
+#[test]
+fn a_fit_plate_keeps_the_light_its_base_curve_lifts_past_white() {
+    let base: EditRecipe = serde_json::from_str(LIFTING_BASE_JSON).expect("the base parses");
+    let encoding = super::canvas::BaseEncoding::of(&base).expect("a base curve is a pointwise stage");
+    const SKY: [f32; 3] = [0.62, 0.72, 0.90];
+    const GREY: [f32; 3] = [0.40, 0.40, 0.40];
+    let (w, h) = (64u32, 48u32);
+    let bare: Vec<[f32; 3]> = (0..w * h).map(|i| if i % w < w / 2 { SKY } else { GREY }).collect();
+    // The export's develop of the base on those pixels, packed as the export packs it.
+    let mut developed = bare.clone();
+    apply_develop_anon(&mut developed, w as usize, h as usize, &base);
+    let (sky, grey) = (developed[0], developed[(w - 1) as usize]);
+    assert!(sky[2] >= 1.0 && sky[0] < 1.0 && sky[1] < 1.0, "premise: the base curve cuts the sky's blue, and only it: {sky:?}");
+    assert!(grey.iter().all(|v| *v < 1.0), "premise: it cuts nothing of the grey: {grey:?}");
+    let pack = |px: &[[f32; 3]]| {
+        DynamicImage::ImageRgb16(ImageBuffer::from_fn(w, h, |x, y| Rgb(px[(y * w + x) as usize].map(to_u16))))
+    };
+    let plate = encoding.restore(&pack(&developed), &pack(&bare));
+    let off = |img: &DynamicImage, x: u32, want: [f32; 3]| {
+        let got = img.to_rgb32f().get_pixel(x, img.height() / 2).0;
+        (0..3).map(|c| (got[c] - want[c]).abs()).fold(0.0f32, f32::max)
+    };
+    // A quarter of an 8-bit code.
+    const NEAR: f32 = 1e-3;
+    assert!(off(&plate, 4, SKY) < NEAR, "the plate's sky is off the pixels by {}", off(&plate, 4, SKY));
+    assert!(off(&plate, w - 4, GREY) < NEAR, "the plate's grey is off the pixels by {}", off(&plate, w - 4, GREY));
+    let small = Plate::thumbnail_of(&Plate::fit_plate(plate, false, &base), 16);
+    assert_eq!((small.width(), small.height()), (16, 12));
+    assert!(off(&small, 1, SKY) < NEAR, "the thumbnail's sky is off the pixels by {}", off(&small, 1, SKY));
+    assert!(off(&small, 14, GREY) < NEAR, "the thumbnail's grey is off the pixels by {}", off(&small, 14, GREY));
+}
+
+/// The open forms of the plate encoding's two operators are the develop's own
+/// wherever its white clamp cuts nothing, bit for bit — so what a clamp cut is
+/// their difference, and exactly nothing elsewhere — and each is undone by its
+/// inverse where the clamped form is not (v1.18.0, J151).
+///
+/// MUTATION: scale the open chroma in another order of operations
+/// (`v / l_old * l_new`).
+#[test]
+fn the_open_operators_are_the_develops_own_inside_white() {
+    let (w, h) = (33usize, 21usize);
+    let gain: Vec<f32> = (0..64).map(|i| 1.0 + 0.6 * (i as f32 / 63.0).powi(2)).collect();
+    let frame: Vec<[f32; 3]> =
+        (0..w * h).map(|i| [0usize, 1, 2].map(|c| ((i * 7 + c * 13) % 101) as f32 / 100.0)).collect();
+    let (mut clamped, mut open) = (frame.clone(), frame.clone());
+    apply_radial_gain(&mut clamped, w, h, &gain);
+    super::develop::apply_radial_gain_open(&mut open, w, h, &gain);
+    let mut cut = 0;
+    for (c, o) in clamped.iter().flatten().zip(open.iter().flatten()) {
+        if o > c {
+            cut += 1;
+            assert!(*c > 0.9999, "a channel the open gain leaves above the develop's was cut at white: {c}");
+        } else {
+            assert_eq!(c.to_bits(), o.to_bits(), "inside white the two gains are one value");
+        }
+    }
+    assert!(cut > 0, "premise: the gain lifts some channel past white");
+    let inverse: Vec<f32> = gain.iter().map(|g| 1.0 / g).collect();
+    super::develop::apply_radial_gain_open(&mut open, w, h, &inverse);
+    let worst = open.iter().flatten().zip(frame.iter().flatten()).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    assert!(worst < 1.0 / 255.0, "the inverse gain undoes the open pass: off by {worst}");
+
+    let mut cut = 0;
+    for (px, l_new) in [([0.62f32, 0.72, 0.90], 0.9f32), ([0.2, 0.5, 0.1], 0.6), ([0.9, 0.95, 1.0], 0.99), ([0.3, 0.3, 0.3], 0.1)] {
+        let l_old = luma601(&px);
+        let (mut c, mut o) = (px, px);
+        scale_chroma(&mut c, l_old, l_new);
+        super::luma::scale_chroma_open(&mut o, l_old, l_new);
+        for ch in 0..3 {
+            if o[ch] > 1.0 {
+                cut += 1;
+                assert_eq!(c[ch], 1.0, "a channel the open scale leaves above white was cut there");
+            } else {
+                assert_eq!(c[ch].to_bits(), o[ch].to_bits(), "inside white the two scales are one value");
+            }
+        }
+        let l_open = luma601(&o);
+        super::luma::scale_chroma_open(&mut o, l_open, l_old);
+        let worst = (0..3).map(|ch| (o[ch] - px[ch]).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-5, "the inverse ratio undoes the open scale: off by {worst}");
+    }
+    assert!(cut > 0, "premise: a ratio lifts some channel past white");
+}
+
+/// The lantern street (p38), the photograph J151 was found on: its camera
+/// base curve cuts the blue of the overcast sky, and the fit made the white
+/// balance warmer, which pulls that blue down. On the pixels whose blue the
+/// export of the base holds at white, the fit's preview of a warmer white
+/// balance (as-shot x 1.5, the size of the move the fit made) reads the blue
+/// the export of that recipe renders: 0.12 codes apart in the
+/// mean, where a plate decoded from the clamped frame alone reads
+/// 12.52 codes under it (the mutation's reading, 2026-11-13). Both at the fit's
+/// source edge with the lens geometry left for later, the frame the plate is
+/// in. Env-gated on the corpus; it prints what it bounds.
+///
+/// MUTATION: let `BaseEncoding::encode` report no cut (the plate is then
+/// decoded from the develop's frame alone).
+#[test]
+fn the_fit_previews_a_warmer_white_balance_as_the_export_renders_it_where_the_base_cuts_a_channel() {
+    let Some(dir) = crate::config::live_env_os("AUTOSHADE_FIT_CALIBRATION_DIR").map(std::path::PathBuf::from)
+    else {
+        crate::test_skipped("plate white clamp", "AUTOSHADE_FIT_CALIBRATION_DIR is unset");
+        return;
+    };
+    let raw = dir.join("p38.arw");
+    if !raw.is_file() {
+        crate::test_skipped("plate white clamp", "the corpus lacks its RAW");
+        return;
+    }
+    let (plate, cal) = crate::pipeline::fit_source(&raw).expect("fit source");
+    let mut warm = cal.clone();
+    warm.temperature_k = Some(cal.as_shot_k.expect("a RAW's calibration carries its as-shot white") * 1.5);
+    let export = |r: &EditRecipe| {
+        let mut r = r.clone();
+        (r.lens_profile.distortion_on, r.lens_profile.ca_on) = (false, false);
+        render_to_image(&raw, &r, None, Some(crate::pipeline::FIT_SOURCE_EDGE)).expect("export").to_rgb8()
+    };
+    let (at_base, exported) = (export(&cal), export(&warm));
+    let previewed = develop_preview(&plate, &warm).to_rgb8();
+    assert_eq!(previewed.dimensions(), exported.dimensions(), "the plate is in the export's frame");
+    let cut: Vec<bool> = at_base.pixels().map(|p| p[2] == 255).collect();
+    let share = cut.iter().filter(|c| **c).count() as f64 / cut.len() as f64;
+    let mean_blue = |img: &RgbImage, on: bool| {
+        let (sum, n) = img
+            .pixels()
+            .zip(&cut)
+            .filter(|(_, c)| **c == on)
+            .fold((0.0f64, 0usize), |(s, n), (p, _)| (s + f64::from(p[2]), n + 1));
+        sum / n.max(1) as f64
+    };
+    let gap = mean_blue(&previewed, true) - mean_blue(&exported, true);
+    let rest = mean_blue(&previewed, false) - mean_blue(&exported, false);
+    println!(
+        "plate white clamp (p38): the base holds the blue of {:.2} % of the frame at white; there the preview's \
+         mean blue is {gap:+.2} codes off the export's ({:.1} against {:.1}), elsewhere {rest:+.2}",
+        100.0 * share,
+        mean_blue(&previewed, true),
+        mean_blue(&exported, true)
+    );
+    assert!(share > 0.01, "premise: the base's develop cuts the sky's blue ({:.2} % of the frame)", 100.0 * share);
+    assert!(gap.abs() <= 1.0, "the preview's blue is {gap:+.2} codes off the export's where the base cut it (bound 1.0)");
+}
