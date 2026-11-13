@@ -2630,8 +2630,17 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
     // `dehaze_split_is_bit_identical_to_the_pre_split_golden`), and a solve
     // that compares objective readings can end on another recipe for them.
     // Each runtime is held to its own reading, at the tolerance below.
-    let sky_land = if cfg!(target_env = "msvc") { (0.0490f32, 0.153f32) } else { (0.0450, 0.148) };
-    let expected_candidates = [("sky", 0.0540f32, 0.161f32), ("sky+land", sky_land.0, sky_land.1)];
+    // RE-PINNED 2026-11-13 (J149, d00656a; online run 43403479036 and
+    // gates/ci4). A candidate is the app's own render of the zone at its
+    // full dose, and the renderer now weighs a raster's band on a content
+    // edge by content (`render::mask_band`); the run on 4a9050b read the
+    // pins above, so the raw rims moved with that and with nothing else.
+    // `sky`: 0.0540 -> 0.0500 at k 0.161 -> 0.178, on all three runtimes.
+    // `sky+land`: 0.0450 -> 0.0470 at k 0.148 -> 0.149 on glibc and on
+    // Apple's libm; 0.0490 -> 0.0500, its k still 0.153, on the MSVC
+    // runtime. The kept rim is 0.009 on every one of them, as before.
+    let sky_land = if cfg!(target_env = "msvc") { (0.0500f32, 0.153f32) } else { (0.0470, 0.149) };
+    let expected_candidates = [("sky", 0.0500f32, 0.178f32), ("sky+land", sky_land.0, sky_land.1)];
     for ((fixture, before, k), (want_fixture, want_before, want_k)) in
         candidates.iter().zip(expected_candidates)
     {
@@ -3668,12 +3677,39 @@ fn a_narrow_feather_over_haze_is_charged_against_its_own_flat_context() {
 /// one-code dead band, so at a saturated budget it is the raw colour LESS
 /// one code (measured 0.02745 raw, 0.02353 charged), not the raw bits; luma
 /// is still the raw reading bit for bit.
+///
+/// RE-READ 2026-11-13 (J149): the renderer no longer draws this seam. The
+/// feather lies on the scene's own edge, so its band is weighed by content
+/// (`render::mask_band`) and each side takes its own treatment whole: the
+/// app's render of this fixture reads 0.000271 on both rulers, 0.07 of a
+/// code, and that is pinned first. The ruler's arithmetic is then asked of
+/// the seam it was written for, built here first-party: the same dose
+/// through a full-coverage raster, blended toward the untouched frame by
+/// the feather's coverage (0.02734 raw on colour, 0.02342 charged).
 #[test]
 fn a_hard_scene_edge_under_the_feather_saturates_the_budget_and_charges_nothing() {
-    let (_, _, weights, reference, candidate, path, _) =
+    let (source, _, weights, reference, candidate, path, _) =
         hazy_feather("soft-charge-scene-edge", 3.0, 0.30, None, true);
-    let measured = hazy_rim(&reference, &candidate, &weights);
-    assert!(measured.transitions > 0, "premise: the feather must be read: {measured:?}");
+    let drawn = hazy_rim(&reference, &candidate, &weights);
+    assert!(drawn.transitions > 0, "premise: the feather must be read: {drawn:?}");
+    assert!(
+        drawn.rim < BOUNDARY_STEP_FLOOR && drawn.colour < BOUNDARY_STEP_FLOOR,
+        "a feather on the scene's own edge is weighed by content, and no seam is drawn: {drawn:?}"
+    );
+    let full_path = fixture_mask_path("soft-charge-scene-edge-full");
+    GrayImage::from_pixel(HAZY.0, HAZY.1, image::Luma([255u8])).save(full_path.path()).unwrap();
+    let full = dose(&source, &full_path, 0.30);
+    let by_area: Vec<[f32; 3]> = reference
+        .iter()
+        .zip(&full)
+        .zip(&weights)
+        .map(|((r, f), &w)| std::array::from_fn(|c| r[c] + (f[c] - r[c]) * w))
+        .collect();
+    let measured = hazy_rim(&reference, &by_area, &weights);
+    assert!(
+        measured.transitions > 0 && measured.colour > BOUNDARY_STEP_FLOOR,
+        "premise: the area weight's seam is read, past the colour's dead band: {measured:?}"
+    );
     assert_eq!(
         measured.charged.to_bits(),
         measured.rim.to_bits(),
@@ -3685,6 +3721,7 @@ fn a_hard_scene_edge_under_the_feather_saturates_the_budget_and_charges_nothing(
         "and the colour charge is the raw step past its one-code dead band: {measured:?}"
     );
     path.remove();
+    full_path.remove();
 }
 
 /// B then A, the order the producer runs them in. Widening the feather
@@ -3984,13 +4021,23 @@ fn local_quality_gate_passes_every_accepted_fixture_zone() {
 /// its own mean and `ev` scales it; the upper half of the frame is
 /// byte-identical on both sides so only the lower half is under test.
 fn strictly_better_fixture(sat: f32, ev: f32, warm: f32, target: bool) -> DynamicImage {
+    graded_fixture(sat, ev, warm, 0.0, target)
+}
+
+/// [`strictly_better_fixture`] whose zone also GRADES across the frame: the
+/// checker's two levels ride a ramp of `grade` from the left edge to the
+/// right, so the zone's population is a range of levels and not two. Zero is
+/// the plain fixture, bit for bit.
+fn graded_fixture(sat: f32, ev: f32, warm: f32, grade: f32, target: bool) -> DynamicImage {
     let (w, h) = (96u32, 96u32);
     DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
         let p: [f32; 3] = if y < h / 2 {
             let v = 0.30 + 0.30 * x as f32 / (w - 1) as f32;
             [v, v, v]
         } else {
-            let v = 0.16 + 0.10 * (((x / 8) + (y / 8)) % 2) as f32;
+            let v = 0.16
+                + 0.10 * (((x / 8) + (y / 8)) % 2) as f32
+                + grade * (x as f32 / (w - 1) as f32 - 0.5);
             let base = [v * 1.10, v * 0.95, v * 0.80];
             if target {
                 let mid = (base[0] + base[1] + base[2]) / 3.0;
@@ -4143,10 +4190,31 @@ fn a_zone_that_earns_on_its_own_pixels_attaches_and_names_the_readings_it_shippe
 /// the tone ships alone through the absolute arm (0.942 -> 0.515). The
 /// quality gate's colour-only refusal no longer has a fixture that reaches
 /// it (lane c notes, rel1180).
+///
+/// RE-READ 2026-11-13 (J149): the zone GRADES ([`graded_fixture`], by the
+/// checker's own step, 0.10). The plain fixture's zone is two levels, and at
+/// Cell scale a tone solve needs the zone's own population in the ranges of
+/// two of the eight knots (`fit::knot_support_for`). Recoloured, the two
+/// levels stand at codes 89 and 136, between the knots, with 153 px of
+/// weight in the 0.50 knot's range and none in any other. The second knot
+/// the solve stood on until now was the mask's seam: under the area weight
+/// the three rows of the hard mask's band took a part of the gains (the
+/// dark squares at code 71 under 0.625 of them), 115 px of weight in the
+/// 0.25 knot's range; with the law switched off this test passes on the
+/// plain fixture, as it did. The renderer now gives a band pixel on a
+/// content edge its own content's treatment whole (`render::mask_band`),
+/// those rows read as the rest of the zone does, and the plain fixture is
+/// told it has no tone problem (1 of 8 knots) and attaches nothing. Graded,
+/// the zone is one unbroken range of levels, 7353 and 11586 px of weight in
+/// the 0.25 and 0.50 knots' ranges, and the outcome is the one the name
+/// states, on the zone's own evidence: Cell scale (D 0.545), the colour
+/// class refused by the cells (1.000 converged, 0.500 aligned over 12), the
+/// tone shipped alone (0.582 -> 0.249 on the zone's own pixels).
 #[test]
 fn a_colour_move_the_cells_do_not_vouch_leaves_the_tone_to_ship_alone() {
+    let pair = |target: bool| graded_fixture(2.0, 8.0, 1.0, 0.10, target);
     let (accepted, report, _, _) =
-        run_strictly_better_zone("quality-withholds-colour", 2.0, 8.0, 1.0, false);
+        run_lower_half_zone("quality-withholds-colour", &pair(false), &pair(true), false);
     let zone = accepted
         .unwrap_or_else(|| panic!("the tone move must still attach: {}", report.recipe.rationale));
     let mask = &report.recipe.masks[zone.mask_index];
@@ -5973,6 +6041,15 @@ fn the_neutral_solution_exit_is_reached_when_every_class_is_withheld() {
 /// with a darker, bluer target sky (0.30, 0.40, 0.62) brings the tie back:
 /// measured, both candidates finish at 0.026381 under the reference's
 /// ruler, so `multi >= two` again holds by equality and the branch runs.
+///
+/// 2026-11-13 (J149): `multi >= two` held on every run until the renderer
+/// weighed a raster's band on a content edge by content
+/// (`render::mask_band`). Since then the candidates read 0.001621 (multi)
+/// against 0.001969 (two), on glibc, on Apple's libm and on the MSVC
+/// runtime alike (online run 43403479036, gates/ci4): apart by less than
+/// the 0.0019 quantum, so the branch still runs. Its rule is `fit::ships`
+/// — the multi-region candidate must EARN the quantum over the two-region
+/// one — and that is what the assertion reads now.
 #[test]
 fn the_multi_region_reject_branch_discloses_the_comparison_it_lost() {
     let (src, tgt) = {
@@ -6026,7 +6103,7 @@ fn the_multi_region_reject_branch_discloses_the_comparison_it_lost() {
             .unwrap_or_else(|| panic!("the refusal discloses {key}"))
     };
     assert!(
-        arg("multi") >= arg("two"),
+        !fit::ships(arg("multi"), arg("two")),
         "the refusal must disclose the comparison it lost: {refusal:?}",
     );
     // By FILE, not by variant: the sky/land zones are Select Sky
