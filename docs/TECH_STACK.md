@@ -994,13 +994,17 @@ the pair. `LocalField::solve` is a Rust port of the validated NumPy experiment
 rasters `fit::analysis_pair` already hands every producer. The modelled
 display-referred delta is `dc = ln2*c*EV + c*gain_ch + (c - guide)*slope`, with
 `guide` the 3-tap-smoothed `luma601` of the CURRENT render — the same pixels
-the producers start from. The fit weight is the FROZEN evidence
-`source_weights` times a local structural support term (`1 - D` from one
-`fit::structure_divergence` reading per `12 x 8` cell) times the pair's
-testimony (`fit_field::testifies`, v1.17.1): no channel at or under 1/255 in
-either frame, and every channel inside 254/255 in both frames or at the clip in
-both. A channel at the clip on both sides is known on both sides; a pixel
-clipped on one side only stays out. Until v1.17.1 only pixels inside the clip
+the producers start from. The fit weight is the FROZEN evidence — the source
+weights in their per-place form since v1.18.0
+(`EvidenceModel::per_place_source_weights`, J150: a control solved per place
+does not wait for a value range to be a population) — times a local
+structural support term (`1 - D` from one `fit::structure_divergence` reading
+per `12 x 8` cell) times the pair's testimony (`fit_field::testifying`, per
+channel since v1.18.0): nothing unless each frame's luma is above the black
+code 1/255, and then every channel inside 254/255 in both frames or at the
+clip in both. A channel at the clip on both sides is known on both sides; a
+channel clipped on one side only stays out, and since v1.18.0 it stays out
+alone — the pixel's other channels keep their say (J150). Until v1.17.1 only pixels inside the clip
 in both frames testified, while the field was still applied to the rest: on
 the sunset-rooftops pair a third of the upper clouds' pixels have red at the
 clip in both frames and the field pulled it 0.999 → 0.972 against a target at

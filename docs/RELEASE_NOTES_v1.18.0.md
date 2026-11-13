@@ -130,8 +130,12 @@ and reference-pair gate before it shipped.
 - **The fit starts from the picture the export would make.** The starting
   picture is developed exactly as the export develops it, resized only after
   the base's per-pixel steps; an untouched recipe now reads as identical to
-  its own export. A JPEG or PNG is read on its own pixels when it is the
-  photo being fitted.
+  its own export. That includes the light a camera's starting curve pushes
+  past pure white — the blue of an overcast sky, the red of a lamp: the
+  export still holds it when a warmer white balance or a darker tone pulls it
+  back, and so does the fit's starting picture, so the fit and the export
+  agree on a blown sky too. A JPEG or PNG is read on its own pixels when it
+  is the photo being fitted.
 - **A band too small to be a zone joins its neighbour**, and a seam is charged
   to the side that is off: a region that lands on its target is no longer
   refused because the region beside it is still short of its own.
@@ -149,6 +153,15 @@ and reference-pair gate before it shipped.
   others and the field could draw the reference's layout onto the photo: a
   dark smudge of sky beside a ridge, or the outline of the reference's
   buildings over another scene.
+- **The brightest part of a picture has its say in the colour field.** A
+  small bright area — the lit edge of a cloud bank at sunset — could be left
+  out of the colour field twice over: its range of brightness was too small
+  a share of the frame to count as evidence, and one colour channel at pure
+  white in the target silenced the pixel's other two. Such an area kept
+  whatever the whole-frame controls gave it: a pink-white cloud where the
+  target's is orange. A correction solved place by place now reads every
+  pixel that pairs, and a channel at pure white on one side only leaves the
+  other channels' reading in.
 - **The colour field's own checks follow the rest of the fit.** A masked
   area the field leaves worse by less than the fit's rounding no longer
   sends the whole field back. Each part of the frame is judged on the

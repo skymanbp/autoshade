@@ -2871,7 +2871,10 @@ export's own develop of the base with the lens geometry left for later
 (capture sharpening included, where the export applies it), decoded back
 through the base's pointwise stages (`BaseEncoding`) so that every resample
 of it runs where the export's does, and an untouched recipe reads as
-identical to its own export. A recipe that names no profile — every fresh
+identical to its own export — with the light those stages' white clamps cut
+put back (J151, below), so a channel the base curve lifts past white is
+there for a candidate to pull down, as it is for the export. A recipe that
+names no profile — every fresh
 develop — has the neutral part, which is the v1.16.0 develop. The base is
 UNSHARPENED (the display and the export sharpen once, over it); the heal /
 clone / denoise / stack / generative MASTERS bake through
@@ -5808,6 +5811,63 @@ its field. Pinned by `the_layout_reads_a_displaced_contour_as_split`,
 `two_photographs_get_no_colour_field` and
 `a_frame_that_pairs_somewhere_testifies_as_it_did`.
 
+**A pair in a small value range, and a channel beside a clipped one, testify
+to the colour field (J150, v1.18.0).** Round V14 put every pair past the last
+release's whole-frame reading, and on the sunset street the brightest clouds
+over the horizon were pink-white against a yellow-orange target. The frame's
+mean had hidden them (2.81 against the last release's 4.75); read per band
+of the target's luma, the frame's two brightest bands stood at
+11.08 / 18.92 against the last release's 10.35 / 17.53. Two rules had
+left those pixels without a witness in the one control that answers per
+place. The evidence weighs a value range only where both frames populate it
+(`EVIDENCE_MIN_SHARE`), a line for a control estimated from a range's
+population: six of that frame's seventeen luma ranges, the five brightest
+among them, hold 5.0 % of it and none reaches the line, so the clouds
+weighed 0.000 in the field's solve. And the white-clip rule, stated per
+channel, was applied to the pixel: the target's red is at the clip there and
+the frame's a few codes under it, which took the measured green and blue of
+84.7 % / 89.4 % of those bands' pixels in the clouds out with it. The
+field's testimony now reads `EvidenceModel::per_place_source_weights` — the
+source weights with the population line lifted; every other pixel, and every
+control that answers per range, as they were; a layout member still on the
+line — and `fit_field::testifying` answers per channel: a channel across the
+clip weighs nothing in the data term, the pixel's other channels keep their
+say, and the pixel counts toward occupancy while any channel does
+(`testifies`). On the planes of that solve under the NumPy model of it
+(which reads the build's own render of those bands to 0.01), the clouds' two
+brightest bands in CIE76:
+37.25 / 45.49 before the field, 34.39 / 43.98 as it shipped, 13.19 / 20.16 on the pairs' weights, 4.84 / 6.70 with the rule on the channel.
+No constant is new. Pinned by
+`a_pair_in_a_small_value_range_testifies_to_the_field` and
+`a_channel_across_the_clip_does_not_silence_the_pixels_other_channels`.
+
+**The fit's plate keeps the light its base's white clamps cut (J151,
+v1.18.0).** The same per-band reading put the lantern street's overcast sky
+at 3.73 / 2.22 in its two brightest bands against the last release's 0.80 / 1.14,
+and there the fit had done its work: on its own frame the sky matched. The
+export of the recipe it shipped did not — blue 253.0 in the mean where the fit's
+own preview of that recipe read 244.3, on the 5.74 % of the frame whose blue the
+base's develop holds at white, the two agreeing to 0.2 of a code over the
+rest of the frame. The plate a candidate is rendered on is the export's
+develop of the base decoded back through the base's pointwise stages (the
+base develop, above), and that develop clamps every channel at white after
+each stage: where the camera's base curve lifts a channel past white the
+decode returned less of it than the photograph holds. The export never makes
+that cut — it runs the white balance before those stages and clamps what the
+photo's own tone leaves — so the fit's warmer white balance pulled down, in
+its preview, light the plate had already lost. `BaseEncoding` now keeps an
+open form of its two stages beside the develop's own; their difference is
+what the clamps cut, exactly zero wherever they cut nothing.
+`render::source_plate` develops the base a second time before those stages,
+reads the cut there, puts it back on the develop's frame and decodes, and a
+resample of a plate carries the cut through the same resampler beside the
+frame. On that photograph the preview of a white balance half again as warm
+as shot reads 0.12 codes of blue from its export on those pixels
+(12.52 on a plate decoded from the clamped frame alone). Pinned by
+`a_fit_plate_keeps_the_light_its_base_curve_lifts_past_white`,
+`the_open_operators_are_the_develops_own_inside_white` and, on the corpus,
+`the_fit_previews_a_warmer_white_balance_as_the_export_renders_it_where_the_base_cuts_a_channel`.
+
 **The feather widener's smoothness reading follows its guide** (R34 §D8). The
 one-code rule in `mask_refine::widen_smooth_feather` is an absolute statement
 calibrated on an absolute guide — the camera's embedded preview, with the
@@ -7543,8 +7603,9 @@ bins merge while the luma effect of their parameter difference at the shared
 boundary stays under 2/255, are capped at `RANGE_MAX_BANDS`, and must carry
 `RANGE_MIN_EVIDENCE_SHARE` on both sides of the pair, both shares measured on
 the same 3-tap guide luma. Shape is read off the remainder with every sum
-weighted by the solve's own per-pixel fit weight (`LocalField.weight`: frozen
-evidence x local support x `fit_field::testifies`), so a pixel the solve gave no weight
+weighted by the solve's own per-pixel fit weight (`LocalField.weight`: the
+field's testimony x local support x `fit_field::testifies`, a pair with at
+least one channel that testifies since v1.18.0), so a pixel the solve gave no weight
 cannot pose as spatial structure (until v1.18.0 this also kept out the policy
 zero the occupancy floor wrote into an unmeasured vertex; since v1.18.0 such a
 vertex carries the solve's own value): `R2(4x4)` against the weighted 4x4 tile
