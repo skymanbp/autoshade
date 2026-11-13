@@ -517,7 +517,8 @@ pub(crate) fn cell_vertex_spans(cell: usize) -> impl Iterator<Item = std::ops::R
 
 /// One frame's pixel with no channel at the white clip (`254/255`) — read
 /// on the TARGET alone by [`crate::fit_cells`] for its cell means (the field
-/// itself reads [`testifies`]). The same clip rule as the testimony's: a
+/// itself reads [`testifying`], channel by channel; a mean of a colour needs
+/// all three of a pixel's channels). The same clip rule as the testimony's: a
 /// channel at the black clip is a value (the target shows it black), a
 /// channel at the white clip is not (its true value is unbounded above it),
 /// so only the latter keeps a pixel out of a mean. Until v1.18.0 this
@@ -528,17 +529,39 @@ pub(crate) fn unclipped(p: &[f32; 3]) -> bool {
     p[0].max(p[1]).max(p[2]) < 254.0 / 255.0
 }
 
-/// Whether a PAIR of pixels — the frame being moved and its target —
-/// testifies: the LUMA of each frame above the black code `1/255`, and
-/// every channel either inside 254/255 in BOTH frames or at the white clip
-/// in BOTH. A channel at the white clip on both sides is known on both
-/// sides — the target keeps it there — and a pixel white-clipped on one
-/// side only is not (its true value on that side is unknown above the
-/// clip), so it stays out as before. A pixel white in every channel on both
-/// sides testifies too (its difference is 0 and known): the luma gate reads
-/// the black end only, because at the white end the per-channel rule
-/// already says everything there is to say, and a luma gate there kept the
-/// one pixel the v1.17.1 rule had been written to admit.
+/// Which CHANNELS of a pair of pixels — the frame being moved and its
+/// target — testify: none unless the LUMA of each frame is above the black
+/// code `1/255`, and then every channel that is inside 254/255 in BOTH
+/// frames or at the white clip in BOTH. A channel at the white clip on both
+/// sides is known on both sides — the target keeps it there — and a channel
+/// white-clipped on one side only is not (its true value on that side is
+/// unknown above the clip), so it stays out as before. A pixel white in
+/// every channel on both sides testifies too (its difference is 0 and
+/// known): the luma gate reads the black end only, because at the white end
+/// the per-channel rule already says everything there is to say, and a luma
+/// gate there kept the one pixel the v1.17.1 rule had been written to admit.
+///
+/// A CHANNEL, NOT THE PIXEL (v1.18.0, J150). The rule was always stated per
+/// channel and, until this version, applied to the pixel: one channel across
+/// the clip took the pixel's other two — measured in both frames — out with
+/// it. On the sunset-street pair (p40, 0.85) the target's red is at the clip
+/// over the brightest clouds and the frame's is a few codes under it. The
+/// pixels refused for that alone are 84.7 % / 89.4 % of the two brightest
+/// luma bands of the clouds over the horizon, and over the frame they read
+/// (0.987, 0.636, 0.556) on average against a target at
+/// (1.000, 0.620, 0.467) — so nothing asked their BLUE down, the one
+/// difference that makes them pink-white where the target is
+/// yellow-orange. With every pixel given its say by the evidence
+/// (`fit::EvidenceModel::per_place_source_weights`) those two bands still
+/// read 13.19 / 20.16 dE76 under the pixel-wide rule and
+/// 4.84 / 6.70 when only the channel across the clip — red, in every
+/// one of those pixels — is left out (the solve's dumped inputs under the
+/// NumPy model, rel1180 fieldproto, 2026-11-13). A
+/// channel that does not testify weighs nothing in the data term
+/// ([`System::weigh`] and the diagonal [`System::with_splat`] builds); the
+/// pixel counts as one pixel of occupancy while any of its channels does
+/// ([`testifies`]). No number is added: the clip codes are the ones the
+/// rule already read.
 ///
 /// A channel at its BLACK clip (at or under 1/255) is not a missing
 /// measurement (v1.18.0). The data term reads the per-channel difference
@@ -570,12 +593,21 @@ pub(crate) fn unclipped(p: &[f32; 3]) -> bool {
 /// not see it. Testifying, those pixels hold their own vertices: clouds a* 17.0 /
 /// b* 28.1 against 17.1 / 28.1, the frame's 480-px distance 2.78 → 1.95
 /// (the seaside street 2.28 → 1.92), every other pair of the leg unchanged.
-pub(crate) fn testifies(current: &[f32; 3], target: &[f32; 3]) -> bool {
+pub(crate) fn testifying(current: &[f32; 3], target: &[f32; 3]) -> [bool; 3] {
     const LOW: f32 = 1.0 / 255.0;
     const HIGH: f32 = 254.0 / 255.0;
     let measured = |p: &[f32; 3]| fit::luma601(p) > LOW;
-    measured(current) && measured(target)
-        && (0..3).all(|c| (current[c] >= HIGH) == (target[c] >= HIGH))
+    if !(measured(current) && measured(target)) {
+        return [false; 3];
+    }
+    std::array::from_fn(|c| (current[c] >= HIGH) == (target[c] >= HIGH))
+}
+
+/// Whether the pair has any say: at least one channel [`testifying`] admits.
+/// The pixel's evidence weight and its occupancy read this; what each of its
+/// channels weighs in the data term is [`testifying`]'s.
+pub(crate) fn testifies(current: &[f32; 3], target: &[f32; 3]) -> bool {
+    testifying(current, target).contains(&true)
 }
 
 /// The field's guide, owned by the engine since R33 §G: see
@@ -711,6 +743,10 @@ struct System<'a> {
     current: &'a [[f32; 3]],
     guide: &'a [f32],
     fit_weight: &'a [f32],
+    /// Which channels of each pixel testify ([`testifying`]): the data term
+    /// weighs a channel by its pixel's `fit_weight` when it does and by
+    /// nothing when it does not.
+    says: Vec<[bool; 3]>,
     target_delta: Vec<[f32; 3]>,
     splat: Splat,
     occupancy: Vec<f32>,
@@ -760,6 +796,7 @@ impl<'a> System<'a> {
     ) -> Self {
         let target_delta = current.iter().zip(target)
             .map(|(c, t)| [t[0] - c[0], t[1] - c[1], t[2] - c[2]]).collect();
+        let says: Vec<[bool; 3]> = current.iter().zip(target).map(|(c, t)| testifying(c, t)).collect();
         let mut mass = vec![0.0f64; VERTICES];
         for (i, (ids, tri)) in splat.ids.iter().zip(&splat.tri).enumerate() {
             for (&id, &weight) in ids.iter().zip(tri) {
@@ -778,12 +815,15 @@ impl<'a> System<'a> {
             let (c, g, w) = (&current[i], guide[i] as f64, fit_weight[i] as f64);
             if w <= 0.0 { continue; }
             let cc = [c[0] as f64, c[1] as f64, c[2] as f64];
+            // 1 for a channel that testifies, 0 for one that does not: where
+            // all three do, every product below is the one it was, bit for bit.
+            let on = says[i].map(|s| f64::from(u8::from(s)));
             let per = [
-                LN2 * LN2 * (cc[0] * cc[0] + cc[1] * cc[1] + cc[2] * cc[2]),
-                cc[0] * cc[0],
-                cc[1] * cc[1],
-                cc[2] * cc[2],
-                cc.iter().map(|&v| (v - g) * (v - g)).sum::<f64>(),
+                LN2 * LN2 * (on[0] * cc[0] * cc[0] + on[1] * cc[1] * cc[1] + on[2] * cc[2] * cc[2]),
+                on[0] * cc[0] * cc[0],
+                on[1] * cc[1] * cc[1],
+                on[2] * cc[2] * cc[2],
+                cc.iter().zip(on).map(|(&v, on)| on * (v - g) * (v - g)).sum::<f64>(),
             ];
             let mut merged: [(u32, f64); 8] = [(u32::MAX, 0.0); 8];
             for (&id, &weight) in ids.iter().zip(tri) {
@@ -797,7 +837,7 @@ impl<'a> System<'a> {
                 for (p, d) in per.iter().enumerate() { data_diagonal[base + p] += w * weight * weight * d; }
             }
         }
-        Self { current, guide, fit_weight, target_delta, splat, occupancy, data_diagonal, owners }
+        Self { current, guide, fit_weight, says, target_delta, splat, occupancy, data_diagonal, owners }
     }
 
     /// The inverse diagonal of the whole system `AᵀWA + λI + L`: the data
@@ -852,10 +892,17 @@ impl<'a> System<'a> {
         acc.into_iter().map(|v| v as f32).collect()
     }
 
-    /// Per-pixel weighting of a delta field, the `w[:, None] * x` of the NumPy.
+    /// The weighting of a delta field: a pixel's `fit_weight` on each of its
+    /// channels that testifies, nothing on one that does not (`says`) — the
+    /// `w3 * x` of the NumPy, which is its old `w[:, None] * x` wherever all
+    /// three channels testify.
     fn weigh(&self, values: &[[f32; 3]]) -> Vec<[f32; 3]> {
         values.iter().enumerate()
-            .map(|(i, v)| { let w = self.fit_weight[i]; [w * v[0], w * v[1], w * v[2]] })
+            .map(|(i, v)| {
+                let (w, says) = (self.fit_weight[i], self.says[i]);
+                let of = |c: usize| if says[c] { w } else { 0.0 };
+                [of(0) * v[0], of(1) * v[1], of(2) * v[2]]
+            })
             .collect()
     }
 

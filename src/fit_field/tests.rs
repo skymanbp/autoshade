@@ -223,7 +223,9 @@ fn field_adjoint_matches_forward() {
 /// frames (luma 0.64 and 0.71, so they share the field's brightness-bin
 /// vertices and no field can serve both exactly).
 /// Right half: the bright pixel clipped in the SOURCE only (the target's red
-/// 0.90) — its true source value is unknown, and it still does not testify.
+/// 0.90) — its true source value is unknown, and that channel still does not
+/// testify; the pixel's green and blue, measured in both frames, do (J150:
+/// the rule is the channel's, `a_channel_across_the_clip_does_not_silence_the_pixels_other_channels`).
 /// Until v1.17.1 the clipped-in-both pixels were left out of the solve and
 /// took their vertices' red cut anyway, as p36's clouds did (0.999 → 0.972
 /// against a target at 0.998). Measured 2026-11-02: the clipped-in-both red
@@ -258,7 +260,10 @@ fn a_channel_clipped_in_both_frames_testifies_and_keeps_its_colour() {
     let red = |k: u8| of(k).map(|i| render[i][0] as f64).sum::<f64>() / of(k).count() as f64;
     let (kept, cut) = (red(1), red(0));
     assert!(of(1).all(|i| testifies(&current[i], &target[i])), "clipped in both frames testifies");
-    assert!(of(2).all(|i| !testifies(&current[i], &target[i]) && field.weight[i] == 0.0), "a one-sided clip does not");
+    assert!(
+        of(2).all(|i| testifying(&current[i], &target[i]) == [false, true, true]),
+        "a channel clipped on one side does not testify; the pixel's other two do"
+    );
     assert!(of(1).any(|i| field.weight[i] > 0.0), "premise: the clipped-in-both pixels carry evidence weight");
     assert!(cut < 0.78, "premise: the warm pixels' red was cut toward 0.72: {cut:.4}");
     assert!(kept >= 0.98, "the clipped-in-both red is kept where the target keeps it: {kept:.4}");
@@ -1123,6 +1128,62 @@ fn calibration_field_ceiling_matches_the_numpy_solver() {
     assert!(field.solve.iterations <= 90, "the CG budget is 90 steps");
     assert_eq!(field.grid.len(), VERTICES);
     assert_eq!(field.remainder.len(), (pair.width * pair.height) as usize);
+}
+
+/// The white-clip rule is the CHANNEL's (J150, v1.18.0). The left half of
+/// the frame is a textured grey the target leaves alone; the right half is
+/// the sunset-street pair's brightest cloud as the field met it: the frame
+/// at (0.985, 0.636, 0.556), the target at (1.000, 0.620, 0.467) under one
+/// texture — the target's red at the clip, the frame's a few codes under it,
+/// and the blue 0.089 too high, which is what reads pink-white against a
+/// yellow-orange target. Applied to the pixel, the rule refused every cloud
+/// pixel for its red, the solve met only the grey's "no change" and the
+/// cloud's blue stayed where it was. Applied to the channel, the red stays
+/// out and the green and the blue ask: away from the seam the blue comes
+/// more than half of the way down, and the grey away from it is left alone.
+/// (The halves are apart in space on purpose: two populations interleaved
+/// pixel by pixel share the smoothed guide and so the vertices, and what
+/// one asks the other is given.)
+///
+/// MUTATION THIS KILLS: refuse the pixel when any one channel is across the
+/// clip (`testifying` answering `[false; 3]` unless all three channels agree).
+#[test]
+fn a_channel_across_the_clip_does_not_silence_the_pixels_other_channels() {
+    let (w, h) = FIXTURE;
+    let mut lcg = Lcg(0x5eed_c1ff);
+    let (mut current, mut target) = (Vec::new(), Vec::new());
+    for i in 0..w * h {
+        let grain = (lcg.unit() - 0.5) * 0.06;
+        if i % w < w / 2 {
+            let grey = [0.50 + grain; 3].map(byte_round);
+            current.push(grey);
+            target.push(grey);
+        } else {
+            current.push([0.985, 0.636 + grain, 0.556 + grain].map(byte_round));
+            target.push([1.0, 0.620 + grain, 0.467 + grain].map(byte_round));
+        }
+    }
+    let evidence = fit::evidence_model_for(&current, &target, w as u32, h as u32);
+    let field = LocalField::solve(&current, &target, w as u32, h as u32, &evidence).expect("solve");
+    let cloud = || (0..w * h).filter(|&i| i % w >= w / 2);
+    assert!(
+        cloud().all(|i| testifying(&current[i], &target[i]) == [false, true, true]),
+        "premise: the cloud's red is across the clip, its green and blue are measured in both frames"
+    );
+    assert!(cloud().any(|i| field.weight[i] > 0.0), "premise: the evidence gives cloud pixels weight");
+    let render = field.render(&current);
+    // the outer thirds: away from the seam between the halves
+    let far_cloud = || (0..w * h).filter(|&i| i % w >= 2 * w / 3);
+    let mean_blue = |px: &[[f32; 3]]| far_cloud().map(|i| px[i][2] as f64).sum::<f64>() / far_cloud().count() as f64;
+    let (from, to, blue) = (mean_blue(&current), mean_blue(&target), mean_blue(&render));
+    assert!(
+        blue < from + 0.5 * (to - from),
+        "the cloud's blue comes more than half of the way from {from:.3} to {to:.3}: {blue:.4}"
+    );
+    let grey_moved = (0..w * h).filter(|&i| i % w < w / 3)
+        .map(|i| (0..3).map(|c| (render[i][c] - current[i][c]).abs()).fold(0.0f32, f32::max))
+        .fold(0.0f32, f32::max);
+    assert!(grey_moved < 4.0 / 255.0, "the grey the target leaves alone stays within 4 codes: {grey_moved:.4}");
 }
 
 /// Probe 1 of 2: export exactly what `LocalField::solve` consumed so the NumPy
