@@ -143,6 +143,70 @@ impl EvidenceModel {
         self.paired_share() >= EVIDENCE_MIN_SHARE
     }
 
+    /// The source weights of a control that answers per PLACE — the colour
+    /// field (`fit_zoned::field::field_testimony`): [`Self::source_weights`]
+    /// with the population line lifted (v1.18.0, J150).
+    ///
+    /// A value range earns its weight on two grounds ([`evidence_range`]):
+    /// both frames POPULATE it (`EVIDENCE_MIN_SHARE` of the population on
+    /// each side), and its structure survives. The first is a fact about a
+    /// distribution. A control that answers for a value range is estimated
+    /// from that range's population, and under 1.5 % a share is not one. A
+    /// control that answers per place is not estimated per range: it is
+    /// solved vertex by vertex from the pairs that reach each vertex, under a
+    /// floor and a regulariser of its own (`fit_field`), and whether index
+    /// `i` is a pair does not depend on how many other pixels of the frame
+    /// share its luma. Read through the population line, a small population
+    /// had no witness. Round V14, the sunset street (p40, 0.85), on the
+    /// frame the field is solved on: six of the base frame's seventeen luma
+    /// ranges, the five brightest among them, hold 5.0 % of it
+    /// between them and none reaches the line, so the two brightest luma
+    /// bands of the clouds over the horizon weighed 0.000 in
+    /// the field's solve — their pair weight is 0.92 and 0.91 — and the
+    /// one control that answers per place left them where the global
+    /// controls had put them, pink-white against a yellow-orange target:
+    /// 37.25 / 45.49 dE76 before the field, 34.39 / 43.98 under it,
+    /// 13.19 / 20.16 when the same solve is given those pixels' pair weights
+    /// (the diagnostic build's planes and the NumPy model of the solve, which
+    /// reads those two bands of the build's own render to 0.01 of the build;
+    /// rel1180 fieldproto, 2026-11-13). What is left there is the white-clip
+    /// rule's (`fit_field::testifies`), J150's second half.
+    /// The frame's mean hid it — 2.81 with those bands as they
+    /// shipped — and the frame's controls cannot carry it: the blue-curve
+    /// cap v1.17.1 fitted there costs every other highlight of the frame,
+    /// and the joint objective sets it back to zero.
+    ///
+    /// So a pixel of a range that is unpopulated, and only unpopulated — the
+    /// structural half of the verdict is asked as the range's own verdict
+    /// asks it ([`range_survival`]) — weighs what it would in a populated
+    /// range: its membership, its structural pairing weight, and the range's
+    /// two-sided share over its supported source share. Every other pixel
+    /// keeps its source weight bit for bit, and the controls that answer per
+    /// range keep reading [`Self::source_weights`]. A LAYOUT member is not a
+    /// pair (`fit_zoned::field::admit_cells`): what speaks for it is its
+    /// class's population, and that weight keeps the line.
+    pub(crate) fn per_place_source_weights(&self) -> Vec<f32> {
+        let mut weights = self.source_weights.clone();
+        for (i, weight) in weights.iter_mut().enumerate() {
+            let (Some(pixel), Some(&member), Some(&spatial)) =
+                (self.source_pixels.get(i), self.source_membership.get(i), self.spatial_weights.get(i))
+            else {
+                continue;
+            };
+            let Some(range) = self.luma.get(evidence_luma_bin(luma601(pixel))) else { continue };
+            if (range.source_populated && range.target_populated) || range.source_evidence_share <= 0.0 {
+                continue;
+            }
+            let survival = range_survival(
+                range.source_evidence_share, range.source_share, range.target_evidence_share, range.target_share,
+            );
+            if member > 0.0 && (self.globally_same_content || survival >= EVIDENCE_RANGE_SURVIVAL_MIN) {
+                *weight = member * spatial * range.two_sided_share / range.source_evidence_share;
+            }
+        }
+        weights
+    }
+
     /// `weights` with every absent pixel's weight taken to zero — THE
     /// population rule for a zone's pair weights. Borrowed when every pixel
     /// is present, so a pair with nothing absent runs on its own bytes.
@@ -314,6 +378,17 @@ pub fn evidence_hue_band(p: &[f32; 3]) -> Option<usize> {
     Some(if w1 < 0.5 { b0 } else { b1 })
 }
 
+/// A range's structural survival: the share of its population the spatial
+/// evidence still supports, on the weaker of the two sides. One statement
+/// for the range's own verdict ([`evidence_range`]) and for the per-place
+/// weights, which ask the structural half of that verdict alone
+/// ([`EvidenceModel::per_place_source_weights`]).
+fn range_survival(
+    source_evidence_share: f32, source_share: f32, target_evidence_share: f32, target_share: f32,
+) -> f32 {
+    (source_evidence_share / source_share.max(1e-6)).min(target_evidence_share / target_share.max(1e-6))
+}
+
 fn evidence_range(
     label: String,
     source_members: &[f32],
@@ -359,8 +434,8 @@ fn evidence_range(
             (sum + m * w * d, weight + m * w)
         });
     let divergence = if div_weight > 0.0 { div_sum / div_weight } else { f32::INFINITY };
-    let structural_survival = (source_evidence_share / source_share.max(1e-6))
-        .min(target_evidence_share / target_share.max(1e-6));
+    let structural_survival =
+        range_survival(source_evidence_share, source_share, target_evidence_share, target_share);
     let weight = if source_populated
         && target_populated
         && (globally_same_content || structural_survival >= EVIDENCE_RANGE_SURVIVAL_MIN)

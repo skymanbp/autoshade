@@ -976,6 +976,20 @@ pub(super) struct PairedLayout {
 ///   Their weight is scaled by the membership the partitions agree on, in
 ///   the model and in the layout plane alike.
 ///
+/// …and one reading says where index `i` IS a pair that the report's weights
+/// leave out (J150):
+///
+/// * A SMALL VALUE RANGE. The report's weights give a luma range nothing
+///   unless both frames hold 1.5 % of the frame in it — the line under which
+///   a share is not a population, which is what a control that answers per
+///   range is estimated from. The field is not estimated per range, and a
+///   pair is a measurement whatever the size of its range: the testimony
+///   takes each such pixel at its pair weight
+///   ([`fit::EvidenceModel::per_place_source_weights`], where the sunset
+///   street's brightest sky bands are measured). The layout plane is not
+///   lifted with it: a layout member is not a pair, and what speaks for it
+///   is its class's population.
+///
 /// The do-no-harm readings keep the report's own ruler: what the field may be
 /// SOLVED from is this function's question, what the frame is JUDGED by is
 /// not. The analysis solve at the head of the sequencer
@@ -989,6 +1003,7 @@ fn field_testimony(evidence: &fit::EvidenceModel, layout: &PairedLayout) -> (fit
         model.source_weights.fill(0.0);
         return (model, Vec::new());
     }
+    model.source_weights = evidence.per_place_source_weights();
     if layout.split.len() != n {
         return (model, layout.paired.clone());
     }

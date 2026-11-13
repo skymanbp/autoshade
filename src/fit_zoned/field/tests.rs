@@ -757,13 +757,98 @@ fn two_photographs_get_no_colour_field() {
 
 /// …and a frame that pairs somewhere is one scene: the repainted fixture as
 /// it is — its left half byte-identical on both sides — keeps every weight
-/// the report gave it, with no segmentation to say any pair is split.
+/// the report gave it, with no segmentation to say any pair is split. (A
+/// pixel the report gave NO weight may gain its pair weight, J150 — the test
+/// below.)
 #[test]
 fn a_frame_that_pairs_somewhere_testifies_as_it_did() {
     let (src, tgt) = (repainted_right_half(false), repainted_right_half(true));
     let (_, _, _, _, report) = field_probe(&src, &tgt);
     assert!(report.evidence.pairs_a_population(), "premise: the untouched half pairs");
     let (testimony, layout) = field_testimony(&report.evidence, &PairedLayout::default());
-    assert_eq!(testimony.source_weights, report.evidence.source_weights);
+    let given = &report.evidence.source_weights;
+    assert!(
+        testimony.source_weights.iter().zip(given).all(|(t, e)| if *e > 0.0 { t == e } else { *t >= 0.0 }),
+        "every weight the report gave is kept bit for bit"
+    );
     assert!(layout.is_empty(), "no segmentation, no layout");
+}
+
+/// J150's toy at analysis size: a textured mid-grey frame, the same pixel
+/// for pixel on both sides, with one bright textured patch of 40 x 24 pixels
+/// (0.98 % of the frame — under the population line in every luma range it
+/// touches) that the target shows warmer, its blue at 0.70.
+fn sparse_bright_patch(target: bool) -> (Vec<[f32; 3]>, u32, u32) {
+    let (w, h) = (384u32, 256u32);
+    let hash = |i: u32| {
+        let mut v = i.wrapping_mul(747796405).wrapping_add(2891336453);
+        v ^= v >> 16;
+        v = v.wrapping_mul(2246822519);
+        v ^= v >> 13;
+        (v % 10_000) as f32 / 10_000.0 - 0.5
+    };
+    let pixels = (0..w * h)
+        .map(|i| {
+            let (x, y) = (i % w, i / w);
+            if in_bright_patch(x, y) {
+                let v = 0.80 + 0.06 * hash(i);
+                [v, v, if target { 0.70 * v } else { v }]
+            } else {
+                [0.30 + 0.20 * (y as f32 / (h - 1) as f32) + 0.06 * hash(i); 3]
+            }
+        })
+        .collect();
+    (pixels, w, h)
+}
+
+fn in_bright_patch(x: u32, y: u32) -> bool {
+    (160..200).contains(&x) && (100..124).contains(&y)
+}
+
+/// J150. A pair testifies to the field whatever the size of its value range.
+/// The patch is 0.98 % of the frame, so every luma range it touches is under
+/// the population line and the report's weights give its pixels nothing —
+/// rightly, for a control that answers per range. They are pairs all the
+/// same (the frame's structure is the same pixel for pixel), the field
+/// answers per place, and on the report's weights it has no witness there:
+/// the patch stays where it was. On the testimony each of its pixels weighs
+/// its pair weight and the field carries the patch to its target. MUTATION:
+/// in `field_testimony`, drop the `per_place_source_weights` line — the
+/// testimony is the report's weights and the patch does not move.
+#[test]
+fn a_pair_in_a_small_value_range_testifies_to_the_field() {
+    let ((current, w, h), (target, _, _)) = (sparse_bright_patch(false), sparse_bright_patch(true));
+    let evidence = fit::evidence_model_for(&current, &target, w, h);
+    let (testimony, _) = field_testimony(&evidence, &PairedLayout::default());
+    let n = current.len();
+    let patch: Vec<usize> = (0..n).filter(|i| in_bright_patch(*i as u32 % w, *i as u32 / w)).collect();
+    assert_eq!(patch.len(), 960, "premise: the patch is 0.98 % of the frame");
+    assert!(
+        patch.iter().all(|&i| evidence.source_weights[i] == 0.0),
+        "premise: the report's weights give a range under the population line nothing"
+    );
+    let pair_weight = patch.iter().map(|&i| testimony.source_weights[i]).sum::<f32>() / patch.len() as f32;
+    assert!(pair_weight > 0.5, "the patch's pixels testify at their pair weight (mean {pair_weight:.3})");
+    assert!(
+        (0..n).all(|i| evidence.source_weights[i] == 0.0 || testimony.source_weights[i] == evidence.source_weights[i]),
+        "…and every weight the report gave is kept bit for bit"
+    );
+    // The shipped solve's form: support-free, refined, pass B's gain.
+    let solve = |model: &fit::EvidenceModel| {
+        LocalField::solve_with(
+            &current, &target, w, h, model, crate::fit_field::TIKHONOV, crate::fit_field::SMOOTH,
+            crate::fit_field::ITERATIONS, FieldSolveOpts { gain: 0.607, local_support: false, refine: true },
+        )
+        .expect("the toy solves")
+        .render(&current)
+    };
+    // The share of the patch's blue ask the field carries: 0 = not moved, 1 = on the target.
+    let carried = |out: &[[f32; 3]]| -> f32 {
+        let moved: f32 = patch.iter().map(|&i| out[i][2] - current[i][2]).sum();
+        let asked: f32 = patch.iter().map(|&i| target[i][2] - current[i][2]).sum();
+        moved / asked
+    };
+    let (plain, lawful) = (carried(&solve(&evidence)), carried(&solve(&testimony)));
+    assert!(plain < 0.10, "premise: with no witness in the patch the field leaves it ({plain:.3} of the ask)");
+    assert!(lawful > 0.50, "on the testimony the field carries the patch toward its target ({lawful:.3} of the ask)");
 }
