@@ -4840,8 +4840,13 @@ than 1 (`asks_curve::segment_caps`, a per-segment bound inside the same
 projection), and a knot is dropped only where the chord that replaces its
 two segments is no steeper than the least of their bounds (`chord_inside`),
 so the promise holds exactly on the rounded curve. With every knot held
-only the identity is left and the asks offer no start: a frame whose every
-range is a population's carries its level on the exposure. From strength
+only the identity is left, and the start is still offered: the frame the
+other classes leave, its tone absent, solved like any carrier. The hold
+changes what the start states, never whether it is solved — withdrawn
+there, as the rule first read, the pair of one population laid out two ways
+shipped the stage's exposure of 0.11 for an edit with no tone in it
+(`every_tone_carrier_is_solved_and_a_chroma_only_edit_ships_no_tone`, red
+on the online run of that first reading). From strength
 0.85 nothing is held and the curve is what it was. The fixture reads 0.0467
 to 0.0141 with its sky within one code of where it stood (the pin of
 2026-11-11 is 0.0155). No constant is new: the bound is the reading's own 1.

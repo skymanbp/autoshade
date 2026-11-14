@@ -345,7 +345,22 @@ pub(super) fn fit_atmosphere_from_parts(
                 curve.iter().map(|k| (k.input, k.output)).collect::<Vec<_>>()
             );
         }
-        if !curve.is_empty() {
+        // The hold changes what this start STATES, never whether it is
+        // offered (J155-C). With every range held the curve is the identity
+        // and the start is the frame the other classes leave: the tone
+        // absent, solved like any other carrier. Withdrawn there, as J155
+        // first read, the pair of one population laid out two ways shipped
+        // the stage's exposure of 0.11 for an edit with no tone in it
+        // (`every_tone_carrier_is_solved_and_a_chroma_only_edit_ships_no_tone`,
+        // the online run of 02922a8). Where the asks are no curve unheld
+        // either, nothing is offered, as before; and from 0.85 nothing is
+        // held, so this is the test it was.
+        let offered = !curve.is_empty()
+            || (withhold && {
+                let free: Vec<(f32, f32, f32, bool)> = cell_asks.iter().map(|&(l, a, m, _)| (l, a, m, false)).collect();
+                !super::asks_curve::asks_tone_curve(&free, budget.slope.0, budget.slope.1).is_empty()
+            });
+        if offered {
             let mut alt = toneless;
             alt.tone_curve = curve;
             alternatives.push(("the asks carry the tone", alt));

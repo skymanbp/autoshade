@@ -57,8 +57,9 @@ const COLLINEAR_CODES: f64 = 0.5;
 /// rises at most its run after it.
 /// Empty where nothing asks or the asks are the identity — and where every
 /// knot is held: from the fixed start to the fixed end at slopes of at most
-/// 1 there is only the identity, and a frame whose every range is a
-/// population's carries its level on the exposure.
+/// 1 there is only the identity. The caller still offers the start there
+/// (`atmosphere`: the frame the other classes leave, its tone absent) — the
+/// hold changes what the start states, not whether it is solved.
 ///
 /// Why the hold (J155, 2026-11-14). Until then the knots were the raw asks
 /// under the budget alone. A population's asks of two neighbouring ranges

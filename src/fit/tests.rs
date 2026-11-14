@@ -3288,6 +3288,10 @@ fn atmosphere_saturation_cap_is_load_bearing() {
 ///
 /// MUTATION THIS KILLS: solve a carrier only where its repaired start reads
 /// a lower F or J* than the best finished solve (the loop's gate until J152).
+/// MUTATION (J155-C): withdraw the asks' start where the hold leaves its
+/// curve the identity — every range of this pair is a population's and the
+/// fit withholds — and the stage's exposure of 0.11 ships, as the online
+/// run of 02922a8 read. The start is offered there with its tone absent.
 #[test]
 fn every_tone_carrier_is_solved_and_a_chroma_only_edit_ships_no_tone() {
     let (src, tgt) = structural_permutation_pair();
