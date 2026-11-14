@@ -219,6 +219,73 @@ fn auto_tries_the_statement_at_74_even_on_an_accept() {
     assert!(notes.iter().any(|n| n.key == keys::STATEMENT_CHOSEN));
 }
 
+/// Today's chain with a guided round bought: the first look says revise at
+/// `first` with an instruction, the revision (exposure 0.4) passes the
+/// verifier, and the ONE look at both develops prefers `preferred` ("A" the
+/// held develop, "B" the revision) and scores it `second`.
+fn guided_script(first: u32, preferred: &str, second: u32) -> Vec<String> {
+    vec![
+        propose_reply(json!({ "exposure_ev": 0.3, "rationale": "first" })),
+        verdict_reply("accept", None),
+        judgement("revise", first, Some("lift the shadows a little")),
+        propose_reply(json!({ "exposure_ev": 0.4, "rationale": "second" })),
+        verdict_reply("accept", None),
+        propose_reply(json!({ "preferred": preferred, "score": second, "decision": "revise", "critique": "seen both", "hint": null })),
+    ]
+}
+
+/// The gate reads the LAST judgement of the develop the loop holds, not the
+/// first look's: 70 at first, the revision not preferred, and the one look
+/// scores the held develop 80 — good, so it stands and nothing more is spent.
+///
+/// MUTATION: drop the `KeptHeld` arm's refresh of the held judgement — the
+/// gate reads the first look's 70, the statement call is made on the exhausted
+/// script, and this goes red.
+#[test]
+fn auto_reads_the_one_looks_score_of_a_kept_develop_not_the_first_looks() {
+    let (recipe, _, notes, bodies) = run(AnalysisApproach::Auto, guided_script(70, "A", 80), true, true);
+    assert_eq!(bodies.len(), 6, "propose, verify, judge, and the guided round's propose, verify, choice");
+    assert!(!asks(&bodies, "look_statement"));
+    assert_eq!(recipe.exposure_ev, 0.3, "the held develop is returned");
+    assert!(notes.iter().any(|n| n.key == keys::STATEMENT_NOT_NEEDED), "{}", recipe.rationale);
+    assert!(recipe.rationale.contains("scored the controls develop 80/100 — good"), "{}", recipe.rationale);
+}
+
+/// The same reading on the other side of the band edge: 86 at first, the
+/// revision not preferred, and the one look scores the held develop 70 —
+/// clearly improvable, so the stated look IS tried (and here preferred).
+///
+/// MUTATION: the same dropped refresh — the gate reads the first look's 86,
+/// no statement is asked for, and this goes red.
+#[test]
+fn auto_tries_the_statement_when_the_one_look_scores_a_kept_develop_below_the_band() {
+    let mut s = guided_script(86, "A", 70);
+    s.push(statement_reply());
+    s.push(choice("B"));
+    let (recipe, _, notes, bodies) = run(AnalysisApproach::Auto, s, true, true);
+    assert_eq!(bodies.len(), 8, "the guided round's six, then the statement and the choice of the two develops");
+    assert!(asks(&bodies[6..7], "look_statement") && asks(&bodies[7..], "judge_choice"));
+    assert_eq!(recipe.exposure_ev, 0.5, "the statement's develop is adopted");
+    assert!(notes.iter().any(|n| n.key == keys::STATEMENT_CHOSEN), "{}", recipe.rationale);
+}
+
+/// An ADOPTED revision is judged by the look that adopted it: 70 at first,
+/// the revision preferred and scored 82 — the revision stands and nothing
+/// more is spent.
+///
+/// MUTATION: drop the `Adopted` arm's refresh of the held judgement — the gate
+/// reads the 70 of the develop that was replaced, the statement call is made
+/// on the exhausted script, and this goes red.
+#[test]
+fn auto_reads_an_adopted_revisions_own_score() {
+    let (recipe, _, notes, bodies) = run(AnalysisApproach::Auto, guided_script(70, "B", 82), true, true);
+    assert_eq!(bodies.len(), 6);
+    assert!(!asks(&bodies, "look_statement"));
+    assert_eq!(recipe.exposure_ev, 0.4, "the adopted revision is returned");
+    assert!(notes.iter().any(|n| n.key == keys::STATEMENT_NOT_NEEDED), "{}", recipe.rationale);
+    assert!(recipe.rationale.contains("scored the controls develop 82/100 — good"), "{}", recipe.rationale);
+}
+
 /// `Auto` with the judge switched off: no judgement exists, today's develop
 /// stands and no statement is asked for.
 ///
