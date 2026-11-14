@@ -113,9 +113,9 @@ enum Command {
         /// committed strength it is at worst 17 calls (10 with images, 17
         /// high-detail), plus ~10-20% more output tokens per proposal. The
         /// default `--approach auto` adds 2 image calls (4 high-detail frames)
-        /// and one local reverse fit only when the visual judge did not accept
-        /// the controls develop: 13 calls, 19 with --deep. `batch` never does
-        /// this.
+        /// and one local reverse fit only when the visual judge scores the
+        /// controls develop below 75 of 100: 13 calls, 19 with --deep. `batch`
+        /// never does this.
         #[arg(long)]
         deep: bool,
         /// SHOW the model the reference photos, not only their look phrases:
@@ -129,12 +129,13 @@ enum Command {
         /// How the AI answers: `controls` (it proposes slider values),
         /// `statement` (it states how each area of the finished picture should
         /// look, in CIELAB numbers, and a local reverse fit finds the settings),
-        /// or `auto` (the controls answer first; when the visual judge does not
-        /// accept it, the stated look too, and one visual comparison keeps the
-        /// better develop, the statement's only when it wins). The two extra
-        /// image calls and the local reverse fit happen only when the judge did
-        /// not accept the controls develop. `auto` and `statement` need a RAW
-        /// and the image-model key, else `controls` runs.
+        /// or `auto` (the controls answer first; when the visual judge scores it
+        /// below 75 of 100, its own "clearly improvable" band, the stated look
+        /// too, and one visual comparison keeps the better develop, the
+        /// statement's only when it wins). The two extra image calls and the
+        /// local reverse fit happen only then; at 75 or more the controls
+        /// develop stands. `auto` and `statement` need a RAW and the image-model
+        /// key, else `controls` runs.
         #[arg(long, value_parser = parse_approach, default_value = "auto")]
         approach: pipeline::AnalysisApproach,
     },

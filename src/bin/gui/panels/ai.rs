@@ -350,7 +350,7 @@ impl AutoShadeApp {
                 ui.label(tr(lang, "Analysis method"));
                 ui.radio_value(&mut self.analysis_approach, AnalysisApproach::Auto, tr(lang, "Auto")).on_hover_text(tr(
                     lang,
-                    "The AI proposes the slider values first. Only when the visual review does not accept that develop does it also state the look, reverse-fit it locally and look at both develops side by side, keeping the stated look only when it wins. COST: the same as Controls when the review accepts; otherwise two more image calls and one local reverse fit (minutes).",
+                    "The AI proposes the slider values first. Only when the visual review scores that develop below 75 of 100 (its own 'clearly improvable' band) does it also state the look, reverse-fit it locally and look at both develops side by side, keeping the stated look only when it wins. COST: the same as Controls when the review scores 75 or more; otherwise two more image calls and one local reverse fit (minutes).",
                 ));
                 ui.radio_value(&mut self.analysis_approach, AnalysisApproach::Statement, tr(lang, "Stated look")).on_hover_text(tr(
                     lang,
@@ -412,7 +412,7 @@ impl AutoShadeApp {
                      either one alone does it; the Deep thinking tooltip has the numbers. \
                      These are the Controls figures: the 「Auto」 method adds two \
                      image calls (4 high-detail frames) and one local reverse fit, only when \
-                     the visual review did not accept the Controls develop.",
+                     the visual review scores the Controls develop below 75 of 100.",
                 )))
                 .clicked()
             {

@@ -1735,8 +1735,9 @@ frame is moved to them — a monotone piecewise-cubic (PCHIP) tone curve per are
 through the anchors, the band colour offsets blended along L*, the areas
 blended by the soft sky mask — and the same-scene reverse fit reproduces that
 synthetic target as an ordinary recipe. `auto` runs the controls answer
-first and tries the statement only when the visual judge did not accept that
-answer; then it keeps the statement's only when the judge, shown the two
+first and tries the statement only when the visual judge scores that answer
+below 75 of 100 (its own "clearly improvable" band); then it keeps the
+statement's only when the judge, shown the two
 deliverables side by side, prefers it. The numeric core was specified by a
 NumPy prototype first; its closed-form 96x64 golden file
 (`src/fixtures/stmt-golden.json`) is reproduced by the Rust tests.

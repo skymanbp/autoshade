@@ -1354,9 +1354,10 @@ develop** (Analysis, Adjust the selected variant, Reference library).
   naming the look; the neutral develop is moved to those numbers, and the
   local reverse fit finds the ordinary recipe that renders it. **Auto**
   (`auto`, the default for AI Analyze and `autoshade analyze`) runs the
-  Controls analysis exactly as before. When its visual review accepts the
-  result, that result stands and nothing more is spent. When the review does
-  not accept it, or asks for changes, the stated look is made too and the
+  Controls analysis exactly as before. When its visual review scores the
+  result 75 of 100 or more (good, with at most minor polish left), that result
+  stands and nothing more is spent. When the review scores it below 75 (its
+  own "clearly improvable" band), the stated look is made too and the
   vision model is shown the two finished develops side by side; the stated
   look's develop is kept only when the model prefers it, and a tie or any
   failure keeps the Controls answer. Only in that case does `auto` cost more

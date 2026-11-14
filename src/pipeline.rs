@@ -278,13 +278,14 @@ pub fn produce_recipe(
         .map(|(recipe, verdict, notes, _)| (recipe, verdict, notes))
 }
 
-/// [`produce_recipe`], also answering the visual judge's LAST decision on the
-/// develop it returns — the one the judge loop HOLDS at its end: an adopted
-/// revision's re-judgement, the one-look choice's word on a held develop it
-/// preferred, else the last absolute judgement. `None` when no judgement of
-/// it exists (the judge switched off, no model produced the recipe, the judge
-/// unavailable). Read by `produce_develop`'s `auto`, which tries the stated
-/// look only when this is not accept; every other caller goes through
+/// [`produce_recipe`], also answering the visual judge's LAST judgement (score,
+/// decision, critique, hint) of the develop it returns — the one the judge
+/// loop HOLDS at its end: an adopted revision's re-judgement, the one-look
+/// choice's word on a held develop it preferred, else the last absolute
+/// judgement. `None` when no judgement of it exists (the judge switched off,
+/// no model produced the recipe, the judge unavailable). Read by
+/// `produce_develop`'s `auto`, which tries the stated look only when its score
+/// is below `develop::STATEMENT_BELOW_SCORE`; every other caller goes through
 /// [`produce_recipe`] and is unchanged.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn produce_recipe_judged(
@@ -297,7 +298,7 @@ pub(crate) fn produce_recipe_judged(
     req: GradeRequest,
     judge: bool,
     sink: &dyn crate::diag::Sink,
-) -> Result<(EditRecipe, Verdict, Vec<crate::rationale::Note>, Option<Decision>)> {
+) -> Result<(EditRecipe, Verdict, Vec<crate::rationale::Note>, Option<crate::advisor::Judgement>)> {
     // The third element (L12#2B): every DETERMINISTIC rationale fragment this
     // call appended, as typed notes rendering the rationale string's SUFFIX
     // (the prefix is the model's own prose). In-process only — the GUI
@@ -925,11 +926,11 @@ pub(crate) fn produce_recipe_judged(
     // with images, 17 frames) — the
     // numbers the GUI tooltip and `--deep`'s help quote. The approach `auto`
     // (`produce_develop`, the interactive default) adds, only when this loop's
-    // last judgement of the held develop (`held_judgement`) is not accept, two
-    // image calls (the look statement with one frame, the choice with three)
-    // and one local reverse fit: 13 calls (8 with images, 13 frames), 19 with
-    // deep thinking (12 with images, 21 frames).
-    let mut held_judgement: Option<Decision> = None;
+    // last score of the held develop (`held_judgement`) is below 75, two image
+    // calls (the look statement with one frame, the choice with three) and one
+    // local reverse fit: 13 calls (8 with images, 13 frames), 19 with deep
+    // thinking (12 with images, 21 frames).
+    let mut held_judgement: Option<crate::advisor::Judgement> = None;
     if judge && can_revise {
         // The judge scores the frame the deliverable will BE (`held_view`: an
         // ADJUST's bitmap masks and lens opinion included, the baked start
@@ -1038,7 +1039,7 @@ pub(crate) fn produce_recipe_judged(
                 let mut rounds_done = 0usize;
                 loop {
                     // `current` describes the recipe held right now.
-                    held_judgement = Some(current.decision.clone());
+                    held_judgement = Some(current.clone());
                     let score1 = format!("{:.0}", current.score);
                     // R20's rule owns round 1 (a non-Accept verdict WITH an
                     // instruction); the target and the cap own every round
@@ -1092,7 +1093,7 @@ pub(crate) fn produce_recipe_judged(
                             thinking = candidate_thinking;
                             opinions = candidate_opinions.get();
                             verdict = v2;
-                            held_judgement = Some(second.decision.clone());
+                            held_judgement = Some(second.clone());
                             if verbose {
                                 println!(
                                     "judge    : re-scored {:.0}/100 — adopted",
@@ -1148,7 +1149,7 @@ pub(crate) fn produce_recipe_judged(
                         }
                         VisualRound::KeptHeld { held } => {
                             // The one look's word on the develop that stays.
-                            held_judgement = Some(held.decision.clone());
+                            held_judgement = Some(held.clone());
                             if verbose {
                                 println!(
                                     "judge    : shown both, preferred the held develop ({:.0}/100) — revision discarded",

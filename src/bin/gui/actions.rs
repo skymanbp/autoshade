@@ -3489,9 +3489,9 @@ impl AutoShadeApp {
             // many minutes; the busy line owns that wait up front.
             tr(lang, "analyzing with AI… then the stated look and its reverse fit (local, can take many minutes)").into()
         } else {
-            // `Auto`: the same wait, but only if the visual review does not
-            // accept the controls develop.
-            tr(lang, "analyzing with AI… the stated look and its reverse fit follow only if the visual review does not accept the result (local, can take many minutes)").into()
+            // `Auto`: the same wait, but only if the visual review scores the
+            // controls develop below 75 of 100.
+            tr(lang, "analyzing with AI… the stated look and its reverse fit follow only if the visual review scores the result below 75 of 100 (local, can take many minutes)").into()
         };
         // Both style inputs travel as one request (R23-2): the strength, and
         // whether the reference photos go along as images. Read

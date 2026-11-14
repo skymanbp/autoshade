@@ -7,13 +7,13 @@
 //!   CIELAB numbers and the reverse fit finds the settings
 //!   ([`super::statement::statement_recipe`]).
 //! * AUTO — the controls answer exactly as the caller asked for it; the stated
-//!   look is tried only when the visual judge's last judgement of the develop
-//!   that chain HOLDS at its end is not accept. Then the statement's develop
-//!   and today's go side by side in ONE look (`advisor::judge_choice`), and
-//!   the statement's is adopted only when the judge prefers it, so the new
-//!   path can replace today's answer only by winning the comparison. An
-//!   accepted develop, or one no judge looked at, stands and nothing more is
-//!   spent.
+//!   look is tried only when the visual judge's last SCORE of the develop that
+//!   chain HOLDS at its end is below [`STATEMENT_BELOW_SCORE`] (the rubric's
+//!   "clearly improvable" band). Then the statement's develop and today's go
+//!   side by side in ONE look (`advisor::judge_choice`), and the statement's
+//!   is adopted only when the judge prefers it, so the new path can replace
+//!   today's answer only by winning the comparison. A develop scored good, or
+//!   one no judge looked at, stands and nothing more is spent.
 
 use std::path::Path;
 
@@ -21,7 +21,7 @@ use anyhow::Result;
 
 use super::statement::{StatementTools, statement_recipe};
 use super::{GradeRequest, Guide};
-use crate::advisor::{Decision, Verdict};
+use crate::advisor::{Decision, Judgement, Verdict};
 use crate::config::Config;
 use crate::rationale::{Note, keys};
 use crate::recipe::EditRecipe;
@@ -33,7 +33,8 @@ use crate::recipe::EditRecipe;
 #[serde(rename_all = "lowercase")]
 pub enum AnalysisApproach {
     /// The control values first; the stated look only when the visual judge
-    /// did not accept them, and then one visual comparison picks.
+    /// scores them below [`STATEMENT_BELOW_SCORE`], and then one visual
+    /// comparison picks.
     Auto,
     /// The stated look only, reverse-fitted.
     Statement,
@@ -84,16 +85,34 @@ fn statement_unavailable(
     }
 }
 
+/// `Auto` tries the stated look only when the visual judge's last score of
+/// the develop the controls chain holds is BELOW this: the edge of the
+/// judge's own rubric, sent with every judgement and every choice — "75-89
+/// good with minor polish left; 50-74 clearly improvable; below 50 the
+/// develop misses the photograph" (`advisor::judge`'s Develop rubric and the
+/// choice prompt; a test reads both from the requests sent, so this number
+/// and the prompt cannot drift apart silently).
+///
+/// The band and not the decision: on one photograph the judge scored the same
+/// kind of develop 86, 91, 91 and 91 while its decision flipped between accept
+/// and revise, and a "revise" at 86 carried a polish hint — that cost a
+/// reverse fit of half an hour and two more image calls on a develop its own
+/// rubric calls good. Near the band edge the decision is noise; the score band
+/// is not. Minor polish is the guided revision round's job, not the stated
+/// look's.
+pub const STATEMENT_BELOW_SCORE: f32 = 75.0;
+
 /// `Auto`'s one rule: the stated look is tried only when the visual judge's
-/// last judgement of the develop the controls chain holds was revise or
-/// reject. `Err` carries the note that says why it is not tried: the judge
-/// accepted that develop, or no judgement exists (the judge switched off, no
-/// model produced the recipe, the judge unavailable).
-fn statement_wanted(judged: Option<&Decision>) -> std::result::Result<(), &'static str> {
+/// last judgement of the develop the controls chain holds scored below
+/// [`STATEMENT_BELOW_SCORE`], whatever its decision; `Ok` carries that score.
+/// `Err` carries the note that says why it is not tried: the judge scored
+/// that develop good, or no judgement exists (the judge switched off, no model
+/// produced the recipe, the judge unavailable).
+fn statement_wanted(judged: Option<&Judgement>) -> std::result::Result<f32, Note> {
     match judged {
-        Some(Decision::Revise | Decision::Reject) => Ok(()),
-        Some(Decision::Accept) => Err(keys::STATEMENT_NOT_NEEDED),
-        None => Err(keys::STATEMENT_NOT_JUDGED),
+        Some(j) if j.score < STATEMENT_BELOW_SCORE => Ok(j.score),
+        Some(j) => Err(Note::new(keys::STATEMENT_NOT_NEEDED, vec![("score", format!("{:.0}", j.score))])),
+        None => Err(Note::plain(keys::STATEMENT_NOT_JUDGED)),
     }
 }
 
@@ -144,8 +163,9 @@ fn push(recipe: &mut EditRecipe, notes: &mut Vec<Note>, note: Note) {
 /// * `Statement` — the statement path, then ONE visual judgement of its
 ///   deliverable (the judge's first look) whose decision is the verdict.
 /// * `Auto` — `produce_recipe` as asked (its own judge loop untouched). When
-///   the judge's last judgement of the develop it returns is accept, or there
-///   is none, that develop stands and nothing more is spent. Otherwise the
+///   the judge's last score of the develop it returns is
+///   [`STATEMENT_BELOW_SCORE`] or more, or there is no judgement, that develop
+///   stands and nothing more is spent. Otherwise the
 ///   statement path, then ONE `judge_choice` between the two deliverables
 ///   (reference = the calibration-only develop, A = today's, B = the
 ///   statement's, all rendered from the RAW as delivered). B is adopted only
@@ -211,16 +231,17 @@ pub(crate) fn produce_develop_with(
     if req.approach == AnalysisApproach::Auto {
         let (mut held, held_verdict, mut held_notes, judged) =
             super::produce_recipe_judged(raw, pixels, cfg, verbose, guidance, base, req, judge, sink)?;
-        if let Err(key) = statement_wanted(judged.as_ref()) {
-            say(if key == keys::STATEMENT_NOT_NEEDED {
-                "the visual review accepted the controls develop — the stated look is not tried"
-            } else {
-                "the controls develop was not visually reviewed — the stated look is not tried"
-            });
-            push(&mut held, &mut held_notes, Note::plain(key));
-            return Ok((held, held_verdict, held_notes));
+        match statement_wanted(judged.as_ref()) {
+            Ok(score) => today = Some((held, held_verdict, held_notes, score)),
+            Err(note) => {
+                say(&match &judged {
+                    Some(j) => format!("the visual review scored the controls develop {:.0}/100 — good, the stated look is not tried", j.score),
+                    None => "the controls develop was not visually reviewed — the stated look is not tried".to_string(),
+                });
+                push(&mut held, &mut held_notes, note);
+                return Ok((held, held_verdict, held_notes));
+            }
         }
-        today = Some((held, held_verdict, held_notes));
     }
     with_references(raw, cfg, &req, |hits| {
         let style_look = crate::library::look_summary(hits);
@@ -228,7 +249,7 @@ pub(crate) fn produce_develop_with(
         let render = |r: &EditRecipe| -> Result<Vec<u8>> { jpeg(&(tools.render)(raw, r)?) };
         // The calibration-only develop: the picture both answers start from.
         let reference = || render(&super::calibration_recipe(super::photo_calibration(raw)));
-        let Some((mut held, held_verdict, mut held_notes)) = today else {
+        let Some((mut held, held_verdict, mut held_notes, score)) = today else {
             say("the stated look, then its reverse fit");
             let mut out = statement_recipe(raw, cfg, &req, direction, hits, tools, sink)?;
             if !judge {
@@ -271,7 +292,9 @@ pub(crate) fn produce_develop_with(
             };
             return Ok((out.recipe, verdict, out.notes));
         };
-        say("the visual review did not accept the controls develop — the stated look, then its reverse fit, then one look at both develops");
+        say(&format!(
+            "the visual review scored the controls develop {score:.0}/100 — clearly improvable: the stated look, then its reverse fit, then one look at both develops"
+        ));
         let st = match statement_recipe(raw, cfg, &req, direction, hits, tools, sink) {
             Ok(st) => st,
             Err(e) => {

@@ -1439,10 +1439,10 @@ pub mod keys {
     pub const STATEMENT_UNAVAILABLE: &str =
         " [The stated-look analysis cannot run here ({why}) — the controls analysis ran \
          instead]";
-    /// Approach "auto": the visual judge accepted the controls develop, so it
-    /// stands and nothing more was spent.
+    /// Approach "auto": the visual judge scored the controls develop good (75
+    /// or more), so it stands and nothing more was spent.
     pub const STATEMENT_NOT_NEEDED: &str =
-        " [The AI visual review accepted the controls develop, so the stated look was not tried]";
+        " [The AI visual review scored the controls develop {score}/100 — good, so the stated look was not tried]";
     /// Approach "auto": no visual judgement of the controls develop exists (the
     /// review off, unavailable, or no model proposal), so it stands.
     pub const STATEMENT_NOT_JUDGED: &str =

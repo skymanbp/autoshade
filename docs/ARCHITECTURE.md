@@ -1700,12 +1700,15 @@ and the Normal-mode presets are unchanged). The STATEMENT path
 returns the judge's decision as the verdict. `AnalysisApproach::Auto` (the
 desktop and `analyze` default) runs the controls chain exactly as asked
 (`pipeline::produce_recipe_judged`, which also returns the visual judge's
-last decision on the develop the judge loop holds at its end: an adopted
+last judgement of the develop the judge loop holds at its end: an adopted
 revision's re-judgement, the one-look choice's word on a kept develop, else
-the last absolute judgement). When that decision is accept, or there is none
-(judge off or unavailable, no model proposal), the controls answer stands
-with a `STATEMENT_NOT_NEEDED` / `STATEMENT_NOT_JUDGED` note and nothing more
-is spent. Otherwise the statement path runs, then ONE `judge_choice` on
+the last absolute judgement). When its score is 75 or more
+(`develop::STATEMENT_BELOW_SCORE`, the edge of the rubric's "clearly
+improvable" band, read instead of the decision, which flips between accept
+and revise near that edge), or there is no judgement (judge off or
+unavailable, no model proposal), the controls answer stands with a
+`STATEMENT_NOT_NEEDED` / `STATEMENT_NOT_JUDGED` note and nothing more is
+spent. Otherwise the statement path runs, then ONE `judge_choice` on
 deliverable renders from the RAW (reference = the calibration-only develop,
 A = the controls answer, B = the statement's); B is adopted only when
 preferred, and a tie, a failed comparison or a failed statement keeps A. The

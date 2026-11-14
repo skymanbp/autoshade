@@ -95,13 +95,13 @@ fn controls_is_byte_for_byte_todays_flow() {
     assert_eq!((recipe, verdict, notes.len()), (today.0, today.1, today.2.len()));
 }
 
-/// Today's chain whose judge does NOT accept: propose, verify, a revise with
-/// no instruction (so no guided round is bought — R20's rule).
+/// Today's chain whose judge scores it clearly improvable: propose, verify, a
+/// revise at 69 with no instruction (so no guided round is bought — R20's rule).
 fn revise_script() -> Vec<String> {
     vec![
         propose_reply(json!({ "exposure_ev": 0.3, "rationale": "first" })),
         verdict_reply("accept", None),
-        judgement("revise", 70, None),
+        judgement("revise", 69, None),
     ]
 }
 
@@ -112,60 +112,118 @@ fn auto_script(statement: String, choice_reply: String) -> Vec<String> {
     s
 }
 
+/// Today's chain with ONE first judgement and no guided round (no hint).
+fn judged_script(decision: &str, score: u32) -> Vec<String> {
+    vec![
+        propose_reply(json!({ "exposure_ev": 0.3, "rationale": "first" })),
+        verdict_reply("accept", None),
+        judgement(decision, score, None),
+    ]
+}
+
+/// The 86-revise case: the first look says revise at 86 with a polish hint,
+/// the guided round's revision is shown beside the held develop, and the
+/// choice keeps the held one — scored 86, decision still REVISE.
+fn polish_script() -> Vec<String> {
+    vec![
+        propose_reply(json!({ "exposure_ev": 0.3, "rationale": "first" })),
+        verdict_reply("accept", None),
+        judgement("revise", 86, Some("reduce sharpening to ~30")),
+        propose_reply(json!({ "exposure_ev": 0.4, "rationale": "second" })),
+        verdict_reply("accept", None),
+        propose_reply(json!({ "preferred": "A", "score": 86, "decision": "revise", "critique": "the held one", "hint": "reduce sharpening" })),
+    ]
+}
+
 /// Does any request body ask for this reply schema?
 fn asks(bodies: &[String], schema: &str) -> bool {
     bodies.iter().any(|b| b.contains(&format!("\"name\":\"{schema}\"")))
 }
 
-/// `Auto` with the judge ACCEPTING today's develop: nothing more is spent —
-/// no statement request, no choice request — today's develop is returned and
-/// one note says why.
+/// `Auto` with the judge scoring today's develop 86 and saying REVISE (a
+/// polish hint, the guided revision not preferred): 86 is in the rubric's
+/// "good" band, so nothing more is spent — no statement request, no choice
+/// beyond the guided round's own — today's develop is returned and the note
+/// gives the score.
 ///
-/// MUTATION: drop the `statement_wanted` gate (the stated look always tried)
-/// — the statement call is made, finds no scripted reply and fails, so the
-/// rationale carries the statement-failed note instead of the not-needed one
-/// and this goes red.
+/// MUTATION: turn the gate back into the decision rule (tried whenever the
+/// decision is not accept) — the statement call is made, finds no scripted
+/// reply and fails, so the not-needed note is missing and this goes red.
 #[test]
-fn auto_spends_nothing_more_when_the_judge_accepts_todays_develop() {
-    let (recipe, verdict, notes, bodies) = run(AnalysisApproach::Auto, controls_script(), true, true);
-    assert_eq!(bodies.len(), 3, "propose, verify, judge — and nothing else");
-    assert!(!asks(&bodies, "look_statement") && !asks(&bodies, "judge_choice"));
-    assert_eq!(recipe.exposure_ev, 0.3, "today's develop is returned");
-    assert_eq!(verdict.decision, Decision::Accept);
+fn auto_spends_nothing_more_when_the_judge_scores_todays_develop_good_even_on_a_revise() {
+    let (recipe, verdict, notes, bodies) = run(AnalysisApproach::Auto, polish_script(), true, true);
+    assert_eq!(bodies.len(), 6, "propose, verify, judge, and the guided round's propose, verify, choice");
+    assert!(!asks(&bodies, "look_statement"));
+    assert_eq!(bodies.iter().filter(|b| b.contains("\"name\":\"judge_choice\"")).count(), 1, "the guided round's own choice only");
+    assert_eq!(recipe.exposure_ev, 0.3, "the held develop is returned");
+    assert_eq!(verdict.decision, Decision::Accept, "the verifier's word on the held develop");
     assert!(notes.iter().any(|n| n.key == keys::STATEMENT_NOT_NEEDED), "{}", recipe.rationale);
+    assert!(recipe.rationale.contains("scored the controls develop 86/100 — good"), "{}", recipe.rationale);
     assert!(!notes.iter().any(|n| n.key == keys::STATEMENT_FAILED), "{}", recipe.rationale);
 }
 
-/// "Held at the end": the first look said revise and bought a guided round,
-/// and the one look at both kept the held develop with an ACCEPT. That
-/// judgement belongs to the develop that survives, so the stated look is not
-/// tried.
+/// The band the gate reads is the one the judge is told: the Develop rubric
+/// (the first look) and the choice prompt (the guided round) both still carry
+/// "75-89 good with minor polish left; 50-74 clearly improvable".
 ///
-/// MUTATION: read the FIRST judgement instead of the held develop's last one
-/// (drop the `KeptHeld` assignment in `produce_recipe_judged`) — the stated
-/// look is tried, fails on the exhausted script, and this goes red.
+/// MUTATION: edit either prompt's band sentence (or move the band edge) —
+/// this goes red, and `STATEMENT_BELOW_SCORE` must be revisited with it.
 #[test]
-fn auto_reads_the_judgement_of_the_develop_held_at_the_end() {
-    let script = vec![
-        propose_reply(json!({ "exposure_ev": 0.3, "rationale": "first" })),
-        verdict_reply("accept", None),
-        judgement("revise", 70, Some("lift the ground")),
-        propose_reply(json!({ "exposure_ev": 0.4, "rationale": "second" })),
-        verdict_reply("accept", None),
-        choice("A"),
-    ];
-    let (recipe, _, notes, bodies) = run(AnalysisApproach::Auto, script, true, true);
-    assert_eq!(bodies.len(), 6);
+fn the_rubric_the_judge_is_sent_carries_the_band_the_gate_reads() {
+    let (_, _, _, bodies) = run(AnalysisApproach::Auto, polish_script(), true, true);
+    let band = "75-89 good with minor polish left; 50-74 clearly improvable";
+    assert!(bodies[2].contains("\"name\":\"judgement\"") && bodies[2].contains(band), "the Develop rubric");
+    assert!(bodies[5].contains("\"name\":\"judge_choice\"") && bodies[5].contains(band), "the choice prompt");
+    assert_eq!(STATEMENT_BELOW_SCORE, 75.0, "the gate sits on the band edge the prompts name");
+}
+
+/// `Auto` with the judge scoring 91 and accepting: same — no statement.
+///
+/// MUTATION: try the statement whatever the score — it fails on the exhausted
+/// script and this goes red.
+#[test]
+fn auto_spends_nothing_more_when_the_judge_accepts_at_91() {
+    let (recipe, _, _, bodies) = run(AnalysisApproach::Auto, judged_script("accept", 91), true, true);
+    assert_eq!(bodies.len(), 3);
+    assert!(!asks(&bodies, "look_statement") && !asks(&bodies, "judge_choice"));
+    assert_eq!(recipe.exposure_ev, 0.3);
+    assert!(recipe.rationale.contains("91/100 — good"), "{}", recipe.rationale);
+}
+
+/// Exactly on the band edge (75) the develop is "good": it stands.
+///
+/// MUTATION: compare with `<=` instead of `<` — the statement is tried at
+/// 75, fails on the exhausted script, and this goes red.
+#[test]
+fn auto_at_exactly_75_keeps_todays_develop() {
+    let (recipe, _, notes, bodies) = run(AnalysisApproach::Auto, judged_script("revise", 75), true, true);
+    assert_eq!(bodies.len(), 3);
     assert!(!asks(&bodies, "look_statement"));
-    assert_eq!(recipe.exposure_ev, 0.3, "the held develop survives");
     assert!(notes.iter().any(|n| n.key == keys::STATEMENT_NOT_NEEDED), "{}", recipe.rationale);
+}
+
+/// The band rules, not the decision: at 74 with an ACCEPT the develop is
+/// "clearly improvable", so the statement IS tried (and here preferred).
+///
+/// MUTATION: skip the statement on an accept — this run asks no statement
+/// and goes red.
+#[test]
+fn auto_tries_the_statement_at_74_even_on_an_accept() {
+    let mut s = judged_script("accept", 74);
+    s.push(statement_reply());
+    s.push(choice("B"));
+    let (recipe, _, notes, bodies) = run(AnalysisApproach::Auto, s, true, true);
+    assert_eq!(bodies.len(), 5, "propose, verify, judge, statement, choice");
+    assert!(asks(&bodies[3..4], "look_statement") && asks(&bodies[4..], "judge_choice"));
+    assert_eq!(recipe.exposure_ev, 0.5);
+    assert!(notes.iter().any(|n| n.key == keys::STATEMENT_CHOSEN));
 }
 
 /// `Auto` with the judge switched off: no judgement exists, today's develop
 /// stands and no statement is asked for.
 ///
-/// MUTATION: treat "no judgement" like a revise — the statement call is made
-/// and fails, and this goes red.
+/// MUTATION: treat "no judgement" like a low score — the statement call is
+/// made and fails, and this goes red.
 #[test]
 fn auto_without_a_judge_keeps_todays_develop_and_asks_no_statement() {
     let script = vec![propose_reply(json!({ "exposure_ev": 0.3, "rationale": "first" })), verdict_reply("accept", None)];
@@ -176,7 +234,7 @@ fn auto_without_a_judge_keeps_todays_develop_and_asks_no_statement() {
     assert!(notes.iter().any(|n| n.key == keys::STATEMENT_NOT_JUDGED), "{}", recipe.rationale);
 }
 
-/// `Auto` with the judge saying revise scripts propose → verify → judge →
+/// `Auto` with the judge scoring 69 (revise) scripts propose → verify → judge →
 /// statement → choice, and adopts the statement's develop when the judge
 /// prefers it ("B").
 ///

@@ -97,7 +97,7 @@ pub(crate) struct AutoShadeApp {
     /// surface (batch, eval) is structurally unable to turn it on.
     pub(crate) deep_think: bool,
     /// How AI Analyze answers: the control values, and the stated look only
-    /// when the visual review did not accept them (the default), the stated
+    /// when the visual review scores them below 75 of 100 (the default), the stated
     /// look only, or the control values only. Persisted.
     pub(crate) analysis_approach: autoshade::pipeline::AnalysisApproach,
     pub(crate) style_embed: bool,
