@@ -1407,6 +1407,38 @@ pub mod keys {
     pub const JUDGE_UNAVAILABLE: &str =
         " [AI visual review unavailable ({e}) — the develop was not visually \
          checked]";
+
+    // --- the stated look (pipeline/statement.rs, pipeline/develop.rs) ---
+    /// The model's one sentence naming the look it stated (bounded model text).
+    pub const STATEMENT_LOOK: &str = " [Stated look: {look}]";
+    /// Which reference photographs the model said it followed as direct guides.
+    pub const STATEMENT_GUIDES: &str =
+        " [The stated look followed {n} reference photograph(s) as direct guides: {files}]";
+    /// No sky mask: the whole frame was stated as one area.
+    pub const STATEMENT_NO_SKY: &str =
+        " [No sky mask for the stated look ({e}) — the whole frame was stated as one area]";
+    /// The one visual judgement of the stated look's render (approach "statement").
+    pub const STATEMENT_JUDGE: &str =
+        " [AI visual review of the stated look: {score}/100 — {critique}]";
+    /// Approach "both": the judge, shown the two develops, preferred the stated look.
+    pub const STATEMENT_CHOSEN: &str =
+        " [Shown both develops, the AI judge preferred the stated look over the controls \
+         develop ({score}/100) — {critique}]";
+    /// Approach "both": the judge kept the controls develop (a tie keeps it too).
+    pub const STATEMENT_NOT_CHOSEN: &str =
+        " [Shown both develops, the AI judge kept the controls develop over the stated look \
+         ({score}/100) — {critique}]";
+    /// Approach "both": the comparison itself failed; the controls develop stands.
+    pub const STATEMENT_CHOICE_FAILED: &str =
+        " [The stated look could not be compared with the controls develop ({e}) — the \
+         controls develop stands]";
+    /// Approach "both": the statement path failed; the controls develop stands.
+    pub const STATEMENT_FAILED: &str =
+        " [The stated-look analysis failed ({e}) — the controls develop stands]";
+    /// The statement path cannot run on this develop; the controls analysis ran.
+    pub const STATEMENT_UNAVAILABLE: &str =
+        " [The stated-look analysis cannot run here ({why}) — the controls analysis ran \
+         instead]";
     /// R23-4: ONE intermediate round of the multi-round convergence loop. The
     /// terminal round keeps `JUDGE_ADOPTED` (so a single-round analysis — every
     /// default-path one — writes exactly what it wrote before this round), and

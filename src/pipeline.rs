@@ -20,6 +20,13 @@ use crate::xmp;
 // reply is read against the answer it revises.
 mod advise;
 pub use advise::analysis_fell_back;
+// ONE reverse fit run the way every entry runs it (CLI `match`, the desktop
+// reverse fit, the statement path of the analysis).
+mod fit_run;
+pub use fit_run::{FitRun, ZonedRun, run_fit};
+// The analysis that states a LOOK and lets the reverse fit find the settings.
+pub mod statement;
+mod statement_cache;
 // The stub config the analysis tests drive the chain with, for the judge's own tests.
 #[cfg(test)]
 pub(crate) use advise::tests::stub_cfg as advise_test_cfg;

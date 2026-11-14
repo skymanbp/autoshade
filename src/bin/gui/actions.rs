@@ -3824,42 +3824,28 @@ impl AutoShadeApp {
                             &autoshade::config::Config::load(),
                         ),
                     );
+                    // ONE fit, the shared sequence (`pipeline::run_fit`): the
+                    // zoned pass needs the photo's real path (the semantic
+                    // raster's home); the target-geometry note and the
+                    // terminal full-size reading ride every run.
                     let run_zoned = |seg_on: bool|
                      -> anyhow::Result<(autoshade::fit::FitReport, Option<std::path::PathBuf>)> {
-                        Ok(match (seg_on, &src_path) {
-                            (true, Some(p)) => {
-                                let cfg = autoshade::config::Config::load();
-                                let seg =
-                                    autoshade::segment::SegmentOpts::from_config(&cfg, "sky");
-                                // Drawn in the source's frame, and marked so.
-                                let mask = autoshade::store::OwnedRaster::claim(p, "mask-zone-sky")?
-                                    .with_frame(autoshade::render::fit_raster_frame(&base, &fit_base));
-                                let rep = autoshade::fit_zoned::fit_recipe_zoned_with_regions(
-                                    &base,
-                                    fit_target,
-                                    &seg,
-                                    &mask,
-                                    &fit_base,
-                                    autoshade::fit::FitOptions {
-                                        strength: fit_strength,
-                                        provider: Some(&corr),
-                                    },
-                                    zoned_regions,
-                                );
-                                (rep, Some(mask.into_path()))
-                            }
-                            _ => (
-                                autoshade::fit::fit_recipe_from_with(
-                                    &base,
-                                    fit_target,
-                                    &fit_base,
-                                    autoshade::fit::FitOptions {
-                                        strength: fit_strength,
-                                        provider: Some(&corr),
-                                    },
-                                ),
-                                None,
-                            ),
+                        let seg = autoshade::segment::SegmentOpts::from_config(
+                            &autoshade::config::Config::load(),
+                            "sky",
+                        );
+                        autoshade::pipeline::run_fit(&autoshade::pipeline::FitRun {
+                            plate: &base,
+                            target: &fitted_target,
+                            base: &fit_base,
+                            options: autoshade::fit::FitOptions { strength: fit_strength, provider: Some(&corr) },
+                            zoned: src_path.as_deref().filter(|_| seg_on).map(|p| autoshade::pipeline::ZonedRun {
+                                photo: p,
+                                seg: &seg,
+                                regions: zoned_regions,
+                            }),
+                            reread: reread_source,
+                            sink: autoshade::diag::silent(),
                         })
                     };
                     // The FIRST solve's claim is deliberately not swept: this
@@ -3868,8 +3854,6 @@ impl AutoShadeApp {
                     // was NOT zoned (`hint_action`'s `zoned_used` fact), i.e.
                     // when it claimed nothing at all.
                     let (mut rep, _first_claim) = run_zoned(zoned)?;
-                    autoshade::pipeline::note_target_geometry(&mut rep, fitted_target.geometry);
-                    autoshade::pipeline::reread_at_full_size(&mut rep, reread_source, &plate, fit_target, &fit_base, autoshade::diag::silent());
                     // FACTS, not prose (L12#4): the landing renders these
                     // with the language live when the result LANDS — the old
                     // trf calls here used the language captured at spawn,
@@ -3923,11 +3907,7 @@ impl AutoShadeApp {
                                     // again. A claim/segmentation failure is
                                     // not an error here: the plain solve in
                                     // hand is already a valid result.
-                                    FitAction::Zoned => run_zoned(true).ok().map(|(mut r, claim)| {
-                                        autoshade::pipeline::note_target_geometry(&mut r, fitted_target.geometry);
-                                        autoshade::pipeline::reread_at_full_size(&mut r, reread_source, &plate, fit_target, &fit_base, autoshade::diag::silent());
-                                        (r, claim)
-                                    }),
+                                    FitAction::Zoned => run_zoned(true).ok(),
                                     FitAction::Saturation(d) => {
                                         let mut r = rep.recipe.clone();
                                         r.saturation += d;

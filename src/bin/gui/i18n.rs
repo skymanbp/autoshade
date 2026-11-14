@@ -2568,6 +2568,29 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" [AI visual review unavailable ({e}) — the develop was not visually \
       checked]",
         " [AI 视觉复查不可用（{e}）——本次显影未经视觉检查]"),
+    // ── the stated look (pipeline/statement.rs, pipeline/develop.rs) ─────────
+    (" [Stated look: {look}]",
+        " [描述的观感：{look}]"),
+    (" [The stated look followed {n} reference photograph(s) as direct guides: {files}]",
+        " [描述的观感以 {n} 张参考照片为直接依据：{files}]"),
+    (" [No sky mask for the stated look ({e}) — the whole frame was stated as one area]",
+        " [描述观感时没有天空蒙版（{e}）——整幅画面按一个区域描述]"),
+    (" [AI visual review of the stated look: {score}/100 — {critique}]",
+        " [AI 视觉复查（描述的观感）：{score}/100——{critique}]"),
+    (" [Shown both develops, the AI judge preferred the stated look over the controls \
+      develop ({score}/100) — {critique}]",
+        " [两版并排比较后，视觉模型选了描述的观感，而不是参数版（{score}/100）——{critique}]"),
+    (" [Shown both develops, the AI judge kept the controls develop over the stated look \
+      ({score}/100) — {critique}]",
+        " [两版并排比较后，视觉模型保留了参数版，没有选描述的观感（{score}/100）——{critique}]"),
+    (" [The stated look could not be compared with the controls develop ({e}) — the \
+      controls develop stands]",
+        " [描述的观感无法与参数版比较（{e}）——保留参数版]"),
+    (" [The stated-look analysis failed ({e}) — the controls develop stands]",
+        " [描述观感的分析失败（{e}）——保留参数版]"),
+    (" [The stated-look analysis cannot run here ({why}) — the controls analysis ran \
+      instead]",
+        " [这里无法运行描述观感的分析（{why}）——改为运行参数分析]"),
     // ── R23-4: one intermediate round of the multi-round convergence loop ───
     (" [AI visual review round {round}: {score1}/100 → a guided revision \
       re-scored {score2}/100 and was adopted; still under the {target}/100 \

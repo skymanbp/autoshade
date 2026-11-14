@@ -1831,47 +1831,33 @@ fn match_cmd(
     );
     let fit_options = fit::FitOptions { strength: autoshade::recipe::GradeStrength::from_optional(strength), provider: Some(&corr) };
     println!("  reverse-fit strength: {:.0}%", fit_options.strength.get() * 100.0);
+    // ONE fit, the shared sequence (`pipeline::run_fit`). Zoned, the sky mask
+    // lands at the GUI's convention (the photo's develop dir, a FRESH claimed
+    // `mask-zone-sky*.png` per run — see store::claim_raster: rewriting one
+    // fixed name in place left the still-live saved recipe pointing at
+    // replaced bytes whenever the canonical write below failed); the GUI shows
+    // that raster because the canonical recipe written below REFERENCES this
+    // path (masks are attached by reference, never found by filename), so the
+    // two must be written together. No pre-fit snapshot: claimed unique
+    // rasters mean the fit touches nothing the saved develop references, and
+    // the canonical write below gates immediately before writing.
     let run_fit = |seg_on: bool| -> Result<fit::FitReport> {
-        Ok(if seg_on {
-        // Sky mask lands at the GUI's convention (the photo's develop dir,
-        // a FRESH claimed `mask-zone-sky*.png` per run — see
-        // store::claim_raster: rewriting one fixed name in place left the
-        // still-live saved recipe pointing at replaced bytes whenever the
-        // canonical write below failed); the GUI shows that raster because
-        // the canonical recipe written below REFERENCES this path (masks are
-        // attached by reference, never found by filename), so the two must
-        // be written together.
-        let cfg = Config::load();
-        let seg = autoshade::segment::SegmentOpts::from_config(&cfg, "sky");
-        // No pre-fit snapshot anymore: claimed unique rasters mean the fit
-        // touches nothing the saved develop references, and gating MINUTES
-        // before the write left a race window — a save landing during the
-        // segmentation was then overwritten unversioned. The canonical write
-        // below gates for the zoned path too, immediately before writing.
-        // Drawn in the source's frame, and marked so (`render::fit_raster_frame`).
-        let mask = autoshade::store::OwnedRaster::claim(raw, "mask-zone-sky")?
-            .with_frame(render::fit_raster_frame(&src, &fit_base));
-        pipeline::guard_readonly(mask.path(), raw)?;
-        println!(
-            "  zoned: global -> semantic regions or native luminance ranges -> spatial tiles"
-        );
-        autoshade::fit_zoned::fit_recipe_zoned_with_regions(
-            &src,
-            fit_tgt,
-            &seg,
-            &mask,
-            &fit_base,
-            fit_options,
-            regions.min(autoshade::fit_zoned::semantic::MAX_SEMANTIC_REGIONS),
-        )
-        } else {
-            fit::fit_recipe_from_with(&src, fit_tgt, &fit_base, fit_options)
+        let seg = autoshade::segment::SegmentOpts::from_config(&Config::load(), "sky");
+        if seg_on {
+            println!(
+                "  zoned: global -> semantic regions or native luminance ranges -> spatial tiles"
+            );
+        }
+        pipeline::run_fit(&pipeline::FitRun {
+            plate: &src,
+            target: &fitted_target,
+            base: &fit_base,
+            options: fit_options,
+            zoned: seg_on.then_some(pipeline::ZonedRun { photo: raw, seg: &seg, regions }),
+            reread: Some(raw),
+            sink: autoshade::diag::stderr(),
         })
-        .map(|mut r| {
-            pipeline::note_target_geometry(&mut r, fitted_target.geometry);
-            pipeline::reread_at_full_size(&mut r, Some(raw), &src, fit_tgt, &fit_base, autoshade::diag::stderr());
-            r
-        })
+        .map(|(r, _claimed)| r)
     };
     let mut rep = run_fit(zoned)?;
     // The solver and the pairing scale, said out loud before any number is
