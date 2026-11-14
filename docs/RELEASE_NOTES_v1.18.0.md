@@ -13,6 +13,12 @@ control it keeps the price of the fit's own rounding, and one rule decides
 what a control may not do: leave any part of the picture further from what
 that part's own evidence asks than it found it.
 
+Two more things ship with it. The reverse fit's slider and switches become
+one strength control with five steps. And the AI analysis is reworked: it
+looks at the picture the develop really starts from, a revision can no
+longer make its answer worse, and it has a second way to answer for the
+photos its usual way does not get right.
+
 The design, the rulings and this document are the maintainer's. The code of
 this release was written with an AI coding assistant working under the
 maintainer's direction, and every change passed the project's own tests
@@ -197,6 +203,74 @@ and reference-pair gate before it shipped.
   the solve took back, and a refusal prints the cells and the readings the
   decision was made on.
 
+## The reverse fit: one strength control
+
+- **The Reverse-fit fold's slider and four switches are one control with
+  five steps.** Each step keeps everything the step before it turns on, and
+  the line under the control says what the selected step does. *Light* fits
+  the whole frame only. *Standard* adds local areas and is the fit the app
+  has always run by default. *Strong* lets the fit go further: a move no
+  evidence speaks for is no longer held back, it ships and the report names
+  it. *Full* fits at full strength with up to four regions. *Full + AI
+  review* also has a vision model look at the result and may retry once
+  (paid API).
+- **`match --level` picks the same steps on the command line** (`1` to `5`,
+  or `light`, `standard`, `strong`, `full`, `reviewed`). The separate
+  `--strength`, `--zoned`, `--regions`, `--ai-judge` and `--deep` flags
+  remain for any other combination.
+- **Saved settings carry over.** A settings file from an earlier version
+  opens on the step its old switches stand for.
+
+## The AI analysis
+
+- **A fresh analysis of a RAW looks at the picture the develop starts from.**
+  The model that proposes the edit, and the visual review that scores it,
+  used to look at the camera's embedded JPEG. They now look at the RAW's own
+  neutral develop with the photo's calibration applied — the frame the
+  recipe will really be rendered on. If that develop fails the embedded
+  preview is used and the rationale says so.
+- **A revision edits the answer it is revising, while looking at it.** When
+  the review asks for changes, the model is shown its own recipe rendered,
+  the recipe itself and the reviewer's note, and replies with an edit of
+  that answer: what it does not mention stays as it was.
+- **A revision cannot make the answer worse.** A revision asked for by the
+  text-only check replaces the held recipe only when the check then rates it
+  higher. A revision asked for by the visual review is put beside the held
+  develop in one look, and replaces it only when the review prefers it; a
+  tie keeps the held develop.
+- **A paid answer is not thrown away over a formality.** A reply carrying a
+  key the schema does not have is read without that key, and the rationale
+  names it. A check that fails on its first round keeps the proposal, unsaved,
+  with the reason. When an analysis does fall back to the built-in baseline
+  the status says no AI edit was made, and that result is never saved
+  automatically.
+- **At the default strength the check asks for what the proposal was asked
+  for.** The text-only check used to call a finished grade "restrained, not
+  maximal" at the default strength, while the proposal was asked for a
+  confident one. Both now use the same words.
+- **A sky or a subject is selected by its content.** A fresh analysis is
+  told to select a sky or a subject with a mask cut from the picture by the
+  local segmenter, and to keep straight and round gradients for smooth
+  falloff.
+- **A second way to answer: the stated look.** Instead of slider values, the
+  model can be shown the neutral develop and what its sky and its ground
+  measure now — brightness at five tonal points, the colour of shadows,
+  midtones and highlights — and answer how each area of the finished
+  picture should measure. The neutral develop is moved to those numbers and
+  the reverse fit finds the ordinary recipe that renders it. The AI panel
+  has a three-way choice, *Auto*, *Stated look* and *Controls*
+  (`analyze --approach auto|statement|controls`).
+- **Auto, the default, tries the stated look only when it is needed.** The
+  usual analysis runs first, exactly as before. When its visual review
+  finds the result good — 75 of 100 or more on the review's own scale, where
+  only minor polish is left — that result stands and nothing more is spent.
+  When the review finds it clearly improvable, the stated look is made too,
+  the two finished develops are shown side by side, and the stated look's is
+  kept only when the review prefers it; a tie or any failure keeps the usual
+  answer. The stated look needs a RAW analysed fresh and the image-model
+  key. Your reference photos go to the model as pictures only with **Send
+  reference photos** on, as before; off, only their look phrases go.
+
 ## Masks
 
 - **A mask's soft edge no longer draws a line along a silhouette.** A mask
@@ -330,8 +404,18 @@ and reference-pair gate before it shipped.
   processors, where v1.17.1 took minutes. Processing time is a reading, not
   a gate, in this project.
 - **A fit takes a few more full-size renders** for the final check.
+- **AI Analyze can take much longer on a photo its review finds clearly
+  improvable.** In that case Auto adds two image calls and one local reverse
+  fit, which can run for many minutes. Choose *Controls* in the AI panel
+  (`analyze --approach controls`) for the analysis as it was.
+- **The Reverse-fit fold has one stepped control** where it had a slider and
+  four switches (above).
 
 ## Compatibility
+
+New command-line options: `match --level` and `analyze --approach`; every
+earlier option keeps its meaning. A settings file from an earlier version
+opens with the reverse-fit step its switches stand for.
 
 Recipes and sidecars written by earlier versions open as they did, and
 render as they did except along the soft edge of a raster mask that lies on
