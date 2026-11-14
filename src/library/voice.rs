@@ -49,6 +49,14 @@ fn one_line_within(text: &str, cap: usize) -> String {
     flat.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(cap).collect()
 }
 
+/// A hit's look phrases as ONE bounded line (control characters made spaces,
+/// whitespace collapsed, [`super::MAX_PHRASE_CHARS`] at most), or `None` when it
+/// has none. The proposer's block and the look statement's phrase lines both
+/// read a hit's words through this, so the flattening exists once.
+pub fn phrases_line(h: &Hit<'_>) -> Option<String> {
+    h.entry.phrases.as_deref().map(one_line).filter(|p| !p.is_empty())
+}
+
 /// The reference block the proposer reads, or `None` when nothing was found.
 ///
 /// `images[i]`, when present, is the request position of hit `i`'s attached
@@ -66,7 +74,7 @@ pub fn reference_block(hits: &[Hit<'_>], images: &[Option<usize>], voice: StyleV
     );
     for (i, h) in hits.iter().enumerate() {
         let image = images.get(i).copied().flatten().map(|n| format!(" (IMAGE {n})")).unwrap_or_default();
-        let look = h.entry.phrases.as_deref().map(one_line).filter(|p| !p.is_empty());
+        let look = phrases_line(h);
         out.push_str(&format!("\n  reference {}{image}: {}", i + 1, look.as_deref().unwrap_or("(no phrases)")));
         // The photographer's own settings for this reference, only when its
         // RAW's sidecar was proven to develop to it (`library::settings`):

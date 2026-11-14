@@ -1678,10 +1678,14 @@ and the Normal-mode presets are unchanged). The STATEMENT path
    weighted quantiles and the mean (a*, b*) of its three L* terciles;
 4. ONE image-role call (`advisor::statement::ask_statement`, strict schema
    `look_statement`) shows the frame and those numbers and gets back the same
-   numbers for the finished picture plus a sentence naming the look; with the
-   reference-photo opt-in the library's hits go as pictures beside their own
-   measured numbers (cached per entry in the store's `look-cache/`), otherwise
-   as the phrase block only;
+   numbers for the finished picture plus a sentence naming the look. The
+   library's hits always go as their look phrases (`library::phrases_line`) in
+   the statement's own fenced PHRASES block — never the proposer's reference
+   block, whose steering sentence and settings lines would tell it to follow
+   every reference whatever its light — with a rule that only a photograph of
+   the same kind of scene and light is a guide for hue and brightness; with the
+   reference-photo opt-in they also go as pictures beside their own measured
+   numbers (cached per entry in the store's `look-cache/`);
 5. `advisor::look::moved` moves the frame to the statement — a monotone PCHIP
    tone curve per area through the anchors, the bands' (a*, b*) offsets
    blended along L*, the areas blended by the soft mask: a synthetic target

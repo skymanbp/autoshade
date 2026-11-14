@@ -51,6 +51,7 @@ fn fakes<'a>(
             Ok(LookFitResult { recipe, notes, err_before: 0.1, err_after: 0.01 })
         }),
         render: Box::new(|_, _| Ok(frame_image())),
+        dump: None,
     }
 }
 
@@ -118,6 +119,39 @@ fn without_a_sky_mask_the_frame_is_stated_as_one_area() {
     assert!(text.contains("- \"frame\" (100% of the frame)") && !text.contains("\"sky\""), "{text}");
     assert!(out.recipe.rationale.contains("segmenter unavailable"), "{}", out.recipe.rationale);
     assert!(out.notes.iter().any(|n| n.key == keys::STATEMENT_NO_SKY));
+}
+
+/// The dump switch: with a directory in `StatementTools::dump` the path
+/// writes the frame it measured, the sky mask at its size, the target and the
+/// validated statement beside the measured numbers — and the target file is
+/// exactly the frame the fit was handed.
+///
+/// MUTATION: write the neutral frame as `statement-target.png` (or skip the
+/// dump) — the pixel comparison or the existence checks go red.
+#[test]
+fn the_dump_switch_writes_what_one_statement_produced() {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let dir = std::env::temp_dir().join(format!("autoshade-statement-dump-{}-{nanos}", std::process::id()));
+    let (url, _seen, handle) = stub_endpoint(vec![(200, "application/json", statement_reply(SKY_GROUND))]);
+    let cfg = crate::pipeline::advise_test_cfg(&url);
+    let target = RefCell::new(None);
+    let mut tools = fakes(Box::new(|f| Ok(sky_mask(f.width() / 2, f.height() / 2))), &target);
+    tools.dump = Some(dir.clone());
+    statement_recipe(Path::new("photo.arw"), &cfg, &super::super::GradeRequest::default(), None, &[], &tools, crate::diag::silent())
+        .expect("the canned statement path completes");
+    join_stub(handle);
+    for f in ["statement-frame.png", "statement-sky.png", "statement-target.png", "statement-reply.json"] {
+        assert!(dir.join(f).is_file(), "{f} was not written");
+    }
+    let written = image::open(dir.join("statement-target.png")).unwrap().to_rgb8();
+    assert_eq!(written, target.borrow().as_ref().expect("the fit ran").to_rgb8(), "the target the fit received");
+    let sky = image::open(dir.join("statement-sky.png")).unwrap();
+    assert_eq!((sky.width(), sky.height()), (96, 64), "the mask at the frame's size");
+    let reply: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("statement-reply.json")).unwrap()).unwrap();
+    assert_eq!(reply["look"], "a warm dusk");
+    assert_eq!(reply["areas"][0]["area"], "sky");
+    assert!(reply["areas"][0]["stated"]["l"].is_array() && reply["areas"][0]["measured"]["l"].is_array(), "{reply}");
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 fn entry(id: &str, path: &Path) -> crate::library::Entry {

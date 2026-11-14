@@ -67,6 +67,9 @@ pub struct StatementTools<'a> {
     pub fit: FitFn<'a>,
     /// The deliverable of a recipe rendered from the RAW at the advisor's edge.
     pub render: RenderFn<'a>,
+    /// Where to write what one statement produced ([`dump`]), or `None`. A
+    /// diagnostic switch: production reads `AUTOSHADE_STATEMENT_DUMP` once.
+    pub dump: Option<std::path::PathBuf>,
 }
 
 impl<'a> StatementTools<'a> {
@@ -91,6 +94,7 @@ impl<'a> StatementTools<'a> {
                     sink,
                 )
             }),
+            dump: crate::config::live_env_os("AUTOSHADE_STATEMENT_DUMP").map(std::path::PathBuf::from),
         }
     }
 }
@@ -166,20 +170,22 @@ struct Measured {
     looks: Vec<(AreaName, AreaLook)>,
 }
 
+/// `mask` at `w` x `h` (bilinear when it is another size).
+fn mask_at(mask: &image::GrayImage, w: u32, h: u32) -> image::GrayImage {
+    if mask.dimensions() == (w, h) {
+        mask.clone()
+    } else {
+        image::imageops::resize(mask, w, h, image::imageops::FilterType::Triangle)
+    }
+}
+
 /// Measure `img` in the statement's areas, the sky weight read off `sky`
 /// (resized to the image) or, without one, the whole frame as one area.
 fn measure_frame(img: &image::DynamicImage, sky: Option<&image::GrayImage>) -> Measured {
     let rgb = img.to_rgb8();
     let lab = look::lab_of_image(&rgb);
     let weight: Vec<f32> = match sky {
-        Some(m) => {
-            let m = if m.dimensions() == rgb.dimensions() {
-                m.clone()
-            } else {
-                image::imageops::resize(m, rgb.width(), rgb.height(), image::imageops::FilterType::Triangle)
-            };
-            m.pixels().map(|p| f32::from(p.0[0]) / 255.0).collect()
-        }
+        Some(m) => mask_at(m, rgb.width(), rgb.height()).pixels().map(|p| f32::from(p.0[0]) / 255.0).collect(),
         None => vec![0.0; lab.len()],
     };
     let areas = look::areas_of(&weight);
@@ -269,12 +275,10 @@ pub fn statement_recipe(
     if let Some(e) = ref_err {
         notes.push(Note::new(keys::STYLE_REF_IMAGE_FAILED, vec![("e", e)]));
     }
-    let image_numbers: Vec<Option<usize>> = hits
-        .iter()
-        .enumerate()
-        .map(|(i, _)| references.iter().position(|r| r.number == i + 1).map(|k| k + 2))
-        .collect();
-    let block = crate::library::reference_block(hits, &image_numbers, crate::library::StyleVoice::for_style(req.style));
+    // Each hit's words in the statement's own voice (never the proposer's
+    // reference block, whose steering sentence and settings lines do not
+    // belong in a call that chooses no sliders).
+    let phrases: Vec<Option<String>> = hits.iter().map(crate::library::phrases_line).collect();
     let shown: Vec<ShownReference<'_>> = references
         .iter()
         .map(|r| ShownReference { number: r.number, areas: r.areas.as_deref(), jpeg: &r.jpeg })
@@ -291,8 +295,7 @@ pub fn statement_recipe(
             direction,
             adherence: req.adherence,
             strength: req.strength,
-            reference_block: block.as_deref(),
-            reference_count: hits.len(),
+            phrases: &phrases,
             shown: &shown,
         },
     )
@@ -304,6 +307,11 @@ pub fn statement_recipe(
     let target = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, y| {
         image::Rgb(look::rgb8_of(moved[(y * w + x) as usize]))
     }));
+    if let Some(dir) = &tools.dump
+        && let Err(e) = dump(dir, &frame, sky.as_ref(), &target, &statement, &measured.looks)
+    {
+        diag.warn(format!("the stated-look dump could not be written ({e:#})"));
+    }
     // 6. The reverse fit onto it.
     say("reverse-fitting the RAW onto the stated look (local compute; this can take many minutes)");
     let fitted = (tools.fit)(raw, &mut plate, &mut fit_base, &target).context("the reverse fit onto the stated look")?;
@@ -322,6 +330,41 @@ pub fn statement_recipe(
         crate::rationale::push_note(&mut recipe.rationale, &mut all_notes, n);
     }
     Ok(StatementOutcome { recipe, look: statement.look, guides: statement.guides, notes: all_notes })
+}
+
+/// The diagnostic dump (`AUTOSHADE_STATEMENT_DUMP`): what one paid statement
+/// produced, enough to fit it again without paying — the neutral frame that
+/// was measured, the sky mask at its size, the synthetic target the fit was
+/// handed, and the validated statement with each area's measured numbers
+/// beside its stated ones. No file name, no key, no request text.
+fn dump(
+    dir: &Path,
+    frame: &image::DynamicImage,
+    sky: Option<&image::GrayImage>,
+    target: &image::DynamicImage,
+    statement: &Statement,
+    measured: &[(AreaName, AreaLook)],
+) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    frame.to_rgb8().save(dir.join("statement-frame.png"))?;
+    if let Some(m) = sky {
+        mask_at(m, frame.width(), frame.height()).save(dir.join("statement-sky.png"))?;
+    }
+    target.to_rgb8().save(dir.join("statement-target.png"))?;
+    let areas: Vec<serde_json::Value> = statement
+        .areas
+        .iter()
+        .map(|(name, s)| {
+            serde_json::json!({
+                "area": name.as_str(),
+                "stated": s,
+                "measured": measured.iter().find(|(n, _)| n == name).map(|(_, m)| m),
+            })
+        })
+        .collect();
+    let reply = serde_json::json!({ "look": statement.look, "guides": statement.guides, "areas": areas });
+    std::fs::write(dir.join("statement-reply.json"), serde_json::to_string_pretty(&reply)?)?;
+    Ok(())
 }
 
 #[cfg(test)]

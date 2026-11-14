@@ -44,7 +44,7 @@ pub use frames::query_vector;
 pub use search::{Hit, Query, REFERENCE_COUNT};
 pub use settings::{MATCH_DE_MAX, MAX_SETTINGS_CHARS, Settings, settings_line};
 pub use switches::{DescribeSwitch, EmbeddingSwitch};
-pub use voice::{STYLE_TARGET_MIN, StyleVoice, look_summary, reference_block};
+pub use voice::{STYLE_TARGET_MIN, StyleVoice, look_summary, phrases_line, reference_block};
 
 /// The library file's format. Bumped only when an entry's fields change
 /// meaning; a library of another version is rebuilt, never reinterpreted.

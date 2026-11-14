@@ -48,6 +48,7 @@ fn tools(is_raw: bool) -> StatementTools<'static> {
             Ok(LookFitResult { recipe: EditRecipe { exposure_ev: 0.5, ..Default::default() }, notes: Vec::new(), err_before: 0.1, err_after: 0.01 })
         }),
         render: Box::new(|_, r| Ok(tagged(r))),
+        dump: None,
     }
 }
 
