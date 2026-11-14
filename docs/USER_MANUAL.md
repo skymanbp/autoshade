@@ -1027,7 +1027,7 @@ The following commands and flags match the command definitions in
 
 ```text
 autoshade decode <src> [-o|--out FILE]
-autoshade analyze <src> [-o|--out FILE] [--guidance TEXT] [--guide library|direction] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image] [--approach both|statement|controls]
+autoshade analyze <src> [-o|--out FILE] [--guidance TEXT] [--guide library|direction] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image] [--approach auto|statement|controls]
 autoshade apply <src> <recipe.json> (-o|--out) FILE [--long-edge N]
 autoshade auto <src> [-o|--out FILE] [--guidance TEXT] [--guide library|direction] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image] [--denoise] [--denoise-strength 0..1] [--denoise-model NAME] [--long-edge N]
 autoshade denoise <src> [-o|--out FILE] [--strength 0..1] [--model NAME]
@@ -1352,14 +1352,18 @@ develop** (Analysis, Adjust the selected variant, Reference library).
   colour of its shadows, midtones and highlights. It answers how each area of
   the finished picture should measure, in the same numbers, plus one sentence
   naming the look; the neutral develop is moved to those numbers, and the
-  local reverse fit finds the ordinary recipe that renders it. **Both,
-  compared** (`both`, the default for AI Analyze and `autoshade analyze`) runs
-  the Controls analysis exactly as before, then the stated look, then shows
-  the vision model the two finished develops side by side; the stated look's
-  develop is kept only when the model prefers it, and a tie or any failure
-  keeps the Controls answer. `both` costs two more image calls than Controls
-  (the statement with one picture, the comparison with three) and one local
-  reverse fit, which can take many minutes. The stated look needs a RAW
+  local reverse fit finds the ordinary recipe that renders it. **Auto**
+  (`auto`, the default for AI Analyze and `autoshade analyze`) runs the
+  Controls analysis exactly as before. When its visual review accepts the
+  result, that result stands and nothing more is spent. When the review does
+  not accept it, or asks for changes, the stated look is made too and the
+  vision model is shown the two finished develops side by side; the stated
+  look's develop is kept only when the model prefers it, and a tie or any
+  failure keeps the Controls answer. Only in that case does `auto` cost more
+  than Controls: two more image calls (the statement with one picture, the
+  comparison with three) and one local reverse fit, which can take many
+  minutes. A develop that was not visually reviewed also stands as it is.
+  The stated look needs a RAW
   analysed fresh and the image-model key; on an adjust, a baked file or
   generated pixels the Controls analysis runs and the rationale says why. With
   **Send reference photos** on, the reference photos also go as pictures

@@ -1348,11 +1348,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("analyzing with AI… then the stated look and its reverse fit (local, can take many minutes)",
         "AI 分析中……之后是描述观感与它的本地反推（可能需要好几分钟）"),
     ("Analysis method", "分析方式"),
-    ("Both, compared", "两种都做并比较"),
+    ("analyzing with AI… the stated look and its reverse fit follow only if the visual review does not accept the result (local, can take many minutes)",
+        "AI 分析中……只有视觉复查不接受结果时，之后才会做描述观感与它的本地反推（可能需要好几分钟）"),
     ("Stated look", "描述观感"),
     ("Controls", "参数"),
-    ("The AI answers both ways, then looks at the two finished develops side by side and keeps the better one; the stated look is adopted only when it wins. COST: two more image calls than Controls and one local reverse fit (minutes).",
-        "AI 两种方式都给出答案，然后把两张完成的显影并排看一看，保留更好的那一张；描述观感只有更好时才会采用。费用：比「参数」多两次图像调用和一次本地反推（需要几分钟）。"),
+    ("The AI proposes the slider values first. Only when the visual review does not accept that develop does it also state the look, reverse-fit it locally and look at both develops side by side, keeping the stated look only when it wins. COST: the same as Controls when the review accepts; otherwise two more image calls and one local reverse fit (minutes).",
+        "AI 先直接提出滑杆数值。只有视觉复查没有接受这一版时，才会再描述观感、在本地反推，并把两版并排比较；描述观感只有更好时才会采用。费用：复查接受时与「参数」相同；否则多两次图像调用和一次本地反推（需要几分钟）。"),
     ("The AI states how each area of the finished picture should look (brightness and colour, in numbers), and a local reverse fit finds the settings that produce it. Two image calls and one local reverse fit (minutes).",
         "AI 说明完成的画面每个区域应该是什么样子（亮度与颜色，用数字表示），再由本地反推找出能做到它的设置。两次图像调用和一次本地反推（需要几分钟）。"),
     ("The AI proposes the slider values directly, then they are verified and visually reviewed.",
@@ -1838,8 +1839,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // ── UX batch (toolbar slim-down · AI section · Export section · tools) ──
     ("AI", "AI"),
     ("AI Analyze", "AI 分析"),
-    ("AI proposes a recipe from scratch (GPT proposal + validation + a visual review: the result is RENDERED and judged by the vision model, which may buy one guided revision), written into the sliders — undoable. Uses the reference library or the Direction above (the switch picks one); Strength steers it. COST, worst case: 11 API calls, 6 of them carrying images (9 high-detail frames). Ticking 「Deep thinking」 below OR pushing Strength above 70% raises that ceiling — either one alone does it; the Deep thinking tooltip has the numbers. These are the Controls figures: the 「Both, compared」 method adds two image calls (4 high-detail frames) and one local reverse fit.",
-        "AI 从零提案配方（GPT 提案+验证+视觉复查：结果渲染后交视觉模型打分，低分会多跑一轮提示修订），直接写入滑杆——可撤销。按上方开关二选一：读参考图库，或读「方向」文本；强度滑杆一同生效。费用最多为 11 次 API 调用，其中 6 次带图（9 张高清图）。勾选下方的「深度思考」或把强度调到 70% 以上，都会把这个上限提高——两者占其一即可；具体数字见它自己的说明。以上是「参数」方式的数字：「两种都做并比较」还要多两次图像调用（4 张高清图）和一次本地反推。"),
+    ("AI proposes a recipe from scratch (GPT proposal + validation + a visual review: the result is RENDERED and judged by the vision model, which may buy one guided revision), written into the sliders — undoable. Uses the reference library or the Direction above (the switch picks one); Strength steers it. COST, worst case: 11 API calls, 6 of them carrying images (9 high-detail frames). Ticking 「Deep thinking」 below OR pushing Strength above 70% raises that ceiling — either one alone does it; the Deep thinking tooltip has the numbers. These are the Controls figures: the 「Auto」 method adds two image calls (4 high-detail frames) and one local reverse fit, only when the visual review did not accept the Controls develop.",
+        "AI 从零提案配方（GPT 提案+验证+视觉复查：结果渲染后交视觉模型打分，低分会多跑一轮提示修订），直接写入滑杆——可撤销。按上方开关二选一：读参考图库，或读「方向」文本；强度滑杆一同生效。费用最多为 11 次 API 调用，其中 6 次带图（9 张高清图）。勾选下方的「深度思考」或把强度调到 70% 以上，都会把这个上限提高——两者占其一即可；具体数字见它自己的说明。以上是「参数」方式的数字：「自动」方式只在视觉复查没有接受参数版时，才多两次图像调用（4 张高清图）和一次本地反推。"),
     // R23-4 · feedback #13: the thinking-mode switch and its cost disclosure.
     ("Deep thinking", "深度思考"),
     ("Make the AI show its work and let it iterate. The proposal must first name what it sees, decide EACH tool family (tone / white balance / presence / HSL / colour grading / curves / detail / framing / masks) with a reason, state the look it is going for, and end by critiquing its own answer — those three sentences land in the 「Deep thinking」 box under the rationale. It also asks the image model for one step more reasoning effort (only when a tier other than 「provider default」 is set in Settings), and lets the visual judge keep going until it scores well enough: 2 rounds at a balanced Strength, 3 above 70%. COST: a normal analyze is at worst 11 API calls (6 with images, 9 high-detail frames); with this box ticked OR Strength above 70% — either one alone is enough — it is at worst 17 calls (10 with images, 17 high-detail), plus roughly 10-20% more output tokens per proposal. Batch and the eval harness never do this.",
@@ -2603,6 +2604,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" [The stated-look analysis cannot run here ({why}) — the controls analysis ran \
       instead]",
         " [这里无法运行描述观感的分析（{why}）——改为运行参数分析]"),
+    (" [The AI visual review accepted the controls develop, so the stated look was not tried]",
+        " [AI 视觉复查已接受参数版，所以没有再试描述的观感]"),
+    (" [The controls develop was not visually reviewed, so the stated look was not tried]",
+        " [参数版没有经过视觉复查，所以没有再试描述的观感]"),
     // ── R23-4: one intermediate round of the multi-round convergence loop ───
     (" [AI visual review round {round}: {score1}/100 → a guided revision \
       re-scored {score2}/100 and was adopted; still under the {target}/100 \

@@ -1664,7 +1664,7 @@ this trait.)
 > a paid vision call, so it is an explicit caller decision: interactive
 > analyze surfaces pass `judge = true`; `batch` and `eval` pass `false`.
 
-**Two ways to answer, one comparison** (v1.18.0, `pipeline::produce_develop`,
+**Two ways to answer, and when the second is tried** (v1.18.0, `pipeline::produce_develop`,
 `GradeRequest::approach`). The chain above answers CONTROL VALUES
 (`AnalysisApproach::Controls`, the struct default, so batch, the web UI, eval
 and the Normal-mode presets are unchanged). The STATEMENT path
@@ -1697,13 +1697,20 @@ and the Normal-mode presets are unchanged). The STATEMENT path
    calibration by construction, is the answer.
 
 `AnalysisApproach::Statement` judges that answer once (`judge_pair`) and
-returns the judge's decision as the verdict. `AnalysisApproach::Both` (the
-desktop and `analyze` default) runs the controls chain exactly as asked, then
-the statement path, then ONE `judge_choice` on deliverable renders from the
-RAW (reference = the calibration-only develop, A = the controls answer, B =
-the statement's); B is adopted only when preferred, and a tie, a failed
-comparison or a failed statement keeps A. The loser's claimed rasters are
-released (`pipeline::discard_rasters`). An adjust, generated pixels, a baked
+returns the judge's decision as the verdict. `AnalysisApproach::Auto` (the
+desktop and `analyze` default) runs the controls chain exactly as asked
+(`pipeline::produce_recipe_judged`, which also returns the visual judge's
+last decision on the develop the judge loop holds at its end: an adopted
+revision's re-judgement, the one-look choice's word on a kept develop, else
+the last absolute judgement). When that decision is accept, or there is none
+(judge off or unavailable, no model proposal), the controls answer stands
+with a `STATEMENT_NOT_NEEDED` / `STATEMENT_NOT_JUDGED` note and nothing more
+is spent. Otherwise the statement path runs, then ONE `judge_choice` on
+deliverable renders from the RAW (reference = the calibration-only develop,
+A = the controls answer, B = the statement's); B is adopted only when
+preferred, and a tie, a failed comparison or a failed statement keeps A. The
+loser's claimed rasters are released (`pipeline::discard_rasters`). An
+adjust, generated pixels, a baked
 file or a missing image-model key run the controls chain with a
 `STATEMENT_UNAVAILABLE` note. The pipeline tests reach the segmenter, the
 fit and the renders through `pipeline::statement::StatementTools`.

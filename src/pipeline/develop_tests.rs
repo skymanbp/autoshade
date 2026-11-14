@@ -1,4 +1,4 @@
-//! Choosing between the two answers, over canned replies on a loopback stub
+//! When the stated look is tried and how it is chosen, over canned replies on a loopback stub
 //! and fakes for the segmenter, the fit and the renders.
 
 use super::*;
@@ -95,27 +95,103 @@ fn controls_is_byte_for_byte_todays_flow() {
     assert_eq!((recipe, verdict, notes.len()), (today.0, today.1, today.2.len()));
 }
 
-fn both_script(statement: String, choice_reply: String) -> Vec<String> {
-    let mut s = controls_script();
+/// Today's chain whose judge does NOT accept: propose, verify, a revise with
+/// no instruction (so no guided round is bought — R20's rule).
+fn revise_script() -> Vec<String> {
+    vec![
+        propose_reply(json!({ "exposure_ev": 0.3, "rationale": "first" })),
+        verdict_reply("accept", None),
+        judgement("revise", 70, None),
+    ]
+}
+
+fn auto_script(statement: String, choice_reply: String) -> Vec<String> {
+    let mut s = revise_script();
     s.push(statement);
     s.push(choice_reply);
     s
 }
 
-/// `Both` scripts propose → verify → judge → statement → choice, and adopts
-/// the statement's develop when the judge prefers it ("B").
+/// Does any request body ask for this reply schema?
+fn asks(bodies: &[String], schema: &str) -> bool {
+    bodies.iter().any(|b| b.contains(&format!("\"name\":\"{schema}\"")))
+}
+
+/// `Auto` with the judge ACCEPTING today's develop: nothing more is spent —
+/// no statement request, no choice request — today's develop is returned and
+/// one note says why.
+///
+/// MUTATION: drop the `statement_wanted` gate (the stated look always tried)
+/// — the statement call is made, finds no scripted reply and fails, so the
+/// rationale carries the statement-failed note instead of the not-needed one
+/// and this goes red.
+#[test]
+fn auto_spends_nothing_more_when_the_judge_accepts_todays_develop() {
+    let (recipe, verdict, notes, bodies) = run(AnalysisApproach::Auto, controls_script(), true, true);
+    assert_eq!(bodies.len(), 3, "propose, verify, judge — and nothing else");
+    assert!(!asks(&bodies, "look_statement") && !asks(&bodies, "judge_choice"));
+    assert_eq!(recipe.exposure_ev, 0.3, "today's develop is returned");
+    assert_eq!(verdict.decision, Decision::Accept);
+    assert!(notes.iter().any(|n| n.key == keys::STATEMENT_NOT_NEEDED), "{}", recipe.rationale);
+    assert!(!notes.iter().any(|n| n.key == keys::STATEMENT_FAILED), "{}", recipe.rationale);
+}
+
+/// "Held at the end": the first look said revise and bought a guided round,
+/// and the one look at both kept the held develop with an ACCEPT. That
+/// judgement belongs to the develop that survives, so the stated look is not
+/// tried.
+///
+/// MUTATION: read the FIRST judgement instead of the held develop's last one
+/// (drop the `KeptHeld` assignment in `produce_recipe_judged`) — the stated
+/// look is tried, fails on the exhausted script, and this goes red.
+#[test]
+fn auto_reads_the_judgement_of_the_develop_held_at_the_end() {
+    let script = vec![
+        propose_reply(json!({ "exposure_ev": 0.3, "rationale": "first" })),
+        verdict_reply("accept", None),
+        judgement("revise", 70, Some("lift the ground")),
+        propose_reply(json!({ "exposure_ev": 0.4, "rationale": "second" })),
+        verdict_reply("accept", None),
+        choice("A"),
+    ];
+    let (recipe, _, notes, bodies) = run(AnalysisApproach::Auto, script, true, true);
+    assert_eq!(bodies.len(), 6);
+    assert!(!asks(&bodies, "look_statement"));
+    assert_eq!(recipe.exposure_ev, 0.3, "the held develop survives");
+    assert!(notes.iter().any(|n| n.key == keys::STATEMENT_NOT_NEEDED), "{}", recipe.rationale);
+}
+
+/// `Auto` with the judge switched off: no judgement exists, today's develop
+/// stands and no statement is asked for.
+///
+/// MUTATION: treat "no judgement" like a revise — the statement call is made
+/// and fails, and this goes red.
+#[test]
+fn auto_without_a_judge_keeps_todays_develop_and_asks_no_statement() {
+    let script = vec![propose_reply(json!({ "exposure_ev": 0.3, "rationale": "first" })), verdict_reply("accept", None)];
+    let (recipe, _, notes, bodies) = run(AnalysisApproach::Auto, script, false, true);
+    assert_eq!(bodies.len(), 2, "propose, verify");
+    assert!(!asks(&bodies, "look_statement"));
+    assert_eq!(recipe.exposure_ev, 0.3);
+    assert!(notes.iter().any(|n| n.key == keys::STATEMENT_NOT_JUDGED), "{}", recipe.rationale);
+}
+
+/// `Auto` with the judge saying revise scripts propose → verify → judge →
+/// statement → choice, and adopts the statement's develop when the judge
+/// prefers it ("B").
 ///
 /// MUTATION: adopt the statement whatever the choice says (or never) — one of
 /// the two runs comes back with the wrong exposure.
 #[test]
-fn both_adopts_the_statement_only_when_the_judge_prefers_it() {
-    let (recipe, verdict, notes, bodies) = run(AnalysisApproach::Both, both_script(statement_reply(), choice("B")), true, true);
+fn auto_adopts_the_statement_only_when_the_judge_prefers_it() {
+    let (recipe, verdict, notes, bodies) = run(AnalysisApproach::Auto, auto_script(statement_reply(), choice("B")), true, true);
     assert_eq!(bodies.len(), 5, "propose, verify, judge, statement, choice");
+    assert!(asks(&bodies[3..4], "look_statement") && asks(&bodies[4..], "judge_choice"));
     assert_eq!(recipe.exposure_ev, 0.5, "the statement's develop is adopted");
     assert_eq!(verdict.decision, Decision::Accept, "the choice's verdict describes it");
     assert!(recipe.rationale.contains(" [Stated look: a warm dusk]"), "{}", recipe.rationale);
     assert!(notes.iter().any(|n| n.key == keys::STATEMENT_CHOSEN));
-    let (recipe, _, notes, _) = run(AnalysisApproach::Both, both_script(statement_reply(), choice("A")), true, true);
+    let (recipe, _, notes, _) = run(AnalysisApproach::Auto, auto_script(statement_reply(), choice("A")), true, true);
     assert_eq!(recipe.exposure_ev, 0.3, "today's develop is kept");
     assert!(notes.iter().any(|n| n.key == keys::STATEMENT_NOT_CHOSEN));
     assert!(!recipe.rationale.contains("Stated look"), "the loser's notes do not ride: {}", recipe.rationale);
@@ -127,16 +203,16 @@ fn both_adopts_the_statement_only_when_the_judge_prefers_it() {
 /// MUTATION: propagate the statement's error (`?`) instead of keeping today's
 /// develop — the first run fails on the `expect`.
 #[test]
-fn both_keeps_todays_develop_when_the_statement_or_the_choice_fails() {
+fn auto_keeps_todays_develop_when_the_statement_or_the_choice_fails() {
     let refused = json!({ "output": [{ "content": [{ "type": "output_text", "text": r#"{"look":"x","guides":[],"areas":{}}"# }] }] }).to_string();
-    let mut s = controls_script();
+    let mut s = revise_script();
     s.push(refused);
-    let (recipe, _, notes, bodies) = run(AnalysisApproach::Both, s, true, true);
+    let (recipe, _, notes, bodies) = run(AnalysisApproach::Auto, s, true, true);
     assert_eq!(bodies.len(), 4, "no choice without a statement");
     assert_eq!(recipe.exposure_ev, 0.3);
     assert!(notes.iter().any(|n| n.key == keys::STATEMENT_FAILED), "{}", recipe.rationale);
     let garbage = propose_reply(json!({ "nonsense": true }));
-    let (recipe, _, notes, _) = run(AnalysisApproach::Both, both_script(statement_reply(), garbage), true, true);
+    let (recipe, _, notes, _) = run(AnalysisApproach::Auto, auto_script(statement_reply(), garbage), true, true);
     assert_eq!(recipe.exposure_ev, 0.3);
     assert!(notes.iter().any(|n| n.key == keys::STATEMENT_CHOICE_FAILED), "{}", recipe.rationale);
 }
@@ -156,7 +232,7 @@ fn red_of(data_url: &str) -> u8 {
 /// tags come back 0 / 100 / 60 and this goes red.
 #[test]
 fn the_choice_shows_the_reference_then_todays_then_the_statements_develop() {
-    let (_, _, _, bodies) = run(AnalysisApproach::Both, both_script(statement_reply(), choice("A")), true, true);
+    let (_, _, _, bodies) = run(AnalysisApproach::Auto, auto_script(statement_reply(), choice("A")), true, true);
     let v: Value = serde_json::from_str(&bodies[4]).unwrap();
     let reds: Vec<u8> = v["input"][0]["content"]
         .as_array()
@@ -185,26 +261,28 @@ fn statement_returns_the_judges_decision_as_the_verdict() {
     assert!(notes.iter().any(|n| n.key == keys::STATEMENT_JUDGE));
 }
 
-/// Where the statement path cannot run (here: not a RAW) `Both` is today's
+/// Where the statement path cannot run (here: not a RAW) `Auto` is today's
 /// analysis, and one note says why.
 ///
 /// MUTATION: try the statement anyway — the script has no reply for it and
 /// this goes red.
 #[test]
-fn where_the_statement_cannot_run_both_is_todays_analysis_with_a_note() {
-    let (recipe, _, notes, bodies) = run(AnalysisApproach::Both, controls_script(), true, false);
+fn where_the_statement_cannot_run_auto_is_todays_analysis_with_a_note() {
+    let (recipe, _, notes, bodies) = run(AnalysisApproach::Auto, revise_script(), true, false);
     assert_eq!(bodies.len(), 3);
     assert_eq!(recipe.exposure_ev, 0.3);
     assert!(recipe.rationale.contains("the photo is not a camera RAW"), "{}", recipe.rationale);
     assert!(notes.iter().any(|n| n.key == keys::STATEMENT_UNAVAILABLE));
 }
 
-/// The approach's spellings round-trip, and the struct default is today's.
+/// The approach's spellings round-trip, the retired `both` is refused, and
+/// the struct default is today's.
 #[test]
 fn the_approach_spellings_round_trip_and_the_default_is_controls() {
     for a in AnalysisApproach::ALL {
         assert_eq!(AnalysisApproach::parse(a.as_str()).unwrap(), a);
     }
     assert!(AnalysisApproach::parse("sliders").is_err());
+    assert!(AnalysisApproach::parse("both").is_err());
     assert_eq!(GradeRequest::default().approach, AnalysisApproach::Controls);
 }

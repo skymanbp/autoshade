@@ -112,9 +112,10 @@ enum Command {
         /// worst 11 API calls (6 with images, 9 high-detail); with --deep at a
         /// committed strength it is at worst 17 calls (10 with images, 17
         /// high-detail), plus ~10-20% more output tokens per proposal. The
-        /// default `--approach both` adds 2 image calls (4 high-detail frames)
-        /// and one local reverse fit: 13 calls, 19 with --deep. `batch` never
-        /// does this.
+        /// default `--approach auto` adds 2 image calls (4 high-detail frames)
+        /// and one local reverse fit only when the visual judge did not accept
+        /// the controls develop: 13 calls, 19 with --deep. `batch` never does
+        /// this.
         #[arg(long)]
         deep: bool,
         /// SHOW the model the reference photos, not only their look phrases:
@@ -128,10 +129,13 @@ enum Command {
         /// How the AI answers: `controls` (it proposes slider values),
         /// `statement` (it states how each area of the finished picture should
         /// look, in CIELAB numbers, and a local reverse fit finds the settings),
-        /// or `both` (each answers, then one visual comparison keeps the better
-        /// develop; the statement's is adopted only when it wins). `both` and
-        /// `statement` need a RAW and the image-model key, else `controls` runs.
-        #[arg(long, value_parser = parse_approach, default_value = "both")]
+        /// or `auto` (the controls answer first; when the visual judge does not
+        /// accept it, the stated look too, and one visual comparison keeps the
+        /// better develop, the statement's only when it wins). The two extra
+        /// image calls and the local reverse fit happen only when the judge did
+        /// not accept the controls develop. `auto` and `statement` need a RAW
+        /// and the image-model key, else `controls` runs.
+        #[arg(long, value_parser = parse_approach, default_value = "auto")]
         approach: pipeline::AnalysisApproach,
     },
     /// Render an existing EditRecipe onto a RAW and save the developed image.
@@ -1048,7 +1052,7 @@ fn analyze_request(
         // way to reach this flag.
         think: deep,
         // Today's chain; `analyze` sets its own `--approach` over this, and
-        // `auto` keeps the controls answer.
+        // the `auto` command keeps the controls answer.
         approach: pipeline::AnalysisApproach::Controls,
     }
 }
@@ -2831,17 +2835,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dev);
     }
 
-    /// `analyze --approach` parses its three spellings, refuses others, and
-    /// defaults to `both`.
+    /// `analyze --approach` parses its three spellings, refuses others (the
+    /// retired `both` included), and defaults to `auto`.
     ///
     /// MUTATION: default the flag to `controls` — the first assertion goes red.
     #[test]
-    fn the_analyze_approach_flag_parses_and_defaults_to_both() {
+    fn the_analyze_approach_flag_parses_and_defaults_to_auto() {
         let approach = |args: &[&str]| match Cli::try_parse_from(args) {
             Ok(Cli { command: Command::Analyze { approach, .. }, .. }) => Some(approach),
             _ => None,
         };
-        assert_eq!(approach(&["autoshade", "analyze", "p.arw"]), Some(pipeline::AnalysisApproach::Both));
+        assert_eq!(approach(&["autoshade", "analyze", "p.arw"]), Some(pipeline::AnalysisApproach::Auto));
+        assert_eq!(approach(&["autoshade", "analyze", "p.arw", "--approach", "both"]), None);
         for a in pipeline::AnalysisApproach::ALL {
             assert_eq!(approach(&["autoshade", "analyze", "p.arw", "--approach", a.as_str()]), Some(a));
         }

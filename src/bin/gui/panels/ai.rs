@@ -348,9 +348,9 @@ impl AutoShadeApp {
             use autoshade::pipeline::AnalysisApproach;
             ui.horizontal_wrapped(|ui| {
                 ui.label(tr(lang, "Analysis method"));
-                ui.radio_value(&mut self.analysis_approach, AnalysisApproach::Both, tr(lang, "Both, compared")).on_hover_text(tr(
+                ui.radio_value(&mut self.analysis_approach, AnalysisApproach::Auto, tr(lang, "Auto")).on_hover_text(tr(
                     lang,
-                    "The AI answers both ways, then looks at the two finished develops side by side and keeps the better one; the stated look is adopted only when it wins. COST: two more image calls than Controls and one local reverse fit (minutes).",
+                    "The AI proposes the slider values first. Only when the visual review does not accept that develop does it also state the look, reverse-fit it locally and look at both develops side by side, keeping the stated look only when it wins. COST: the same as Controls when the review accepts; otherwise two more image calls and one local reverse fit (minutes).",
                 ));
                 ui.radio_value(&mut self.analysis_approach, AnalysisApproach::Statement, tr(lang, "Stated look")).on_hover_text(tr(
                     lang,
@@ -410,8 +410,9 @@ impl AutoShadeApp {
                      calls, 6 of them carrying images (9 high-detail frames). Ticking 「Deep \
                      thinking」 below OR pushing Strength above 70% raises that ceiling — \
                      either one alone does it; the Deep thinking tooltip has the numbers. \
-                     These are the Controls figures: the 「Both, compared」 method adds two \
-                     image calls (4 high-detail frames) and one local reverse fit.",
+                     These are the Controls figures: the 「Auto」 method adds two \
+                     image calls (4 high-detail frames) and one local reverse fit, only when \
+                     the visual review did not accept the Controls develop.",
                 )))
                 .clicked()
             {

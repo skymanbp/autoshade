@@ -1726,7 +1726,7 @@ the structured proposal, not photo pixels—and all Responses requests set
 is adopted only when its rescore is at least the original score.
 
 Since v1.18.0 the analysis can also answer APPEARANCE rather than control
-values (`analyze --approach statement|both`, the desktop's **Analysis method**).
+values (`analyze --approach statement|auto`, the desktop's **Analysis method**).
 The model is shown the neutral develop and, for the sky and the ground, L* at
 five weighted tonal quantiles and the mean (a*, b*) of the three L* terciles
 (`advisor::look`, CIELAB D65 through the objective's own conversion), and
@@ -1734,8 +1734,9 @@ answers the same numbers for the finished picture under a strict schema. The
 frame is moved to them — a monotone piecewise-cubic (PCHIP) tone curve per area
 through the anchors, the band colour offsets blended along L*, the areas
 blended by the soft sky mask — and the same-scene reverse fit reproduces that
-synthetic target as an ordinary recipe. `both` runs the controls answer too
-and keeps the statement's only when the visual judge, shown the two
+synthetic target as an ordinary recipe. `auto` runs the controls answer
+first and tries the statement only when the visual judge did not accept that
+answer; then it keeps the statement's only when the judge, shown the two
 deliverables side by side, prefers it. The numeric core was specified by a
 NumPy prototype first; its closed-form 96x64 golden file
 (`src/fixtures/stmt-golden.json`) is reproduced by the Rust tests.

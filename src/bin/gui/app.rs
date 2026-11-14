@@ -96,8 +96,9 @@ pub(crate) struct AutoShadeApp {
     /// the panel (the checkbox states the call counts), and every unattended
     /// surface (batch, eval) is structurally unable to turn it on.
     pub(crate) deep_think: bool,
-    /// How AI Analyze answers: both ways and a visual comparison (the
-    /// default), the stated look only, or the control values only. Persisted.
+    /// How AI Analyze answers: the control values, and the stated look only
+    /// when the visual review did not accept them (the default), the stated
+    /// look only, or the control values only. Persisted.
     pub(crate) analysis_approach: autoshade::pipeline::AnalysisApproach,
     pub(crate) style_embed: bool,
     /// Step 14 / S2: also write a LOCAL prose description of each record's
@@ -1816,7 +1817,7 @@ impl Default for AutoShadeApp {
             send_style_ref_image: false,
             // OFF, same rule and a bigger bill (up to 17 calls per analyze).
             deep_think: false,
-            analysis_approach: autoshade::pipeline::AnalysisApproach::Both,
+            analysis_approach: autoshade::pipeline::AnalysisApproach::Auto,
             style_embed: false,
             style_describe: false,
             style_src_dir: None,

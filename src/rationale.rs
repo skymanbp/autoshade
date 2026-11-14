@@ -1420,25 +1420,33 @@ pub mod keys {
     /// The one visual judgement of the stated look's render (approach "statement").
     pub const STATEMENT_JUDGE: &str =
         " [AI visual review of the stated look: {score}/100 — {critique}]";
-    /// Approach "both": the judge, shown the two develops, preferred the stated look.
+    /// Approach "auto": the judge, shown the two develops, preferred the stated look.
     pub const STATEMENT_CHOSEN: &str =
         " [Shown both develops, the AI judge preferred the stated look over the controls \
          develop ({score}/100) — {critique}]";
-    /// Approach "both": the judge kept the controls develop (a tie keeps it too).
+    /// Approach "auto": the judge kept the controls develop (a tie keeps it too).
     pub const STATEMENT_NOT_CHOSEN: &str =
         " [Shown both develops, the AI judge kept the controls develop over the stated look \
          ({score}/100) — {critique}]";
-    /// Approach "both": the comparison itself failed; the controls develop stands.
+    /// Approach "auto": the comparison itself failed; the controls develop stands.
     pub const STATEMENT_CHOICE_FAILED: &str =
         " [The stated look could not be compared with the controls develop ({e}) — the \
          controls develop stands]";
-    /// Approach "both": the statement path failed; the controls develop stands.
+    /// Approach "auto": the statement path failed; the controls develop stands.
     pub const STATEMENT_FAILED: &str =
         " [The stated-look analysis failed ({e}) — the controls develop stands]";
     /// The statement path cannot run on this develop; the controls analysis ran.
     pub const STATEMENT_UNAVAILABLE: &str =
         " [The stated-look analysis cannot run here ({why}) — the controls analysis ran \
          instead]";
+    /// Approach "auto": the visual judge accepted the controls develop, so it
+    /// stands and nothing more was spent.
+    pub const STATEMENT_NOT_NEEDED: &str =
+        " [The AI visual review accepted the controls develop, so the stated look was not tried]";
+    /// Approach "auto": no visual judgement of the controls develop exists (the
+    /// review off, unavailable, or no model proposal), so it stands.
+    pub const STATEMENT_NOT_JUDGED: &str =
+        " [The controls develop was not visually reviewed, so the stated look was not tried]";
     /// R23-4: ONE intermediate round of the multi-round convergence loop. The
     /// terminal round keeps `JUDGE_ADOPTED` (so a single-round analysis — every
     /// default-path one — writes exactly what it wrote before this round), and

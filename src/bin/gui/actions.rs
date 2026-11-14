@@ -3484,10 +3484,14 @@ impl AutoShadeApp {
             tr(lang, "adjusting the selected variant with AI…").into()
         } else if self.analysis_approach == autoshade::pipeline::AnalysisApproach::Controls {
             tr(lang, "analyzing with AI (GPT + Claude)…").into()
-        } else {
+        } else if self.analysis_approach == autoshade::pipeline::AnalysisApproach::Statement {
             // The statement's reverse fit is local compute that can run for
             // many minutes; the busy line owns that wait up front.
             tr(lang, "analyzing with AI… then the stated look and its reverse fit (local, can take many minutes)").into()
+        } else {
+            // `Auto`: the same wait, but only if the visual review does not
+            // accept the controls develop.
+            tr(lang, "analyzing with AI… the stated look and its reverse fit follow only if the visual review does not accept the result (local, can take many minutes)").into()
         };
         // Both style inputs travel as one request (R23-2): the strength, and
         // whether the reference photos go along as images. Read
