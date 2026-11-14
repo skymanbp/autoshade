@@ -752,7 +752,9 @@
         assert!(!older.contains("fit_level"), "the key really was removed: {older}");
         let decoded: Prefs = serde_json::from_str(&older).expect("an older prefs file loads");
         assert_eq!(decoded.fit_level(), FitLevel::Standard);
-        // …and the worker reads the fit's own step, at both fit entry points.
+        // …and the worker reads the fit's own step at its ONE fit entry point: the
+        // zoned and the global fit both go through `pipeline::run_fit`, so one call
+        // carries the dial for both, and no direct fit call is left beside it.
         let worker = include_str!("../actions.rs");
         assert!(
             worker.contains("let fit = self.fit_level.settings();")
@@ -761,8 +763,17 @@
         );
         assert_eq!(
             worker.matches("strength: fit_strength,").count(),
-            2,
-            "both fit entry points (zoned and global) must receive the fit's dial"
+            1,
+            "the one shared fit call (zoned or global) must receive the fit's dial"
+        );
+        assert_eq!(
+            worker.matches("autoshade::pipeline::run_fit(").count(),
+            1,
+            "the worker has exactly one fit entry point, the shared sequence"
+        );
+        assert!(
+            !worker.contains("fit_recipe_zoned_with_regions(") && !worker.contains("fit_recipe_from_with("),
+            "no direct fit call is left beside the shared sequence, where the dial could be missed"
         );
         assert_eq!(
             worker.matches("GradeStrength::new(self.fit_level.settings().strength)").count(),
