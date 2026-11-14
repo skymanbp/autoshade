@@ -108,10 +108,13 @@ enum Command {
         /// family explicitly and names the look it is going for, then critiques
         /// its own answer (printed here in full); its reasoning tier goes up one
         /// step, and the visual judge may run up to 2-3 guided rounds instead of
-        /// one. COSTS MORE: a normal analyze is at worst 11 API calls (6 with
-        /// images, 9 high-detail); with --deep at a committed strength it is at
-        /// worst 17 calls (10 with images, 17 high-detail), plus ~10-20% more
-        /// output tokens per proposal. `batch` never does this.
+        /// one. COSTS MORE: a normal analyze with `--approach controls` is at
+        /// worst 11 API calls (6 with images, 9 high-detail); with --deep at a
+        /// committed strength it is at worst 17 calls (10 with images, 17
+        /// high-detail), plus ~10-20% more output tokens per proposal. The
+        /// default `--approach both` adds 2 image calls (4 high-detail frames)
+        /// and one local reverse fit: 13 calls, 19 with --deep. `batch` never
+        /// does this.
         #[arg(long)]
         deep: bool,
         /// SHOW the model the reference photos, not only their look phrases:
@@ -122,6 +125,14 @@ enum Command {
         /// the standing answer.
         #[arg(long)]
         reference_image: bool,
+        /// How the AI answers: `controls` (it proposes slider values),
+        /// `statement` (it states how each area of the finished picture should
+        /// look, in CIELAB numbers, and a local reverse fit finds the settings),
+        /// or `both` (each answers, then one visual comparison keeps the better
+        /// develop; the statement's is adopted only when it wins). `both` and
+        /// `statement` need a RAW and the image-model key, else `controls` runs.
+        #[arg(long, value_parser = parse_approach, default_value = "both")]
+        approach: pipeline::AnalysisApproach,
     },
     /// Render an existing EditRecipe onto a RAW and save the developed image.
     /// The recipe may be the JSON `analyze` writes, or a Lightroom / Camera Raw
@@ -570,9 +581,10 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Decode { raw, out } => decode_cmd(&raw, out),
-        Command::Analyze { raw, out, guidance, guide, style, strength, adherence, embed, no_embed, deep, reference_image } => {
+        Command::Analyze { raw, out, guidance, guide, style, strength, adherence, embed, no_embed, deep, reference_image, approach } => {
             let guide = pipeline::Guide::resolve(guide, guidance.as_deref())?;
-            analyze_cmd(&raw, out, guidance, guide, style, strength, adherence, deep, reference_image, embed_switch(embed, no_embed))
+            let req = GradeRequest { guide, approach, ..analyze_request(style, strength, adherence, deep, reference_image, embed_switch(embed, no_embed), &Config::load()) };
+            analyze_cmd(&raw, out, guidance, req)
         }
         Command::Apply { raw, recipe, out, long_edge } => {
             apply_cmd(&raw, &recipe, &out, long_edge)
@@ -867,6 +879,10 @@ fn parse_guide(s: &str) -> Result<pipeline::Guide, String> {
     pipeline::Guide::parse(s).map_err(|e| e.to_string())
 }
 
+fn parse_approach(s: &str) -> Result<pipeline::AnalysisApproach, String> {
+    pipeline::AnalysisApproach::parse(s).map_err(|e| e.to_string())
+}
+
 /// Same file? canonicalize when it exists (kills case/alias spellings — the
 /// dangerous overwrite case implies existence), else lexical absolute. The
 /// canonical-vs-`-o` decision must not depend on how the path was spelled.
@@ -1031,22 +1047,13 @@ fn analyze_request(
         // builds its request through `GradeRequest::with_style`, which has no
         // way to reach this flag.
         think: deep,
+        // Today's chain; `analyze` sets its own `--approach` over this, and
+        // `auto` keeps the controls answer.
+        approach: pipeline::AnalysisApproach::Controls,
     }
 }
 
-#[allow(clippy::too_many_arguments)] // one clap subcommand's own flag set, like `auto_cmd`
-fn analyze_cmd(
-    raw: &Path,
-    out: Option<PathBuf>,
-    guidance: Option<String>,
-    guide: pipeline::Guide,
-    style: Option<f32>,
-    strength: Option<f32>,
-    adherence: Option<f32>,
-    deep: bool,
-    reference_image: bool,
-    embed: autoshade::library::EmbeddingSwitch,
-) -> Result<()> {
+fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, req: GradeRequest) -> Result<()> {
     let cfg = Config::load();
     if let Some(o) = &out {
         // Full preflight BEFORE the paid propose+verify (L09#1) — an `-o`
@@ -1059,9 +1066,8 @@ fn analyze_cmd(
     // "adjust current edit" path is a web-UI affordance. judge = true: an
     // explicitly invoked single-photo analyze gets the visual closed loop
     // (batch passes false — spend never multiplies silently).
-    let req = GradeRequest { guide, ..analyze_request(style, strength, adherence, deep, reference_image, embed, &cfg) };
     let (recipe, verdict, _notes) =
-        produce_recipe(raw, None, &cfg, true, guidance.as_deref(), None, req, true, autoshade::diag::stderr())?;
+        pipeline::produce_develop(raw, None, &cfg, true, guidance.as_deref(), None, req, true, autoshade::diag::stderr())?;
     // Remember whether -o redirected the recipe: the XMP has to follow it (below)
     // so one develop never splits across two folders. `-o` POINTING AT the
     // canonical path IS a canonical write — out.is_some() alone let that
@@ -2825,6 +2831,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dev);
     }
 
+    /// `analyze --approach` parses its three spellings, refuses others, and
+    /// defaults to `both`.
+    ///
+    /// MUTATION: default the flag to `controls` — the first assertion goes red.
+    #[test]
+    fn the_analyze_approach_flag_parses_and_defaults_to_both() {
+        let approach = |args: &[&str]| match Cli::try_parse_from(args) {
+            Ok(Cli { command: Command::Analyze { approach, .. }, .. }) => Some(approach),
+            _ => None,
+        };
+        assert_eq!(approach(&["autoshade", "analyze", "p.arw"]), Some(pipeline::AnalysisApproach::Both));
+        for a in pipeline::AnalysisApproach::ALL {
+            assert_eq!(approach(&["autoshade", "analyze", "p.arw", "--approach", a.as_str()]), Some(a));
+        }
+        assert_eq!(approach(&["autoshade", "analyze", "p.arw", "--approach", "sliders"]), None);
+    }
+
     #[test]
     fn auto_denoise_operands_are_refused_without_the_denoise_flag() {
         for args in [
@@ -3105,7 +3128,8 @@ mod tests {
             .join(format!("autoshade-prepay-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let off = autoshade::library::EmbeddingSwitch::OFF;
-        let e = analyze_cmd(Path::new("no-such.arw"), Some(dir.clone()), None, pipeline::Guide::Library, None, None, None, false, false, off)
+        let req = analyze_request(None, None, None, false, false, off, &cfg_fixture());
+        let e = analyze_cmd(Path::new("no-such.arw"), Some(dir.clone()), None, req)
             .unwrap_err()
             .to_string();
         assert!(e.contains("is a directory"), "analyze: {e}");

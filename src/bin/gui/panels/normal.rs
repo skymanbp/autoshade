@@ -248,6 +248,7 @@ impl AutoShadeApp {
                     think: false,
                     adherence: autoshade::recipe::DirectionAdherence::new(PRESET_ADHERENCE),
                     embed: autoshade::library::EmbeddingSwitch::OFF,
+                    approach: autoshade::pipeline::AnalysisApproach::Controls,
                 },
                 autoshade::advisor::presets::preset_guidance(id).map(str::to_owned),
             ),
@@ -262,6 +263,7 @@ impl AutoShadeApp {
                     // The folder was just read by the same model, so its
                     // download is done; the environment override still wins.
                     embed: autoshade::library::EmbeddingSwitch::resolve(None, true),
+                    approach: autoshade::pipeline::AnalysisApproach::Controls,
                 },
                 None,
             ),

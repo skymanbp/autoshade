@@ -27,6 +27,9 @@ pub use fit_run::{FitRun, ZonedRun, run_fit};
 // The analysis that states a LOOK and lets the reverse fit find the settings.
 pub mod statement;
 mod statement_cache;
+// The two ways the analysis answers, and the one look that chooses between them.
+mod develop;
+pub use develop::{AnalysisApproach, produce_develop};
 // The stub config the analysis tests drive the chain with, for the judge's own tests.
 #[cfg(test)]
 pub(crate) use advise::tests::stub_cfg as advise_test_cfg;
@@ -79,6 +82,11 @@ pub struct GradeRequest {
     /// [`crate::library::EmbeddingSwitch::resolve`]. Without it the library
     /// cannot be searched, and the rationale says so.
     pub embed: crate::library::EmbeddingSwitch,
+    /// Which way the analysis answers ([`AnalysisApproach`]), read only by
+    /// [`produce_develop`]. The struct default is `Controls` — today's chain —
+    /// so batch, web, eval and the Normal-mode presets are unchanged; the
+    /// interactive analyze surfaces choose `Both` on their own.
+    pub approach: AnalysisApproach,
 }
 
 impl Default for GradeRequest {
@@ -94,6 +102,7 @@ impl Default for GradeRequest {
             think: Default::default(),
             adherence: Default::default(),
             embed: crate::library::EmbeddingSwitch::resolve(None, false),
+            approach: Default::default(),
         }
     }
 }
@@ -890,7 +899,11 @@ pub fn produce_recipe(
     // calls (6 carrying images, 9 high-detail frames — a guided round's judge
     // call shows three), 17 with deep thinking at a committed strength (10
     // with images, 17 frames) — the
-    // numbers the GUI tooltip and `--deep`'s help quote.
+    // numbers the GUI tooltip and `--deep`'s help quote. The approach `both`
+    // (`produce_develop`, the interactive default) adds two image calls on top
+    // (the look statement with one frame, the choice with three) and one local
+    // reverse fit: 13 calls (8 with images, 13 frames), 19 with deep thinking
+    // (12 with images, 21 frames).
     if judge && can_revise {
         // The judge scores the frame the deliverable will BE (`held_view`: an
         // ADJUST's bitmap masks and lens opinion included, the baked start

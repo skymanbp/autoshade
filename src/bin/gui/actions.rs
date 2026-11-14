@@ -83,6 +83,7 @@ impl AutoShadeApp {
         app.fit_level = prefs.fit_level();
         app.send_style_ref_image = prefs.send_style_ref_image;
         app.deep_think = prefs.deep_think;
+        app.analysis_approach = prefs.analysis_approach;
         app.style_embed = prefs.style_embed;
         app.style_describe = prefs.style_describe;
         // Only a folder that still EXISTS is prefilled: a picker opened at
@@ -3481,8 +3482,12 @@ impl AutoShadeApp {
         let adjusting = adjust.is_some();
         self.status = if adjusting {
             tr(lang, "adjusting the selected variant with AI…").into()
-        } else {
+        } else if self.analysis_approach == autoshade::pipeline::AnalysisApproach::Controls {
             tr(lang, "analyzing with AI (GPT + Claude)…").into()
+        } else {
+            // The statement's reverse fit is local compute that can run for
+            // many minutes; the busy line owns that wait up front.
+            tr(lang, "analyzing with AI… then the stated look and its reverse fit (local, can take many minutes)").into()
         };
         // Both style inputs travel as one request (R23-2): the strength, and
         // whether the reference photos go along as images. Read
@@ -3512,6 +3517,10 @@ impl AutoShadeApp {
             // The GUI's own 「search the library」 preference, read on the UI
             // thread like every other field above.
             embed: autoshade::library::EmbeddingSwitch::resolve(None, self.style_embed),
+            // The panel's 「Analysis method」, read with the rest. An adjust
+            // runs the controls chain whatever it says (the statement path
+            // needs a fresh analysis of a RAW), so it asks for that directly.
+            approach: if adjusting { autoshade::pipeline::AnalysisApproach::Controls } else { self.analysis_approach },
         };
         // Free-text direction ("warmer, moodier") steers the proposal — only
         // when the direction guides (library OR direction); an adjust's
@@ -3591,7 +3600,7 @@ impl AutoShadeApp {
                 // Config is reloaded in-thread (cheap) so we don't need it to be Clone.
                 let cfg = autoshade::config::Config::load();
                 let res = autoshade::library::with_library(library, || {
-                    autoshade::pipeline::produce_recipe(
+                    autoshade::pipeline::produce_develop(
                         &path,
                         pixels.as_deref(),
                         &cfg,

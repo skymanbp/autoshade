@@ -1663,6 +1663,46 @@ this trait.)
 > and every adopt/keep/failure branch discloses through the rationale. It is
 > a paid vision call, so it is an explicit caller decision: interactive
 > analyze surfaces pass `judge = true`; `batch` and `eval` pass `false`.
+
+**Two ways to answer, one comparison** (v1.18.0, `pipeline::produce_develop`,
+`GradeRequest::approach`). The chain above answers CONTROL VALUES
+(`AnalysisApproach::Controls`, the struct default, so batch, the web UI, eval
+and the Normal-mode presets are unchanged). The STATEMENT path
+(`pipeline::statement::statement_recipe`) answers APPEARANCE instead:
+
+1. the fit's own source and calibration (`pipeline::fit_source`) make the
+   neutral frame — the room the reverse fit solves in;
+2. the local segmenter cuts its sky; `advisor::look::areas_of` makes sky and
+   ground, or one area `frame` when either is under 3% of it;
+3. `advisor::look::measure` reads each area in CIELAB: L* at the 2/25/50/75/98%
+   weighted quantiles and the mean (a*, b*) of its three L* terciles;
+4. ONE image-role call (`advisor::statement::ask_statement`, strict schema
+   `look_statement`) shows the frame and those numbers and gets back the same
+   numbers for the finished picture plus a sentence naming the look; with the
+   reference-photo opt-in the library's hits go as pictures beside their own
+   measured numbers (cached per entry in the store's `look-cache/`), otherwise
+   as the phrase block only;
+5. `advisor::look::moved` moves the frame to the statement — a monotone PCHIP
+   tone curve per area through the anchors, the bands' (a*, b*) offsets
+   blended along L*, the areas blended by the soft mask: a synthetic target
+   that is the same photograph pixel for pixel;
+6. the shared reverse-fit sequence (`pipeline::run_fit`, the one `match` and
+   the desktop's reverse fit also run) fits the RAW onto it with
+   `statement::LOOK_FIT` (full strength, local areas, default regions, no
+   correspondence provider), and the fitted recipe, which carries the
+   calibration by construction, is the answer.
+
+`AnalysisApproach::Statement` judges that answer once (`judge_pair`) and
+returns the judge's decision as the verdict. `AnalysisApproach::Both` (the
+desktop and `analyze` default) runs the controls chain exactly as asked, then
+the statement path, then ONE `judge_choice` on deliverable renders from the
+RAW (reference = the calibration-only develop, A = the controls answer, B =
+the statement's); B is adopted only when preferred, and a tie, a failed
+comparison or a failed statement keeps A. The loser's claimed rasters are
+released (`pipeline::discard_rasters`). An adjust, generated pixels, a baked
+file or a missing image-model key run the controls chain with a
+`STATEMENT_UNAVAILABLE` note. The pipeline tests reach the segmenter, the
+fit and the renders through `pipeline::statement::StatementTools`.
 >
 > **Ordering, and its one revision.** R20 decided the REVERSE-FIT's review
 > runs AFTER the persist — informational, never gating, every failure a

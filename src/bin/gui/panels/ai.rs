@@ -342,6 +342,25 @@ impl AutoShadeApp {
                     "The AI follows the Direction you type; the reference library is not read.",
                 ));
             });
+            // How the AI answers (persisted). The statement ways need a RAW and
+            // the image-model key; elsewhere the controls answer runs and the
+            // rationale says why.
+            use autoshade::pipeline::AnalysisApproach;
+            ui.horizontal_wrapped(|ui| {
+                ui.label(tr(lang, "Analysis method"));
+                ui.radio_value(&mut self.analysis_approach, AnalysisApproach::Both, tr(lang, "Both, compared")).on_hover_text(tr(
+                    lang,
+                    "The AI answers both ways, then looks at the two finished develops side by side and keeps the better one; the stated look is adopted only when it wins. COST: two more image calls than Controls and one local reverse fit (minutes).",
+                ));
+                ui.radio_value(&mut self.analysis_approach, AnalysisApproach::Statement, tr(lang, "Stated look")).on_hover_text(tr(
+                    lang,
+                    "The AI states how each area of the finished picture should look (brightness and colour, in numbers), and a local reverse fit finds the settings that produce it. Two image calls and one local reverse fit (minutes).",
+                ));
+                ui.radio_value(&mut self.analysis_approach, AnalysisApproach::Controls, tr(lang, "Controls")).on_hover_text(tr(
+                    lang,
+                    "The AI proposes the slider values directly, then they are verified and visually reviewed.",
+                ));
+            });
             let by_direction = self.guide == Guide::Direction;
             ui.add_enabled_ui(by_direction, |ui| {
                 // #14a: was `desired_width(f32::INFINITY)` — a full-panel ribbon on a
@@ -390,7 +409,9 @@ impl AutoShadeApp {
                      steers it. COST, worst case: 11 API \
                      calls, 6 of them carrying images (9 high-detail frames). Ticking 「Deep \
                      thinking」 below OR pushing Strength above 70% raises that ceiling — \
-                     either one alone does it; the Deep thinking tooltip has the numbers.",
+                     either one alone does it; the Deep thinking tooltip has the numbers. \
+                     These are the Controls figures: the 「Both, compared」 method adds two \
+                     image calls (4 high-detail frames) and one local reverse fit.",
                 )))
                 .clicked()
             {

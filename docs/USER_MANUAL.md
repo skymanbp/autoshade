@@ -1027,7 +1027,7 @@ The following commands and flags match the command definitions in
 
 ```text
 autoshade decode <src> [-o|--out FILE]
-autoshade analyze <src> [-o|--out FILE] [--guidance TEXT] [--guide library|direction] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image]
+autoshade analyze <src> [-o|--out FILE] [--guidance TEXT] [--guide library|direction] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image] [--approach both|statement|controls]
 autoshade apply <src> <recipe.json> (-o|--out) FILE [--long-edge N]
 autoshade auto <src> [-o|--out FILE] [--guidance TEXT] [--guide library|direction] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image] [--denoise] [--denoise-strength 0..1] [--denoise-model NAME] [--long-edge N]
 autoshade denoise <src> [-o|--out FILE] [--strength 0..1] [--model NAME]
@@ -1344,6 +1344,27 @@ develop** (Analysis, Adjust the selected variant, Reference library).
   radius/detail/mask, the noise-reduction shaping axes, chromatic aberration,
   de-fringe, Transform, HDR or the profile names: those are either structure
   its preview cannot show or the photographer's own setup.
+- **Analysis method** (the AI panel's three-way choice, `analyze --approach`):
+  the analysis above is **Controls** — the model answers slider values. With
+  **Stated look** (`statement`) the model is shown the neutral develop and,
+  for the sky and the ground (or the whole frame when either is under 3% of
+  it), what each measures now: the brightness at five tonal points and the
+  colour of its shadows, midtones and highlights. It answers how each area of
+  the finished picture should measure, in the same numbers, plus one sentence
+  naming the look; the neutral develop is moved to those numbers, and the
+  local reverse fit finds the ordinary recipe that renders it. **Both,
+  compared** (`both`, the default for AI Analyze and `autoshade analyze`) runs
+  the Controls analysis exactly as before, then the stated look, then shows
+  the vision model the two finished develops side by side; the stated look's
+  develop is kept only when the model prefers it, and a tie or any failure
+  keeps the Controls answer. `both` costs two more image calls than Controls
+  (the statement with one picture, the comparison with three) and one local
+  reverse fit, which can take many minutes. The stated look needs a RAW
+  analysed fresh and the image-model key; on an adjust, a baked file or
+  generated pixels the Controls analysis runs and the rationale says why. With
+  **Send reference photos** on, the reference photos also go as pictures
+  beside their own measured numbers (measured once per library photo and
+  cached in the develop store); off, they go as their look phrases only.
 - **Adjust the selected variant · paid API:** the fold under Analysis. Type
   what to change on the card you are looking at ("darken the sky a little,
   warm the faces") and click **🤖 AI adjust**. The model sees the card as it

@@ -326,3 +326,33 @@
             }
         }
     }
+
+    /// The AI panel's 「Analysis method」 round-trips through the prefs file,
+    /// a prefs file written before it existed restores `Both` (the desktop
+    /// default, as a fresh app), and the panel draws the three choices.
+    ///
+    /// MUTATION: drop `analysis_approach` from `save` or from `restore_prefs`
+    /// — the Statement / Controls rounds come back as `Both` and this goes red.
+    #[test]
+    fn the_analysis_method_round_trips_through_the_prefs_and_defaults_to_both() {
+        use autoshade::pipeline::AnalysisApproach;
+        assert_eq!(AutoShadeApp::default().analysis_approach, AnalysisApproach::Both);
+        for approach in AnalysisApproach::ALL {
+            let mut storage = PrefsMemory::default();
+            let mut app = AutoShadeApp { analysis_approach: approach, ..Default::default() };
+            eframe::App::save(&mut app, &mut storage);
+            let prefs: Prefs = eframe::get_value(&storage, eframe::APP_KEY).unwrap();
+            let mut back = AutoShadeApp::default();
+            back.restore_prefs(prefs);
+            assert_eq!(back.analysis_approach, approach);
+        }
+        let mut storage = PrefsMemory::default();
+        eframe::Storage::set_string(&mut storage, eframe::APP_KEY, "(lang:Zh)".into());
+        let prefs: Prefs = eframe::get_value(&storage, eframe::APP_KEY).expect("an older prefs file still loads");
+        assert_eq!(prefs.analysis_approach, AnalysisApproach::Both);
+        let mut app = AutoShadeApp::default();
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        for label in ["Analysis method", "Both, compared", "Stated look", "Controls"] {
+            assert!(seen.iter().any(|t| t == label), "{label} was not drawn: {seen:?}");
+        }
+    }

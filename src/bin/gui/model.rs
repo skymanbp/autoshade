@@ -234,6 +234,10 @@ pub(crate) struct Prefs {
     /// prefs file as `false` — the same answer [`Prefs::default`] gives, so an
     /// upgrade never silently starts paying for a deeper (and longer) analyze.
     pub(crate) deep_think: bool,
+    /// How AI Analyze answers ([`autoshade::pipeline::AnalysisApproach`]).
+    /// Routed through [`Prefs::default`] like `grade_strength`, so a prefs file
+    /// written before this key existed decodes to `Both`, the desktop default.
+    pub(crate) analysis_approach: autoshade::pipeline::AnalysisApproach,
     /// Use SigLIP look embeddings when building and querying the style index.
     #[serde(default)]
     pub(crate) style_embed: bool,
@@ -328,6 +332,7 @@ impl Default for Prefs {
             // OFF, like every other paid opt-in here (see `fit_ai_judge`).
             send_style_ref_image: false,
             deep_think: false,
+            analysis_approach: autoshade::pipeline::AnalysisApproach::Both,
             style_embed: false,
             style_describe: false,
             style_src_dir: None,
