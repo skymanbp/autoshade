@@ -148,6 +148,16 @@ pub(super) fn colour_gain_luts(g: [f32; 3]) -> [Vec<f32>; 3] {
 /// colour correction may scale ([`keep_blown_white`]).
 pub(crate) const WHITE_CLIP: f32 = 0.995;
 
+/// Whether a pixel is at the white clip in EVERY channel ([`WHITE_CLIP`]): the
+/// pixel [`keep_blown_white`] keeps neutral under an estimated correction,
+/// and the one whose channels the colour field's solve does not ask about one
+/// by one (`fit_field::testifying`, J153). ONE predicate for the two, so the
+/// solve never asks a pixel for a move the develop will not render on it.
+#[inline]
+pub(crate) fn blown_white(p: &[f32; 3]) -> bool {
+    p[0].min(p[1]).min(p[2]) >= WHITE_CLIP
+}
+
 /// A pixel that reaches an estimated colour correction with EVERY channel at
 /// the white clip carries no ratio between its channels — each one says only
 /// "at least the ceiling" — so a correction read from measured pixels has
@@ -161,8 +171,10 @@ pub(crate) const WHITE_CLIP: f32 = 0.995;
 /// The stages are the two the reverse fit ESTIMATES and no slider sets: a
 /// mask's colour gains (`LocalAdjustment::color_gains`, `masks`) and the
 /// colour field (`develop`). An estimate speaks for the pixels it was read
-/// from, and a channel at the white clip never testifies (`fit::tone`,
-/// `fit_field`). The white balance and a mask's own Temp and Tint are the
+/// from: a channel at the white clip never testifies to the tone fit
+/// (`fit::tone`), and the colour field's solve asks nothing of these pixels'
+/// channels one by one ([`blown_white`], `fit_field::testifying`). The white
+/// balance and a mask's own Temp and Tint are the
 /// photographer's instruction and apply to every pixel they are set on,
 /// white included (a cooler mask over a blown sky is how that sky is given
 /// colour); the curves, the wheels, the mixer and a mask's Color tint map the
@@ -177,7 +189,7 @@ pub(crate) const WHITE_CLIP: f32 = 0.995;
 /// 6 codes on at most 0.16 % of their pixels (rel1180/star).
 #[inline]
 pub(super) fn keep_blown_white(before: &[f32; 3], after: [f32; 3]) -> [f32; 3] {
-    if before[0].min(before[1]).min(before[2]) < WHITE_CLIP {
+    if !blown_white(before) {
         return after;
     }
     [after[0].max(after[1]).max(after[2]); 3]

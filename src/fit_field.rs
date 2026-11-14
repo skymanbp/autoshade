@@ -71,8 +71,8 @@ const BOUNDS_HIGH: [f32; PARAMS] = [1.25, 0.35, 0.35, 0.35, 0.50];
 /// "no change" that the trilinear read interpolates against the measured
 /// cells around it, a plateau edge on the cell boundary that the solve never
 /// chose. On a dusk-landscape pair at 0.85 the global develop clipped 88-93 %
-/// of two horizon cells' pixels (a pair clipped on one side does not testify,
-/// so those cells carried no mass), their vertices were zeroed while the cells
+/// of two horizon cells' pixels (a pair clipped on one side did not testify
+/// then, so those cells carried no mass), their vertices were zeroed while the cells
 /// around them carried EV -0.3 and a blue gain of -0.35 in the bright bins,
 /// and the horizon rendered a rectangular over-bright block (that fifth of the
 /// frame 12.72 dE from its target). An unmeasured vertex now ships the value
@@ -518,28 +518,67 @@ pub(crate) fn cell_vertex_spans(cell: usize) -> impl Iterator<Item = std::ops::R
 /// One frame's pixel with no channel at the white clip (`254/255`) — read
 /// on the TARGET alone by [`crate::fit_cells`] for its cell means (the field
 /// itself reads [`testifying`], channel by channel; a mean of a colour needs
-/// all three of a pixel's channels). The same clip rule as the testimony's: a
-/// channel at the black clip is a value (the target shows it black), a
-/// channel at the white clip is not (its true value is unbounded above it),
-/// so only the latter keeps a pixel out of a mean. Until v1.18.0 this
+/// all three of a pixel's channels). A channel at the black clip is a value
+/// (the target shows it black) and keeps its pixel in; a channel at the
+/// white clip keeps its pixel out of a MEAN OF A COLOUR — the hue the target
+/// shows there is the clip's — while the field's testimony, which asks
+/// channel by channel, counts it ([`testifying`], J153). Until v1.18.0 this
 /// excluded the black end too, and the cells judging pass B of the field
 /// (`fit_zoned::field::admit_cells`) could not see the very pixels the
 /// field's data term had just been ruled to count (RULING-1180-int-r19).
+/// The white end they still do not see: what the field does to pixels whose
+/// target is at the clip is read by the per-band census of a finished
+/// render, not by the cells (the seaside street's white clouds, J153).
 pub(crate) fn unclipped(p: &[f32; 3]) -> bool {
     p[0].max(p[1]).max(p[2]) < 254.0 / 255.0
 }
 
 /// Which CHANNELS of a pair of pixels — the frame being moved and its
 /// target — testify: none unless the LUMA of each frame is above the black
-/// code `1/255`, and then every channel that is inside 254/255 in BOTH
-/// frames or at the white clip in BOTH. A channel at the white clip on both
-/// sides is known on both sides — the target keeps it there — and a channel
-/// white-clipped on one side only is not (its true value on that side is
-/// unknown above the clip), so it stays out as before. A pixel white in
-/// every channel on both sides testifies too (its difference is 0 and
-/// known): the luma gate reads the black end only, because at the white end
-/// the per-channel rule already says everything there is to say, and a luma
-/// gate there kept the one pixel the v1.17.1 rule had been written to admit.
+/// code `1/255`, and then EVERY channel, with one exception: of a frame
+/// pixel at the white clip in every channel
+/// ([`crate::render::blown_white`], the pixel the engine keeps neutral under
+/// the field) only the channels its target holds at the clip too (254/255).
+/// A pixel white in every channel on both sides testifies (its difference is
+/// 0 and known): the luma gate reads the black end only, because at the
+/// white end the per-channel rule already says everything there is to say,
+/// and a luma gate there kept the one pixel the v1.17.1 rule had been
+/// written to admit.
+///
+/// THE VALUE THE FIELD MEETS (v1.18.0, J153). The field is a move of the
+/// RENDERED value: the engine adds it to the pixel as the stages before it
+/// left it, inside the range (`render::develop`), and what it is solved
+/// toward is a picture. To the field a channel at the white clip is
+/// therefore a value like any other, the clip code, on either side. At the
+/// clip in BOTH frames the difference is 0 and the target keeps it there
+/// (v1.17.1, below). At the clip in the TARGET only, the difference is the
+/// least the frame has to rise to show what its target shows, and the
+/// render's own clamp stops it there. At the clip in the FRAME only, it is
+/// exactly the move that takes the rendered value to its target. What is
+/// unknown above the clip is the scene's light, and the field does not read
+/// it. The exception is the engine's own: a pixel that reaches the field
+/// blown in every channel leaves it neutral, at the brightest value the
+/// field gave it (`render::wb::keep_blown_white`), so what the field would
+/// do to one of its channels is never rendered, and a channel of it whose
+/// target is under the clip would ask for a move that pixel is not given.
+///
+/// Until J153 a channel across the clip — at it on one side only — had no
+/// say ("its true value on that side is unknown above the clip"). On the
+/// seaside street (p39, 0.85) the white clouds' target holds its BLUE at
+/// the clip: their brightest 4 % read (248.9, 250.3, 254.8) in the target and
+/// (242.0, 239.6, 238.7) before the field. Red and green asked up, nothing asked the
+/// blue, and the clouds rendered (250.8, 252.8, 243.6) — cream where the target is
+/// blue-white, 7.10 dE76 from it against 5.46 with no
+/// field at all and 2.75 in the round before, when the pixel-wide
+/// rule kept those pixels out altogether (rounds V14 / V15). Under the NumPy
+/// model of the solve, the two brightest luma bands, channel across the clip
+/// silent -> asked: that pair's frame 1.77 / 5.58 -> 1.17 / 1.84 (the model on
+/// the render without the field and the target, every pixel weighed alike);
+/// the sunset street's clouds over the horizon 4.84 / 6.70 -> 3.90 / 6.13 and
+/// the lantern street's frame 0.90 / 0.48 -> 0.75 / 0.49 (on those solves'
+/// dumped planes; rel1180 fieldproto, 2026-11-13). No number is added: the
+/// clip codes are the ones the rule already read, and the blown pixel is the
+/// engine's ([`crate::render::WHITE_CLIP`]).
 ///
 /// A CHANNEL, NOT THE PIXEL (v1.18.0, J150). The rule was always stated per
 /// channel and, until this version, applied to the pixel: one channel across
@@ -575,9 +614,9 @@ pub(crate) fn unclipped(p: &[f32; 3]) -> bool {
 /// vertices shipped the smoother's continuation of the rows below), and
 /// under them only the target's brighter pixels testified, biased toward
 /// "target brighter" — the top of the sky was lifted where its target asks
-/// for it darker. The white clip is not symmetric to it: above 254/255 the
-/// true value is unbounded, the difference is not a measurement of how far
-/// the frame is from its target, and that per-channel rule is unchanged. A
+/// for it darker. (Until J153 the white clip was held not to be symmetric
+/// to it — above 254/255 the scene's value is unbounded; to a move of the
+/// rendered value it is, see above.) A
 /// pixel whose LUMA is at the black clip has no channel left to carry it
 /// and stays out. The only numbers are the 8-bit clip codes the channel
 /// test already used.
@@ -600,7 +639,8 @@ pub(crate) fn testifying(current: &[f32; 3], target: &[f32; 3]) -> [bool; 3] {
     if !(measured(current) && measured(target)) {
         return [false; 3];
     }
-    std::array::from_fn(|c| (current[c] >= HIGH) == (target[c] >= HIGH))
+    let kept_neutral = crate::render::blown_white(current);
+    std::array::from_fn(|c| !kept_neutral || target[c] >= HIGH)
 }
 
 /// Whether the pair has any say: at least one channel [`testifying`] admits.

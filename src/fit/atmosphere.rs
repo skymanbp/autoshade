@@ -351,29 +351,37 @@ pub(super) fn fit_atmosphere_from_parts(
     let start = joint.repair(&mut point);
     let (mut point, mut best, mut unearned) = solve_bounded(&mut joint, point, start, base);
     // The other carriers (see `curve_carried` and the asks' tone above), one
-    // after the other against the best so far. A finished F is the only F
-    // two starts can be compared on — a repaired start still carries every
-    // control the elimination has not priced, and until 2026-11-10 the two
-    // were compared there: on the night RAW pair the exposure's start had
-    // fallen to the base (F 0.17560 at price 0) and beat the curve's J*
-    // 0.16520 under nine controls (F 0.18230), so the global solve shipped
-    // nothing (legs/V1).
+    // after the other against the best so far, EACH SOLVED from its own
+    // repaired start. A finished F is the only F two starts can be compared
+    // on — a repaired start still carries every control the elimination has
+    // not priced, and until 2026-11-10 the two were compared there: on the
+    // night RAW pair the exposure's start had fallen to the base (F 0.17560
+    // at price 0) and beat the curve's J* 0.16520 under nine controls
+    // (F 0.18230), so the global solve shipped nothing (legs/V1).
+    //
+    // Until 2026-11-13 (J152) a carrier was solved only where its repaired
+    // start already read below the best FINISHED solve, in F or in J* — the
+    // same comparison across the two kinds of reading, kept as a shortcut
+    // past the solve, and processing time is never a gate (user rule
+    // 2026-11-05). What a repair leaves is where the law's edge stopped the
+    // re-estimate, not what the descent reaches from there. On the
+    // different-photograph pair the asks' start read J* 0.11685 after
+    // its repair beside a best of 0.12456 and was solved to 0.05855
+    // (legs/V14); once the fit's plate kept the light its base cuts (J151)
+    // the same repair stopped at 0.15385 beside a best of 0.11687,
+    // the carrier was never solved, and the pair shipped at 0.11687 —
+    // its frame 34.23 from the target where v1.17.1 reads 32.75
+    // and the round before 31.70 (legs/V15). Solved, it ends at
+    // 0.05834 and the frame reads 31.74.
     for (carrier, alt) in alternatives {
         let mut alt_point = super::joint::Point::bounded(alt);
         let mut alt_joint =
             super::joint::Joint::with_pinned(&ctx, super::joint::Coord::atmosphere_pinned(&alt_point));
         let alt_start = alt_joint.repair(&mut alt_point);
-        let mut shipped = false;
-        if alt_start.f() < best.f() || alt_start.j < best.j {
-            let (alt_point, alt_best, alt_unearned) = solve_bounded(&mut alt_joint, alt_point, alt_start, base);
-            if alt_best.f() < best.f() {
-                (point, best, unearned) = (alt_point, alt_best, alt_unearned);
-                shipped = true;
-            }
-        } else {
-            alt_joint.trace(&format!("repair ({carrier})"), &alt_point, &alt_start);
-        }
-        if shipped {
+        alt_joint.trace(&format!("repair ({carrier})"), &alt_point, &alt_start);
+        let (alt_point, alt_best, alt_unearned) = solve_bounded(&mut alt_joint, alt_point, alt_start, base);
+        if alt_best.f() < best.f() {
+            (point, best, unearned) = (alt_point, alt_best, alt_unearned);
             alt_joint.absorb(&joint);
             joint = alt_joint;
         } else {
@@ -418,6 +426,13 @@ pub(super) fn fit_atmosphere_from_parts(
     // The white-balance clamp describes a white balance only while the
     // shipped recipe carries one.
     let wb_shipped = (recipe.temperature_k, recipe.tint) != (base.temperature_k, base.tint);
+    // The cells no evidence spoke for that the recipe moved, on this solve's
+    // own cells (the shared population where a field is readable, design §1
+    // Silent), and the ranges a population asks whose contrast the tone's
+    // shape raised (J154). Read before the report takes the recipe.
+    let veto_cells = (budget.vetoes == VetoPolicy::Disclose)
+        .then(|| super::validity::disclosed_cells(&ctx.validity, s_img, base, &recipe, sp, &after_px))
+        .flatten();
     compose_report(
         recipe,
         Measured {
@@ -438,12 +453,7 @@ pub(super) fn fit_atmosphere_from_parts(
         SolveFacts {
             budget: Some(budget),
             strength: Some(strength.get()),
-            // The cells no evidence spoke for that the recipe moved, on this
-            // solve's own cells (the shared population where a field is
-            // readable, design §1 Silent).
-            veto_cells: (budget.vetoes == VetoPolicy::Disclose)
-                .then(|| ctx.validity.blind_cell_names(sp, &after_px))
-                .flatten(),
+            veto_cells,
             wb_clamped: wb_shipped.then_some(facts.clamped).flatten(),
             wb_search_bound: facts.search_bound,
             scaled: joint.scaled(),

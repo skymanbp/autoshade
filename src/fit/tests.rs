@@ -2978,6 +2978,27 @@ fn an_identity_field_discloses_and_changes_no_dial() {
     assert!(report.correspondence.is_some(), "the zoned passes read it from the report");
 }
 
+/// The calibration pair's tone, read off pictures and not off a control: the
+/// target is the darker picture, and the fitted recipe's render of the source
+/// is darker than the source too. Which control carries that - an exposure,
+/// a tone curve, both - is the joint solve's to decide on its finished
+/// objective, so no control is named here.
+fn assert_the_recipe_darkens_as_the_target_does(source: &DynamicImage, target: &DynamicImage, report: &FitReport) {
+    let mean = |img: &DynamicImage| {
+        let px = pixels_of(img);
+        px.iter().map(luma601).sum::<f32>() / px.len() as f32
+    };
+    let (src_img, tgt_img) = analysis_pair(source, target);
+    let rendered = render::develop_preview(&src_img, &report.recipe);
+    let (before, after, wanted) = (mean(&src_img), mean(&rendered), mean(&tgt_img));
+    assert!(wanted < before, "premise: the target is the darker picture ({wanted:.4} against {before:.4})");
+    assert!(
+        after < before,
+        "the recipe darkens the frame as the target does: {before:.4} -> {after:.4} (target {wanted:.4}); {}",
+        report.recipe.rationale
+    );
+}
+
 #[test]
 fn content_divergent_calibration_keeps_an_atmosphere_recipe() {
     let Some(root) = calibration_corpus() else { return };
@@ -3014,7 +3035,10 @@ fn content_divergent_calibration_keeps_an_atmosphere_recipe() {
     assert!(report.recipe.red_curve.is_empty());
     assert!(report.recipe.green_curve.is_empty());
     assert!(report.recipe.blue_curve.is_empty());
-    assert!(report.recipe.exposure_ev <= -0.5);
+    // Was `exposure_ev <= -0.5`: the staged solver's exposure of 2026-08-27.
+    // The darkening it stood for is read off the render, whichever control
+    // the joint solve carries it on.
+    assert_the_recipe_darkens_as_the_target_does(&source, &target, &report);
 }
 
 #[test]
@@ -3026,8 +3050,12 @@ fn calibration_atmosphere_report_uses_one_population_ruler() {
     dump_recipe("calibration_atmosphere", &report);
     assert_eq!(report.mode, FitMode::Atmosphere);
     assert!(report.structural_evidence.is_some());
-    assert!((-1.0..=-0.5).contains(&report.recipe.exposure_ev));
-    assert_eq!(report.recipe.saturation, 0.0);
+    // Was an exposure in [-1, -0.5] and a saturation of exactly 0: the staged
+    // solver's recipe of 2026-08-27. The joint solve picks the tone's carrier
+    // by its finished objective and sets saturation on population evidence,
+    // inside the budget this mode has always had.
+    assert_the_recipe_darkens_as_the_target_does(&source, &target, &report);
+    assert!(report.recipe.saturation.abs() <= ATMOSPHERE_SAT_LIMIT, "{}", report.recipe.saturation);
     assert_eq!((report.recipe.clarity, report.recipe.texture), (0.0, 0.0));
     // v1.18.0 R12: the tone curve solved on the exposure must earn FIT_QUANT
     // against its own absence (`eliminate_unearned`). On this pair it earns
@@ -3233,6 +3261,34 @@ fn atmosphere_saturation_cap_is_load_bearing() {
     assert!(report.notes.iter().any(|n| {
         n.key == crate::rationale::keys::FIT_NOTE_ATMOSPHERE_POPULATION_EVIDENCE
     }));
+}
+
+/// J152. Every carrier of the Atmosphere tone is solved, and the lowest
+/// FINISHED one ships. The pair is `atmosphere_saturation_cap_is_load_bearing`'s:
+/// one population of pixels laid out two ways, the target then developed at
+/// Saturation +90 — an edit with chroma and NO tone in it. The stage's own
+/// start proposes an exposure and its solve keeps one (finished J* 0.06701,
+/// F 0.07206). The asks' start reads worse than that after its repair
+/// (J* 0.10881, F 0.11530) and, solved, drops the tone it was offered for
+/// and ends at J* 0.05587, F 0.05875: the recipe that says what the edit
+/// was — chroma, no exposure, no curve (traces of 2026-11-13, rel1180
+/// gates/j152-old-atmo, j152-new-atmo). Until J152 a carrier was solved only
+/// where its repaired start already read below the best finished solve, so
+/// that start was never solved and the pair shipped an exposure nothing in
+/// it asks for.
+///
+/// MUTATION THIS KILLS: solve a carrier only where its repaired start reads
+/// a lower F or J* than the best finished solve (the loop's gate until J152).
+#[test]
+fn every_tone_carrier_is_solved_and_a_chroma_only_edit_ships_no_tone() {
+    let (src, tgt) = structural_permutation_pair();
+    let boosted = render::develop_preview(&tgt, &EditRecipe { saturation: 90.0, ..Default::default() });
+    let report = fit_recipe(&src, &boosted);
+    dump_recipe("chroma_only_edit", &report);
+    assert_eq!(report.mode, FitMode::Atmosphere, "premise: {:?}", report.divergence);
+    assert!(report.err_after < report.err_before, "premise: the fit closes some of the distance");
+    assert_eq!(report.recipe.exposure_ev, 0.0, "the edit has no tone in it: {}", report.recipe.rationale);
+    assert!(report.recipe.tone_curve.is_empty(), "and no curve ships for it: {:?}", report.recipe.tone_curve);
 }
 
 #[test]
@@ -5890,10 +5946,213 @@ fn a_cell_no_evidence_speaks_for_is_blind_withheld_or_disclosed() {
     assert!(!verdict.blind.is_empty(), "the strip's cell is blind and was moved: {line}");
     assert!(!verdict.admits(true), "Withhold refuses a blind move: {line}");
     assert!(verdict.admits(false), "Disclose admits it: {line}");
-    let named = cells.blind_cell_names(&cur, &warmed).expect("…and names the cell for the disclosure");
+    let named = cells.blind_cell_names(&cur, &warmed, None).expect("…and names the cell for the disclosure");
     // The white balance's cells are hue bands (brightness merged, 2026-11-09).
     assert!(named.contains("Blue"), "the bright blue strip's cell: {named}");
-    assert_eq!(cells.blind_cell_names(&cur, &cur), None, "an unmoved frame has no blind cell to name");
+    assert_eq!(cells.blind_cell_names(&cur, &cur, None), None, "an unmoved frame has no blind cell to name");
+}
+
+/// A population ask speaks for where a brightness range sits, not for its
+/// contrast (J154, the `validity` module's Contrast). The top rows are a
+/// flat sky whose target is a darker range twice as wide, and do not pair:
+/// rank matching asks its lower ranks further down than its upper ones, and
+/// a tone that follows the asks to the letter — it lands every range on its
+/// ask — has stretched the flat sky twofold. The rows below are a grey ramp,
+/// the same on both sides, and pair. Withhold refuses the stretch, Disclose
+/// ships and names it; the same ranges carried down with their contrast kept
+/// are not stretched; an exposure is the level move itself, so the reading
+/// starts from its frame; and a range that pairs is not read.
+///
+/// MUTATION THIS CATCHES: `stretched` dropped from `Verdict::admits`; the
+/// reading taken on the paired ranges too; `gain - 1.0 > se` turned around.
+#[test]
+fn a_population_ask_does_not_speak_for_a_ranges_contrast() {
+    use super::validity::{Cells, Class};
+    let (w, h, sky_rows) = (64usize, 64usize, 24usize);
+    let gain = |v: f32, g: f32| render::linear_to_srgb(render::srgb_to_linear(v) * g);
+    let (mut cur, mut target, mut shifted, mut brighter, mut ground_stretched) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for i in 0..w * h {
+        let xf = (i % w) as f32 / (w - 1) as f32;
+        if i / w < sky_rows {
+            // A flat sky, 0.70..0.76 across the frame; its target the same
+            // pixels about a darker middle at twice the slope.
+            let s = 0.70 + 0.06 * xf;
+            cur.push([s; 3]);
+            target.push([0.50 + 2.0 * (s - 0.73); 3]);
+            shifted.push([s - 0.23; 3]);
+            brighter.push([gain(s, 1.3); 3]);
+            ground_stretched.push([s; 3]);
+        } else {
+            let g = 0.10 + 0.25 * xf;
+            cur.push([g; 3]);
+            target.push([g; 3]);
+            shifted.push([g; 3]);
+            brighter.push([gain(g, 1.3); 3]);
+            ground_stretched.push([0.225 + 1.5 * (g - 0.225); 3]);
+        }
+    }
+    let mut evidence = evidence_model(&cur, &target);
+    for (i, paired) in evidence.paired.iter_mut().enumerate() {
+        *paired = i / w >= sky_rows;
+    }
+    let cells = Cells::new(&cur, &target, &evidence);
+    let asks = cells.asks(Class::Tone, &cur);
+    assert!(cells.asked_by_population(&asks), "premise: a population asks the sky's ranges");
+    // The target itself: every range on its ask, and the sky stretched.
+    let mut v = cells.verdict(&asks, &target);
+    assert!(v.admits(true), "premise: the target lands every range on its ask: {}", cells.describe(Class::Tone, &v));
+    v.stretched = cells.stretched(&asks, &cur, &target);
+    let line = cells.describe(Class::Tone, &v);
+    assert!(!v.stretched.is_empty(), "the sky's range was stretched: {line}");
+    assert!(v.stretched.iter().all(|s| (s.gain - 2.0).abs() < 0.05), "…twofold: {line}");
+    assert!(line.contains("contrast x"), "…and the trace says so: {line}");
+    assert!(!v.admits(true), "Withhold refuses the stretch: {line}");
+    assert!(v.admits(false), "Disclose admits it: {line}");
+    let named = cells.blind_cell_names(&cur, &target, Some(&cur)).expect("…and names the range for the disclosure");
+    assert!(named.contains("luma[") && named.contains("(contrast)"), "the stretched range, marked: {named}");
+    assert_eq!(cells.blind_cell_names(&cur, &target, None), None, "no blind cell was moved");
+    // The same ranges carried down with their contrast kept.
+    assert!(cells.stretched(&asks, &cur, &shifted).is_empty(), "a shift is not a stretch");
+    // An exposure is the level move itself. Read from the frame WITHOUT it a
+    // brightening is taken for a stretch (display contrast rises with the
+    // level), which is why the reading starts from the exposure's own frame.
+    assert!(!cells.stretched(&asks, &cur, &brighter).is_empty(), "premise: a brightening raises display contrast");
+    assert!(cells.stretched(&asks, &brighter, &brighter).is_empty(), "…and read from its own frame it stretches nothing");
+    // A range that pairs is not read: its pixels' own distance reads it.
+    assert!(cells.stretched(&asks, &cur, &ground_stretched).is_empty(), "a paired range's contrast is the pairs' to read");
+}
+
+/// The solve takes the contrast reading (J154) where it can refuse, from the
+/// frame the candidate's exposure leaves, and the tone's re-estimate takes
+/// it too. A flat sky over a grey ramp, as an image the solve renders. The
+/// target's ramp is the source's 0.9 EV down and pairs; its sky does not
+/// pair: it sits where that exposure leaves the source's sky, at 1.6 times
+/// the display contrast the source's sky has — the exposure alone leaves it
+/// about three quarters of that.
+///
+/// The exposure alone is admitted: it carries every range toward its ask.
+/// Under it, a curve that gives the sky nine tenths of the display contrast
+/// it had is refused at the default strength — every range moved toward its
+/// ask, and read from the frame WITHOUT the exposure the sky has less
+/// contrast than it had; the stretch is the shape's own, on the frame the
+/// exposure leaves. Where a refusal is disclosed (0.85) the same candidate
+/// is admitted, and so is, at the default strength, a shape that carries the
+/// sky two codes down with its contrast kept. The tone re-estimated from its
+/// asks (`Joint::ask_fit`), offered the curve that lands the sky on its
+/// target, carries the level and is admitted as it stands.
+///
+/// MUTATION THIS CATCHES: the contrast reading dropped from
+/// `Joint::class_refused`, or taken from the frame without the exposure; and
+/// dropped from the admission of `Joint::ask_fit`'s steps.
+#[test]
+fn the_solve_reads_a_populations_contrast_on_the_frame_its_exposure_leaves() {
+    use super::joint::{Coord, Joint, Point, Refusal};
+    use super::validity::Class;
+    use crate::recipe::{CurvePoint, GradeStrength};
+    let (w, h, sky_rows) = (64u32, 64u32, 24u32);
+    // The sky fills two of the law's brightness ranges, the ramp five.
+    let src = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+        let xf = x as f32 / (w - 1) as f32;
+        let v = if y < sky_rows { 0.655 + 0.105 * xf } else { 0.10 + 0.25 * xf };
+        image::Rgb([(v * 255.0).round() as u8; 3])
+    }));
+    let base = EditRecipe::default();
+    let exposure = EditRecipe { exposure_ev: -0.9, ..EditRecipe::default() };
+    let sp = pixels_of(&render::develop_preview(&src, &base));
+    let ex = pixels_of(&render::develop_preview(&src, &exposure));
+    let is_sky = |i: usize| i / (w as usize) < sky_rows as usize;
+    let lum = |px: &[[f32; 3]], x: u32| luma601(&px[x as usize]);
+    // The sky's ends on each frame (the top row), and what the exposure
+    // leaves of its display contrast.
+    let (s_lo, s_hi, e_lo, e_hi) = (lum(&sp, 0), lum(&sp, w - 1), lum(&ex, 0), lum(&ex, w - 1));
+    let (s_mid, e_mid, half) = (0.5 * (s_lo + s_hi), 0.5 * (e_lo + e_hi), 0.5 * (s_hi - s_lo));
+    let left = (e_hi - e_lo) / (s_hi - s_lo);
+    assert!(
+        (0.6..0.85).contains(&left),
+        "premise: 0.9 EV down, the sky keeps about three quarters of its display contrast: {left:.3}"
+    );
+    let tp: Vec<[f32; 3]> = (0..sp.len())
+        .map(|i| if is_sky(i) { [e_mid + 1.6 * (luma601(&sp[i]) - s_mid); 3] } else { ex[i] })
+        .collect();
+    let mut evidence = evidence_model(&sp, &tp);
+    for (i, paired) in evidence.paired.iter_mut().enumerate() {
+        *paired = !is_sky(i);
+    }
+    let law = render::WbLaw::of(&base);
+    let ctx_at = |strength: f32| {
+        let strength = GradeStrength::new(strength);
+        super::solve::SolveCtx::atmosphere(
+            &src,
+            &sp,
+            &tp,
+            &evidence,
+            &base,
+            strength,
+            FitBudget::for_strength(strength),
+            law,
+            vec![1.0; sp.len()],
+        )
+    };
+    let (withhold, disclose) = (ctx_at(0.65), ctx_at(0.85));
+    assert_eq!(withhold.budget.vetoes, VetoPolicy::Withhold, "premise: the default strength withholds");
+    assert_eq!(disclose.budget.vetoes, VetoPolicy::Disclose, "premise: 0.85 discloses");
+    // The shapes, under the exposure: the line up to sixteen codes below the
+    // sky as the exposure leaves it, then that sky's range onto `lo..hi`.
+    let code = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+    let shaped = |lo: f32, hi: f32| EditRecipe {
+        tone_curve: vec![
+            CurvePoint { input: code(e_lo) - 16, output: code(e_lo) - 16 },
+            CurvePoint { input: code(e_lo), output: code(lo) },
+            CurvePoint { input: code(e_hi), output: code(hi) },
+        ],
+        ..exposure.clone()
+    };
+    let stretch = shaped(e_mid - 0.9 * half, e_mid + 0.9 * half);
+    let carried = shaped(e_lo - 2.0 / 255.0, e_hi - 2.0 / 255.0);
+    let landed = shaped(e_mid - 1.6 * half, e_mid + 1.6 * half);
+    let first = Point::bounded(landed);
+    let joint = Joint::with_pinned(&withhold, Coord::atmosphere_pinned(&first));
+    let open = Joint::with_pinned(&disclose, Coord::atmosphere_pinned(&first));
+    let read = |joint: &Joint<'_, '_>, r: &EditRecipe| {
+        let p = Point::bounded(r.clone());
+        let e = joint.eval(&p);
+        (joint.refusal(&p, &e.px), e.px)
+    };
+    let cells = &withhold.validity;
+    let asks = cells.asks(Class::Tone, &sp);
+    assert!(cells.asked_by_population(&asks), "premise: a population asks the sky's ranges");
+    assert_eq!(read(&joint, &exposure).0, None, "the exposure alone carries every range toward its ask and is admitted");
+    let (refused, px) = read(&joint, &stretch);
+    let own = cells.verdict(&asks, &px);
+    assert!(own.admits(true), "premise: the tone's own axes admit the shape: {}", cells.describe(Class::Tone, &own));
+    assert!(
+        cells.stretched(&asks, &sp, &px).is_empty(),
+        "premise: read from the frame without the exposure, the sky has less contrast than it had"
+    );
+    let on_exposed = cells.stretched(&asks, &ex, &px);
+    eprintln!(
+        "CONTRAST_IN_SOLVE the exposure leaves {left:.3} of the sky's contrast; the shape on its frame {:?}",
+        on_exposed.iter().map(|s| (s.gain, s.se)).collect::<Vec<_>>()
+    );
+    assert!(!on_exposed.is_empty(), "premise: read from the frame the exposure leaves, the shape stretched the sky");
+    assert_eq!(refused, Some(Refusal::Tone), "at the default strength the stretch is refused");
+    assert_eq!(read(&open, &stretch).0, None, "where a refusal is disclosed the same candidate is admitted");
+    assert_eq!(read(&joint, &carried).0, None, "a shape that keeps the range's contrast is admitted");
+    // The re-estimate, offered the curve that lands the sky on its target.
+    let fitted = joint.ask_fit(&first, Refusal::Tone);
+    let e = joint.eval(&fitted);
+    eprintln!(
+        "CONTRAST_IN_SOLVE the re-estimate: {:.2} EV, curve {:?}",
+        fitted.recipe.exposure_ev,
+        fitted.recipe.tone_curve.iter().map(|k| (k.input, k.output)).collect::<Vec<_>>()
+    );
+    assert!(
+        fitted.recipe.exposure_ev < -0.5,
+        "premise: the re-estimate carries the level: {:.2} EV",
+        fitted.recipe.exposure_ev
+    );
+    assert_eq!(joint.refusal(&fitted, &e.px), None, "the tone re-estimated from its asks is admitted as it stands");
 }
 
 /// An Atmosphere solve whose reference is a readable shared-content
@@ -6527,12 +6786,10 @@ fn invented_sky_gradient_energy_is_not_amplified() {
     );
     assert!(ratio <= 1.0, "invented sky was sharpened: {ratio:.4}x neutral");
     assert_eq!(report.mode, FitMode::Atmosphere);
-    // v1.18.0 R12: the curve solved on the exposure earns 0.000835 of J*
-    // here, under FIT_QUANT, and is set back (`eliminate_unearned`); the
-    // recipe is the exposure alone at its -1.00 budget edge. The old sum
-    // `|ev| + |contrast| + curve points + |sat| > 1.0` counted the curve's
-    // five points and reads exactly 1.0 without them, so the non-empty check
-    // is now the recipe's own: some control moved.
+    // The non-empty check is the recipe's own: some control moved. (The old
+    // sum `|ev| + |contrast| + curve points + |sat| > 1.0` counted a curve's
+    // five points and read exactly 1.0 on a recipe that was an exposure of
+    // -1.00 alone, v1.18.0 R12.)
     assert!(
         report.recipe.exposure_ev.abs() > 0.001
             || report.recipe.contrast.abs() > 0.001
@@ -6540,7 +6797,10 @@ fn invented_sky_gradient_energy_is_not_amplified() {
             || report.recipe.saturation.abs() > 0.001,
         "content-divergent calibration pair was incorrectly returned as an empty recipe"
     );
-    assert_eq!(report.recipe.saturation, 0.0);
+    // Was a saturation of exactly 0, the staged solver's recipe of 2026-08-27:
+    // the joint solve sets saturation on population evidence, inside the
+    // budget this mode has always had.
+    assert!(report.recipe.saturation.abs() <= ATMOSPHERE_SAT_LIMIT, "{}", report.recipe.saturation);
     assert_eq!(report.recipe.clarity, 0.0);
     assert_eq!(report.recipe.texture, 0.0);
 }

@@ -541,6 +541,9 @@ pub(super) struct Joint<'c, 'a> {
     /// Each class's last leave-one-out frame with the recipe it renders, in
     /// [`CLASSES`]' order ([`Joint::class_frame`]).
     frames: std::cell::RefCell<[Option<ClassFrame>; 4]>,
+    /// The last candidate without the tone's shape that was rendered for the
+    /// contrast reading, with its render ([`Joint::stretched`]).
+    exposed: std::cell::RefCell<Option<ClassFrame>>,
     /// The solve's number in this process, for the trace.
     id: u32,
 }
@@ -587,6 +590,7 @@ impl<'c, 'a> Joint<'c, 'a> {
             scaled: std::cell::RefCell::new(Vec::new()),
             last_refused: std::cell::Cell::new(None),
             frames: std::cell::RefCell::new(Default::default()),
+            exposed: std::cell::RefCell::new(None),
             id: SOLVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
@@ -1155,11 +1159,20 @@ impl<'c, 'a> Joint<'c, 'a> {
         let own = (w_r != *base).then(|| self.class_frame(class, w_r));
         let before: &[[f32; 3]] = own.as_ref().map_or(ctx.sp, |frame| frame.as_slice());
         let cells = &ctx.validity;
-        let v = cells.judge(class.class(), before, px);
-        let refused = !v.admits(ctx.budget.vetoes == VetoPolicy::Withhold);
+        let withhold = ctx.budget.vetoes == VetoPolicy::Withhold;
+        let asks = cells.asks(class.class(), before);
+        let mut v = cells.verdict(&asks, px);
+        // The tone's contrast on the ranges a population asks (J154), read
+        // only where it can refuse: under Withhold, on a candidate the
+        // class's own axes admit. A Disclose solve names those ranges once,
+        // on its finished recipe (`validity::disclosed_cells`).
+        if withhold && class == Refusal::Tone && v.admits(true) {
+            v.stretched = self.stretched(&asks, r, before, px);
+        }
+        let refused = !v.admits(withhold);
         if refused && crate::config::live_env_os("AUTOSHADE_G_TRACE").is_some() {
             eprintln!("G {}", cells.describe(class.class(), &v));
-            eprintln!("G asks {}", cells.describe_asks(&cells.asks(class.class(), before)));
+            eprintln!("G asks {}", cells.describe_asks(&asks));
         }
         refused
     }
@@ -1180,6 +1193,43 @@ impl<'c, 'a> Joint<'c, 'a> {
         let frame = std::rc::Rc::new(self.render(&w_r));
         self.frames.borrow_mut()[slot] = Some((w_r, frame.clone()));
         frame
+    }
+
+    /// The tone's brightness ranges that a population asks and the candidate
+    /// `r` STRETCHED ([`super::validity::Cells::stretched`]), read between
+    /// the candidate without the tone's shape — its exposure kept
+    /// ([`super::solve::without_tone_shape`]) — and its render `px`. `asks`
+    /// are the tone's, read on `toneless`, its leave-one-out frame. Nothing
+    /// is rendered where no range is asked by a population or the shape is
+    /// the base's; where the exposure is the base's too, the frame without
+    /// the shape IS `toneless`. Any other is rendered and the last one kept
+    /// with its recipe, as the class frames are: a step of the shape alone
+    /// is read against the frame its last step was.
+    fn stretched(
+        &self,
+        asks: &super::validity::ClassAsks,
+        r: &EditRecipe,
+        toneless: &[[f32; 3]],
+        px: &[[f32; 3]],
+    ) -> Vec<super::validity::Stretched> {
+        let ctx = self.ctx;
+        if !ctx.validity.asked_by_population(asks) {
+            return Vec::new();
+        }
+        let w = super::solve::without_tone_shape(ctx.base, r);
+        if w == *r {
+            return Vec::new();
+        }
+        if w.exposure_ev == ctx.base.exposure_ev {
+            return ctx.validity.stretched(asks, toneless, px);
+        }
+        let kept = self.exposed.borrow().as_ref().filter(|(recipe, _)| *recipe == w).map(|(_, frame)| frame.clone());
+        let frame = kept.unwrap_or_else(|| {
+            let frame = std::rc::Rc::new(self.render(&w));
+            *self.exposed.borrow_mut() = Some((w, frame.clone()));
+            frame
+        });
+        ctx.validity.stretched(asks, &frame, px)
     }
 
     /// A start that violates G has the class G refuses RE-ESTIMATED from
@@ -1508,7 +1558,8 @@ impl<'c, 'a> Joint<'c, 'a> {
     /// THE BASE of that class, by the same finite-difference direction as
     /// [`Joint::descend`], coarse to the quantum, every step admitted by the
     /// class's own law on that frame ([`validity::Cells::verdict`]; the white
-    /// balance also inside the gain budget) and backtracked to the quantum
+    /// balance also inside the gain budget, the tone also on its contrast
+    /// reading, [`Joint::stretched`]) and backtracked to the quantum
     /// before the pass ends: the estimate is admissible by construction. The
     /// stages remain the proposal; where it is refused, the law's own asks
     /// are the estimate. One mechanism for every class, no per-class
@@ -1519,7 +1570,7 @@ impl<'c, 'a> Joint<'c, 'a> {
     /// luma[0.12-0.18] asks +0.23 ln, the refit still darkened it) and the
     /// scaled class earned less than its dof price — nothing shipped
     /// (gates/j104).
-    fn ask_fit(&self, p: &Point, class: Refusal) -> Point {
+    pub(super) fn ask_fit(&self, p: &Point, class: Refusal) -> Point {
         let ctx = self.ctx;
         let coords: Vec<Coord> = class_coords(class, p).into_iter().filter(|c| self.free(*c)).collect();
         if coords.is_empty() {
@@ -1538,7 +1589,11 @@ impl<'c, 'a> Joint<'c, 'a> {
             let within_budget = class != Refusal::WhiteBalance
                 || law.point_of(&q.recipe) == law.point_of(ctx.base)
                 || wb_gains_fit_budget(law.gains(law.point_of(&q.recipe)), ctx.budget);
-            within_budget && ctx.validity.verdict(&asks, px).admits(withhold)
+            within_budget
+                && ctx.validity.verdict(&asks, px).admits(withhold)
+                // The tone's contrast on a population's ranges (J154), as G
+                // reads it (`Joint::class_refused`).
+                && !(withhold && class == Refusal::Tone && !self.stretched(&asks, &q.recipe, &before, px).is_empty())
         };
         let misfit = |q: &Point| -> (f32, bool) {
             let px = self.render(&q.recipe);

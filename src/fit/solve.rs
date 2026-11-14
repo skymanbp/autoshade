@@ -454,6 +454,13 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     };
 
     // --- report ---------------------------------------------------------------
+    // The cells no evidence spoke for that the recipe moved (the law's blind
+    // cells, `fit::validity`) and the ranges a population asks whose
+    // contrast the tone's shape raised (J154): refused under Withhold,
+    // disclosed here under Disclose. Read before the report takes the recipe.
+    let veto_cells = (budget.vetoes == VetoPolicy::Disclose)
+        .then(|| super::validity::disclosed_cells(&ctx.validity, ctx.s_img, base, &recipe, &sp, &after_px))
+        .flatten();
     compose_report(
         recipe,
         Measured {
@@ -474,12 +481,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         SolveFacts {
             budget: Some(budget),
             strength: Some(options.strength.get()),
-            // The cells no evidence spoke for that the recipe moved (the
-            // law's blind cells, `fit::validity`): refused under Withhold,
-            // disclosed here under Disclose.
-            veto_cells: (budget.vetoes == VetoPolicy::Disclose)
-                .then(|| ctx.validity.blind_cell_names(&sp, &after_px))
-                .flatten(),
+            veto_cells,
             // The same budget disclosures Atmosphere makes, because it is the
             // same stage: a Full-mode WB that was scaled into the gains budget
             // or that landed on the Kelvin domain's edge says so in the same
@@ -702,6 +704,22 @@ pub(super) fn tone_part(base: &EditRecipe, recipe: &EditRecipe) -> EditRecipe {
     toned.blacks = recipe.blacks;
     toned.tone_curve = recipe.tone_curve.clone();
     toned
+}
+
+/// `recipe` with the tone's SHAPE at the base's — the contrast, the four
+/// range sliders and the master curve — and its exposure kept: the frame
+/// the tone's contrast reading starts from (`validity::Cells::stretched`).
+/// What an exposure does to a range's display contrast is the level move's
+/// own consequence and sits in both of that reading's frames.
+pub(super) fn without_tone_shape(base: &EditRecipe, recipe: &EditRecipe) -> EditRecipe {
+    let mut exposed = recipe.clone();
+    exposed.contrast = base.contrast;
+    exposed.highlights = base.highlights;
+    exposed.shadows = base.shadows;
+    exposed.whites = base.whites;
+    exposed.blacks = base.blacks;
+    exposed.tone_curve = base.tone_curve.clone();
+    exposed
 }
 
 /// The solve's read-only context: the pair, its evidence and cells, the

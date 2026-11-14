@@ -223,17 +223,16 @@ fn field_adjoint_matches_forward() {
 /// frames (luma 0.64 and 0.71, so they share the field's brightness-bin
 /// vertices and no field can serve both exactly).
 /// Right half: the bright pixel clipped in the SOURCE only (the target's red
-/// 0.90) — its true source value is unknown, and that channel still does not
-/// testify; the pixel's green and blue, measured in both frames, do (J150:
-/// the rule is the channel's, `a_channel_across_the_clip_does_not_silence_the_pixels_other_channels`).
+/// 0.90) — to the field its red is the clip code it is rendered at, so that
+/// channel testifies too and asks its own move down (J153,
+/// `a_channel_the_target_alone_holds_at_the_clip_asks_the_frame_up_to_it`).
 /// Until v1.17.1 the clipped-in-both pixels were left out of the solve and
 /// took their vertices' red cut anyway, as p36's clouds did (0.999 → 0.972
 /// against a target at 0.998). Measured 2026-11-02: the clipped-in-both red
 /// renders at 0.988 under the rule (the warm pixels' at 0.765), at 0.935
 /// with those pixels left out (0.750).
 ///
-/// MUTATION THIS KILLS: weigh only pixels inside the clip in both frames, or
-/// let a one-sided clip testify.
+/// MUTATION THIS KILLS: weigh only pixels inside the clip in both frames.
 #[test]
 fn a_channel_clipped_in_both_frames_testifies_and_keeps_its_colour() {
     let (w, h) = FIXTURE;
@@ -261,8 +260,8 @@ fn a_channel_clipped_in_both_frames_testifies_and_keeps_its_colour() {
     let (kept, cut) = (red(1), red(0));
     assert!(of(1).all(|i| testifies(&current[i], &target[i])), "clipped in both frames testifies");
     assert!(
-        of(2).all(|i| testifying(&current[i], &target[i]) == [false, true, true]),
-        "a channel clipped on one side does not testify; the pixel's other two do"
+        of(2).all(|i| testifying(&current[i], &target[i]) == [true; 3]),
+        "a channel at the clip in the frame only testifies with the pixel's other two"
     );
     assert!(of(1).any(|i| field.weight[i] > 0.0), "premise: the clipped-in-both pixels carry evidence weight");
     assert!(cut < 0.78, "premise: the warm pixels' red was cut toward 0.72: {cut:.4}");
@@ -1138,9 +1137,10 @@ fn calibration_field_ceiling_matches_the_numpy_solver() {
 /// and the blue 0.089 too high, which is what reads pink-white against a
 /// yellow-orange target. Applied to the pixel, the rule refused every cloud
 /// pixel for its red, the solve met only the grey's "no change" and the
-/// cloud's blue stayed where it was. Applied to the channel, the red stays
-/// out and the green and the blue ask: away from the seam the blue comes
-/// more than half of the way down, and the grey away from it is left alone.
+/// cloud's blue stayed where it was. Applied to the channel, the green and
+/// the blue ask (and since J153 the red too, up to the clip its target
+/// holds): away from the seam the blue comes more than half of the way
+/// down, and the grey away from it is left alone.
 /// (The halves are apart in space on purpose: two populations interleaved
 /// pixel by pixel share the smoothed guide and so the vertices, and what
 /// one asks the other is given.)
@@ -1167,8 +1167,8 @@ fn a_channel_across_the_clip_does_not_silence_the_pixels_other_channels() {
     let field = LocalField::solve(&current, &target, w as u32, h as u32, &evidence).expect("solve");
     let cloud = || (0..w * h).filter(|&i| i % w >= w / 2);
     assert!(
-        cloud().all(|i| testifying(&current[i], &target[i]) == [false, true, true]),
-        "premise: the cloud's red is across the clip, its green and blue are measured in both frames"
+        cloud().all(|i| testifying(&current[i], &target[i]) == [true; 3]),
+        "premise: the cloud's red is across the clip, and every channel of the pixel has its say"
     );
     assert!(cloud().any(|i| field.weight[i] > 0.0), "premise: the evidence gives cloud pixels weight");
     let render = field.render(&current);
@@ -1184,6 +1184,87 @@ fn a_channel_across_the_clip_does_not_silence_the_pixels_other_channels() {
         .map(|i| (0..3).map(|c| (render[i][c] - current[i][c]).abs()).fold(0.0f32, f32::max))
         .fold(0.0f32, f32::max);
     assert!(grey_moved < 4.0 / 255.0, "the grey the target leaves alone stays within 4 codes: {grey_moved:.4}");
+}
+
+/// To the field a channel at the white clip is the value it meets (J153,
+/// v1.18.0). The left half of the frame is a textured grey the target leaves
+/// alone; the right half is the seaside street's white cloud as the field
+/// met it: the frame at (0.949, 0.940, 0.936), cream-white, its target at
+/// (0.976, 0.982, 1.000), blue-white with the blue at the clip. While a
+/// channel across the clip had no say the red and the green asked up,
+/// nothing asked the blue, and the cloud rendered with its blue under its
+/// green — cream where its target is blue-white. Asked, the blue comes more
+/// than half of the way to the clip and ends above the green, as the target
+/// has it; the grey away from the seam is left alone.
+///
+/// MUTATION THIS KILLS: leave a channel that is at the clip on one side only
+/// out of the data term (`testifying` answering
+/// `(current[c] >= HIGH) == (target[c] >= HIGH)`, the rule from J150 to J153).
+#[test]
+fn a_channel_the_target_alone_holds_at_the_clip_asks_the_frame_up_to_it() {
+    let (w, h) = FIXTURE;
+    let mut lcg = Lcg(0x5eed_c153);
+    let (mut current, mut target) = (Vec::new(), Vec::new());
+    for i in 0..w * h {
+        if i % w < w / 2 {
+            let grey = [0.50 + (lcg.unit() - 0.5) * 0.06; 3].map(byte_round);
+            current.push(grey);
+            target.push(grey);
+        } else {
+            // a texture small enough to keep the target's red and green under the clip
+            let grain = (lcg.unit() - 0.5) * 0.02;
+            current.push([0.949 + grain, 0.940 + grain, 0.936 + grain].map(byte_round));
+            target.push([0.976 + grain, 0.982 + grain, 1.0].map(byte_round));
+        }
+    }
+    let evidence = fit::evidence_model_for(&current, &target, w as u32, h as u32);
+    let field = LocalField::solve(&current, &target, w as u32, h as u32, &evidence).expect("solve");
+    let cloud = || (0..w * h).filter(|&i| i % w >= w / 2);
+    assert!(
+        cloud().all(|i| target[i][2] >= 254.0 / 255.0 && target[i][0].max(target[i][1]) < 254.0 / 255.0),
+        "premise: the cloud's target holds its blue at the clip, its red and green under it"
+    );
+    assert!(cloud().any(|i| field.weight[i] > 0.0), "premise: the evidence gives cloud pixels weight");
+    let render = field.render(&current);
+    // the outer third: away from the seam between the halves
+    let far_cloud = || (0..w * h).filter(|&i| i % w >= 2 * w / 3);
+    let mean = |px: &[[f32; 3]], c: usize| far_cloud().map(|i| px[i][c] as f64).sum::<f64>() / far_cloud().count() as f64;
+    let (from, to, blue, green) = (mean(&current, 2), mean(&target, 2), mean(&render, 2), mean(&render, 1));
+    assert!(
+        blue > from + 0.5 * (to - from),
+        "the cloud's blue comes more than half of the way from {from:.3} to {to:.3}: {blue:.4}"
+    );
+    assert!(blue > green, "the cloud ends blue-white as its target has it, blue above green: {blue:.4} vs {green:.4}");
+    let grey_moved = (0..w * h).filter(|&i| i % w < w / 3)
+        .map(|i| (0..3).map(|c| (render[i][c] - current[i][c]).abs()).fold(0.0f32, f32::max))
+        .fold(0.0f32, f32::max);
+    assert!(grey_moved < 4.0 / 255.0, "the grey the target leaves alone stays within 4 codes: {grey_moved:.4}");
+    // Read last, so that with the rule undone it is the RENDER above that fails first, the cream cloud itself.
+    assert!(
+        cloud().all(|i| testifying(&current[i], &target[i]) == [true; 3]),
+        "the blue, at the clip in the target only, testifies with the red and the green"
+    );
+}
+
+/// A frame pixel blown in every channel is asked nothing its target does not
+/// hold at the clip too (J153): the engine leaves such a pixel neutral under
+/// the field (`render::blown_white`, `keep_blown_white`), so a move of one
+/// of its channels is never rendered. One step under the engine's clip in
+/// one channel and it is a pixel like any other.
+///
+/// MUTATION THIS KILLS: ask every channel of every pixel (`testifying`
+/// answering `[true; 3]` past the luma gate).
+#[test]
+fn a_frame_pixel_blown_in_every_channel_is_asked_only_where_its_target_is_at_the_clip() {
+    let blown = [1.0f32; 3];
+    assert_eq!(testifying(&blown, &[1.0, 1.0, 1.0]), [true; 3], "white on both sides: stay");
+    assert_eq!(testifying(&blown, &[1.0, 0.90, 0.80]), [true, false, false]);
+    assert_eq!(testifying(&blown, &[0.90, 0.90, 0.90]), [false; 3]);
+    assert!(!testifies(&blown, &[0.90, 0.90, 0.90]), "and it counts for no occupancy");
+    let under = crate::render::WHITE_CLIP - 1.0 / 255.0;
+    assert!(!crate::render::blown_white(&[1.0, 1.0, under]), "premise: one channel under the engine's clip");
+    assert_eq!(testifying(&[1.0, 1.0, under], &[0.90, 0.90, 0.80]), [true; 3], "two channels at the clip: asked");
+    assert_eq!(testifying(&[0.95, 0.94, 0.93], &[0.97, 0.98, 1.0]), [true; 3], "the target's clip alone: asked");
 }
 
 /// Probe 1 of 2: export exactly what `LocalField::solve` consumed so the NumPy

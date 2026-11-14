@@ -65,6 +65,23 @@
 //!   and no target population in its brightness range) may not be moved by
 //!   more than [`UNSUPPORTED_RANGE_MOVE`] under [`VetoPolicy::Withhold`]; under
 //!   `Disclose` it is moved and named.
+//! * **Contrast** (J154, 2026-11-13): a population ask speaks for where a
+//!   brightness range sits, not for the range's contrast. Rank matching
+//!   maps a dense range onto a spread one at a slope that is the ratio of
+//!   the two densities, and where the content was replaced (a flat sky the
+//!   target paints clouds over) that ratio is the new content's spread, not
+//!   an edit: a tone curve that follows it amplifies the flat sky's own
+//!   ripple. So the tone is also read on what its SHAPE — the contrast, the
+//!   four range sliders, the master curve — does to a range whose brightness
+//!   ask is the population's ([`Cells::stretched`]): the slope of the
+//!   members' display luma on the candidate against their display luma on
+//!   the candidate without the shape, its exposure kept. Above 1 by more
+//!   than its error the range was stretched with no evidence for it:
+//!   refused under `Withhold`, shipped and named under `Disclose`. The
+//!   exposure is in both frames — what a level move does to a range's
+//!   display contrast is its own consequence, either way. A range that
+//!   pairs is not read here (its pixels' own distance reads its contrast
+//!   in J*), and compressing a range is not read at all.
 //!
 //! This replaces, as code, the unsupported-range vetoes, the white balance's
 //! foreign-hue and rotation gates and the 2026-11-01 shared-component rule,
@@ -191,6 +208,53 @@ fn reading(samples: &mut Vec<(f32, f32)>, axis: Axis, level: f32) -> Option<(f32
     Some((m, (se * se + code_variance(axis, level)).sqrt()))
 }
 
+/// The contrast a transfer gave a set of pixels: the least-squares slope of
+/// their display luma on `after` against their display luma on `before`, at
+/// the weights `w` — 1 where the range's contrast was kept, above 1 where it
+/// was stretched — and its error: the regression's own, and the range's
+/// extent read to one output code at each end, in quadrature (a rise of
+/// under a code across the range is not one the frame shows). `None` under
+/// [`SUPPORT_MIN_PIXELS`] weighted members, or where the range is flat
+/// before (a spread under half a code: nothing a transfer could stretch).
+fn contrast_gain(before: &[[f32; 3]], after: &[[f32; 3]], w: &[f32], members: &[u32]) -> Option<(f32, f32)> {
+    let read = |i: u32| {
+        let i = i as usize;
+        (luma601(&before[i]) as f64, luma601(&after[i]) as f64, w[i] as f64)
+    };
+    let heard = |(x, y, wi): (f64, f64, f64)| wi > 0.0 && x.is_finite() && y.is_finite();
+    let (mut n, mut sw, mut sww, mut sx, mut sy) = (0usize, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for (x, y, wi) in members.iter().map(|&i| read(i)).filter(|&s| heard(s)) {
+        n += 1;
+        sw += wi;
+        sww += wi * wi;
+        sx += wi * x;
+        sy += wi * y;
+    }
+    if (n as f32) < SUPPORT_MIN_PIXELS {
+        return None;
+    }
+    let (mx, my) = (sx / sw, sy / sw);
+    let (mut vxx, mut vxy, mut vyy) = (0.0f64, 0.0f64, 0.0f64);
+    for (x, y, wi) in members.iter().map(|&i| read(i)).filter(|&s| heard(s)) {
+        vxx += wi * (x - mx) * (x - mx);
+        vxy += wi * (x - mx) * (y - my);
+        vyy += wi * (y - my) * (y - my);
+    }
+    let (vxx, vxy, vyy) = (vxx / sw, vxy / sw, vyy / sw);
+    let code = 1.0f64 / 255.0;
+    if vxx.sqrt() < 0.5 * code {
+        return None;
+    }
+    let gain = vxy / vxx;
+    // The regression's own error, at the weights' effective count.
+    let effective = (sw * sw / sww).max(3.0);
+    let regression = (vyy - gain * vxy).max(0.0) / (vxx * (effective - 2.0));
+    // The extent — a uniform range of variance v is sqrt(12 v) wide — read
+    // to one code at each end (a code's quantisation variance, 1/12 code^2).
+    let ends = 2.0 * code * code / 12.0 / (12.0 * vxx);
+    Some((gain as f32, (regression + ends).sqrt() as f32))
+}
+
 /// Do the members with a population ask carry the MAJORITY of the weight of
 /// the members the axis can be read on? `samples` are the cell's population
 /// asks on one slot `(ask, weight)`, NaN where the member's brightness range
@@ -287,12 +351,26 @@ pub(super) struct Verdict {
     /// Cells with standing and no ask that the class moved by more than
     /// [`UNSUPPORTED_RANGE_MOVE`].
     pub(super) blind: Vec<usize>,
+    /// The tone's brightness ranges a population asks whose contrast its
+    /// shape raised ([`Cells::stretched`]). Filled by the reader that has
+    /// the frame without the shape (`joint::Joint::class_refused`);
+    /// [`Cells::verdict`] leaves it empty.
+    pub(super) stretched: Vec<Stretched>,
 }
 
 impl Verdict {
     pub(super) fn admits(&self, withhold: bool) -> bool {
-        self.refused.is_empty() && (!withhold || self.blind.is_empty())
+        self.refused.is_empty() && (!withhold || (self.blind.is_empty() && self.stretched.is_empty()))
     }
+}
+
+/// One brightness range the tone's shape stretched with no evidence for it:
+/// the contrast it gave the range ([`contrast_gain`]) and that reading's error.
+#[derive(Clone, Debug)]
+pub(super) struct Stretched {
+    pub(super) cell: usize,
+    pub(super) gain: f32,
+    pub(super) se: f32,
 }
 
 /// One axis's ask in one cell: the ask per slot `(value, se)` and whether it
@@ -767,6 +845,34 @@ impl Cells {
         out
     }
 
+    /// Does a population ask any of `asks`' cells its brightness? Where every
+    /// asked cell pairs, [`Cells::stretched`] has nothing to read.
+    pub(super) fn asked_by_population(&self, asks: &ClassAsks) -> bool {
+        asks.per_cell.iter().any(|axes| axes.iter().any(|a| a.axis == Axis::Luma && !a.paired))
+    }
+
+    /// The tone's brightness ranges that a POPULATION asks and whose contrast
+    /// the tone's shape RAISED (module docs, Contrast): per such cell of
+    /// `asks` — the tone's — the slope of the members' display luma on
+    /// `after` against their display luma on `exposed`, the candidate without
+    /// the tone's shape and with its exposure, where it exceeds 1 by more
+    /// than its error ([`contrast_gain`]). Empty for another class's asks.
+    pub(super) fn stretched(&self, asks: &ClassAsks, exposed: &[[f32; 3]], after: &[[f32; 3]]) -> Vec<Stretched> {
+        if asks.class != Class::Tone {
+            return Vec::new();
+        }
+        self.grid(Class::Tone)
+            .par_iter()
+            .zip(&asks.per_cell)
+            .enumerate()
+            .filter(|(_, (_, axes))| axes.iter().any(|a| a.axis == Axis::Luma && !a.paired))
+            .filter_map(|(ci, (cell, _))| {
+                let (gain, se) = contrast_gain(exposed, after, &self.w, &cell.members)?;
+                (gain - 1.0 > se).then_some(Stretched { cell: ci, gain, se })
+            })
+            .collect()
+    }
+
     /// The misfit's own quantum: one output code on every cell with an ask
     /// (the unit [`Cells::misfit`] sums in), the resolution the
     /// re-estimation's probe reads a coordinate's slope at.
@@ -806,14 +912,22 @@ impl Cells {
     /// `Disclose` solve discloses (`FIT_NOTE_VETO_DISCLOSED`) where a
     /// `Withhold` solve refuses the candidate ([`Verdict::admits`]). The
     /// chroma dials and the curves share their axes, so three readings
-    /// cover the four classes.
-    pub(super) fn blind_cell_names(&self, before: &[[f32; 3]], after: &[[f32; 3]]) -> Option<String> {
+    /// cover the four classes. With `exposed` — the finished recipe without
+    /// the tone's shape, rendered ([`disclosed_cells`]) — the tone's ranges a
+    /// population asks that the shape stretched are named beside them,
+    /// marked `(contrast)` ([`Cells::stretched`]).
+    pub(super) fn blind_cell_names(&self, before: &[[f32; 3]], after: &[[f32; 3]], exposed: Option<&[[f32; 3]]>) -> Option<String> {
         let mut blind: Vec<String> = [Class::Tone, Class::WhiteBalance, Class::Chroma]
             .into_iter()
             .flat_map(|class| {
                 self.judge(class, before, after).blind.into_iter().map(move |c| self.grid(class)[c].name()).collect::<Vec<_>>()
             })
             .collect();
+        if let Some(exposed) = exposed {
+            let asks = self.asks(Class::Tone, before);
+            let tone = self.grid(Class::Tone);
+            blind.extend(self.stretched(&asks, exposed, after).iter().map(|s| format!("{} (contrast)", tone[s.cell].name())));
+        }
         blind.sort_unstable();
         blind.dedup();
         (!blind.is_empty()).then(|| blind.join(", "))
@@ -839,6 +953,11 @@ impl Cells {
             })
             .collect();
         parts.extend(v.blind.iter().map(|&c| format!("{} moved blind", self.grid(class)[c].name())));
+        parts.extend(
+            v.stretched
+                .iter()
+                .map(|s| format!("{} contrast x{:.3} ±{:.3} on a population's ask", self.grid(class)[s.cell].name(), s.gain, s.se)),
+        );
         format!("{class:?}: {}", if parts.is_empty() { "admitted".to_string() } else { parts.join("; ") })
     }
 
@@ -863,4 +982,23 @@ impl Cells {
             .collect();
         format!("{:?}: {}", asks.class, cells.join("; "))
     }
+}
+
+/// The cells a `Disclose` solve names for its finished `recipe`
+/// ([`Cells::blind_cell_names`]): the blind cells it moved and the tone's
+/// population-asked ranges its shape stretched — the latter read from the
+/// recipe without the tone's shape ([`super::solve::without_tone_shape`]),
+/// rendered here and only where the recipe has one. `before` is the base's
+/// render of `s_img`, `after` the recipe's.
+pub(super) fn disclosed_cells(
+    cells: &Cells,
+    s_img: &image::DynamicImage,
+    base: &crate::recipe::EditRecipe,
+    recipe: &crate::recipe::EditRecipe,
+    before: &[[f32; 3]],
+    after: &[[f32; 3]],
+) -> Option<String> {
+    let unshaped = super::solve::without_tone_shape(base, recipe);
+    let exposed = (unshaped != *recipe).then(|| super::pixels::pixels_of(&render::develop_preview(s_img, &unshaped)));
+    cells.blind_cell_names(before, after, exposed.as_deref())
 }

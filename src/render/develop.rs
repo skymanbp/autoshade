@@ -873,10 +873,10 @@ fn apply_colour_field_in<S: std::ops::Deref<Target = [f32]>>(
                 + (c[ch] - g) as f64 * p[4];
             c[ch] = (c[ch] + amount * d as f32).clamp(0.0, 1.0);
         }
-        // The field is solved from measured pixels (a channel at the white
-        // clip never testifies, `fit_field`); a pixel blown in every channel
-        // takes its brightness from the field and no hue
-        // (`keep_blown_white`).
+        // A pixel blown in every channel takes its brightness from the field
+        // and no hue (`keep_blown_white`); for that reason the solve asks
+        // nothing of such a pixel's channels one by one
+        // (`fit_field::testifying`, on the same predicate, `blown_white`).
         *c = keep_blown_white(&before, *c);
     }
 }

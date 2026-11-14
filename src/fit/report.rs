@@ -711,7 +711,10 @@ pub fn rescore_report(
     // the claim.
     let budget = FitBudget::for_strength(carried_strength);
     let veto_cells = (budget.vetoes == VetoPolicy::Disclose)
-        .then(|| super::validity::Cells::new(&base_px, &tp, evidence).blind_cell_names(&base_px, &after_px))
+        .then(|| {
+            let cells = super::validity::Cells::new(&base_px, &tp, evidence);
+            super::validity::disclosed_cells(&cells, &s, base, recipe, &base_px, &after_px)
+        })
         .flatten();
     compose_report(
         recipe.clone(),
