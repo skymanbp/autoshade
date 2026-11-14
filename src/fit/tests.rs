@@ -6411,6 +6411,18 @@ fn tone_stage_keeps_withheld_luma_range_at_identity() {
     // real pairs' rounds read it. The claim here is the landing: the tone
     // that holds the withheld top serves the paired bottom no worse than it
     // did on 2026-11-11.
+    // READ AGAIN 2026-11-14 (J154 and J155, gates/j155-toys); the pin stands
+    // where it stood. The asks' curve of 2026-11-12 had not held "the
+    // withheld ranges where they stand": it followed the checker's split
+    // asks (189 to 182, 230 to 243, a slope of 1.49 across the withheld top)
+    // and 0.0094 was read with that top's contrast raised. J154 taught the
+    // law to read a population range's contrast; it refused that curve, the
+    // repair scaled the whole tone toward the base, and the online run read
+    // 0.0467 -> 0.0405 against this line. Since J155 the asks' curve is
+    // built with a slope of at most 1 on every segment at a range a
+    // population asks (`asks_curve::segment_caps`): the top stays within one
+    // code (tone_delta 0.0005), the bottom's last range reaches its ask, and
+    // the toy reads 0.0467 -> 0.0141 on the asks' curve alone.
     assert!(
         report.err_after <= 0.0155 + FIT_QUANT,
         "the tone that holds the withheld top serves the paired bottom no worse than the 0.0155 of 2026-11-11: {} -> {}",

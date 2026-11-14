@@ -327,11 +327,21 @@ pub(super) fn fit_atmosphere_from_parts(
     {
         let toneless = super::joint::without_class(base, &recipe, super::joint::Refusal::Tone);
         let before = pixels_of(&render::develop_preview(s_img, &toneless));
-        let cell_asks = ctx.validity.luma_asks(&ctx.validity.asks(super::validity::Class::Tone, &before));
+        // A range whose ask is a population's is HELD while the fit withholds
+        // (J155): the curve raises no contrast G's reading would refuse
+        // (`Cells::stretched`, J154), so the ranges that pair keep what the
+        // law admits of their asks.
+        let withhold = budget.vetoes == VetoPolicy::Withhold;
+        let cell_asks: Vec<(f32, f32, f32, bool)> = ctx
+            .validity
+            .luma_asks(&ctx.validity.asks(super::validity::Class::Tone, &before))
+            .into_iter()
+            .map(|(level, ask, mass, paired)| (level, ask, mass, withhold && !paired))
+            .collect();
         let curve = super::asks_curve::asks_tone_curve(&cell_asks, budget.slope.0, budget.slope.1);
         if crate::config::live_env_os("AUTOSHADE_FIT_TRACE").is_some() {
             eprintln!(
-                "fit: the asks' tone, cells (level, ask, mass) {cell_asks:?} -> {:?}",
+                "fit: the asks' tone, cells (level, ask, mass, held) {cell_asks:?} -> {:?}",
                 curve.iter().map(|k| (k.input, k.output)).collect::<Vec<_>>()
             );
         }

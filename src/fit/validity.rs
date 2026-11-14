@@ -81,7 +81,13 @@
 //!   exposure is in both frames — what a level move does to a range's
 //!   display contrast is its own consequence, either way. A range that
 //!   pairs is not read here (its pixels' own distance reads its contrast
-//!   in J*), and compressing a range is not read at all.
+//!   in J*), and compressing a range is not read at all. The start built
+//!   from the asks themselves does not propose what this reading refuses
+//!   (J155, `asks_curve::asks_tone_curve`): under `Withhold` no segment of
+//!   its curve that touches a population's range rises steeper than 1. Until
+//!   then it followed the asks into a stretch, was refused here, and the
+//!   repair scaled the whole tone back, the ranges no reading had refused
+//!   with it.
 //!
 //! This replaces, as code, the unsupported-range vetoes, the white balance's
 //! foreign-hue and rotation gates and the 2026-11-01 shared-component rule,
@@ -763,15 +769,17 @@ impl Cells {
 
     /// The brightness asks of `asks`' cells, for the stage that states them as
     /// a curve (`asks_curve::asks_tone_curve`): per cell with a brightness
-    /// ask, its display level on the asks' frame, the ask (ln linear luma)
-    /// and the cell's mass.
-    pub(super) fn luma_asks(&self, asks: &ClassAsks) -> Vec<(f32, f32, f32)> {
+    /// ask, its display level on the asks' frame, the ask (ln linear luma),
+    /// the cell's mass, and whether the ask was read on the paired pixels —
+    /// where it was not, it is a population's, and the curve holds that
+    /// range's contrast when the fit withholds (J155).
+    pub(super) fn luma_asks(&self, asks: &ClassAsks) -> Vec<(f32, f32, f32, bool)> {
         self.grid(asks.class)
             .iter()
             .zip(&asks.per_cell)
             .filter_map(|(cell, axes)| {
                 let luma = axes.iter().find(|a| a.axis == Axis::Luma)?;
-                Some((cell_level(&asks.before, &self.w, &cell.members), luma.asks[0].0, cell.mass))
+                Some((cell_level(&asks.before, &self.w, &cell.members), luma.asks[0].0, cell.mass, luma.paired))
             })
             .collect()
     }

@@ -1940,7 +1940,8 @@ the axes it moves than it found it, `|move − ask| ≤ |ask| + se` against the 
 a cell no evidence speaks for that a class moves anyway is withheld below strength 0.85 and disclosed from it, and so
 is a brightness range that only a population asks and whose contrast the tone's shape raises (the slope of its
 display luma against the candidate without the shape, the exposure kept, above 1 by more than its error): a
-population ask speaks for where a range sits, not for its contrast. The
+population ask speaks for where a range sits, not for its contrast, and the asks' own curve is built inside that
+reading (below 0.85 no segment at a population's range rises steeper than 1, `fit::asks_curve`). The
 law replaces the four cast vetoes, the luma and hue unsupported-range vetoes and the white balance's foreign-hue,
 rotation and shared-component gates — each had been one consequence of it, read on one class with its own numbers. A
 descent along the finite-difference gradient of J* moves the free coordinates together at steps 8/4/2/1 and a

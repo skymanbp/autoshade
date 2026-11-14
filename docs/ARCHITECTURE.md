@@ -4621,6 +4621,8 @@ sky's dense ranks onto a painted cloud deck's spread ones at a slope that is
 the ratio of the two densities, and a curve that follows it amplifies the
 flat sky's own ripple. A range that pairs is not read (its pixels' own
 distance reads its contrast in J*), and compressing a range is not read.
+The asks' own curve is built inside that reading: under `Withhold` no segment
+at a range a population asks rises steeper than 1 (J155, below).
 A start the law refuses is not emptied: the refused class is both
 RE-ESTIMATED from the law's own asks — its coordinates descend on the ask
 misfit `Σ mass · |move − ask|²` (`validity::Cells::asks` / `misfit`,
@@ -4769,7 +4771,9 @@ tone class's asks read as G reads them on the frame the other classes leave
 level, moved by its ask in linear light, then projected by the ranges'
 masses onto the curves that move no range past its ask or against it and
 keep every slope, the end segments' included, inside the strength dial's
-budget (a convex set that holds the identity; Dykstra's alternating
+budget — at most 1, since J155 below, on a segment at a range a population
+asks while the fit withholds (a convex set that holds the identity;
+Dykstra's alternating
 projections, stopped only when the iterate AND its correction steps are
 still, then one forward pass through the knots' exact intervals so the two
 promises do not rest on the sweeps having settled). Knots the line through
@@ -4818,6 +4822,34 @@ Saturation +90, an edit with no tone in it — the stage's own start keeps an
 exposure through its solve (finished F 0.07206), the asks' start reads worse
 than that after its repair (F 0.11530) and, solved, drops the tone and ends
 at F 0.05875 with chroma alone.
+
+**The asks' curve states only what the law admits (J155, v1.18.0).** Until
+2026-11-14 the asks' curve was built from the raw asks under the slope
+budget alone and the law's contrast reading (above) judged it afterwards:
+one ruler built the proposal and another judged it. Two neighbouring ranges
+of a population whose asks differ ARE a contrast. On the withheld-top
+fixture the checker sky's lower ranges ask down and its upper ranges up; the
+curve followed them (189 to 182, 230 to 243: a slope of 1.49), the reading
+refused it (contrast ×1.066 ± 0.027 on one range) and the repair scaled the
+WHOLE tone toward the base, so the paired ground under that sky lost a
+correction no reading had refused: the fixture read 0.0467 to 0.0405 where
+the same curve had read 0.0094 before the reading existed, and the online
+run turned red on it. Under `VetoPolicy::Withhold` a knot whose range's ask
+is a population's is now HELD: no segment that touches it rises steeper
+than 1 (`asks_curve::segment_caps`, a per-segment bound inside the same
+projection), and a knot is dropped only where the chord that replaces its
+two segments is no steeper than the least of their bounds (`chord_inside`),
+so the promise holds exactly on the rounded curve. With every knot held
+only the identity is left and the asks offer no start: a frame whose every
+range is a population's carries its level on the exposure. From strength
+0.85 nothing is held and the curve is what it was. The fixture reads 0.0467
+to 0.0141 with its sky within one code of where it stood (the pin of
+2026-11-11 is 0.0155). No constant is new: the bound is the reading's own 1.
+Pinned by `a_held_range_s_segments_rise_no_steeper_than_one` (against the
+numpy model on held knots) and the 400-case
+`a_held_range_keeps_its_slope_on_the_curve_that_ships`, each turned red by
+a hand mutation of the line it reads; the fixture is
+`tone_stage_keeps_withheld_luma_range_at_identity`.
 
 **One inversion bit, one composition, and the zone picks one home.** This
 engine spells a mask's polarity twice — `LocalAdjustment::inverted` (the GUI's
