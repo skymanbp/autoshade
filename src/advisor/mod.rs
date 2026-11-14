@@ -19,6 +19,8 @@ mod judge;
 // The look statement's numbers: what an area measures, and a frame moved to stated numbers.
 pub mod look;
 mod openai;
+// The look statement call: the finished appearance of each area, stated in CIELAB numbers.
+pub mod statement;
 // The prompt-injection fence, re-exported: `library-search` prints the SAME
 // block the proposer receives, and a second literal there could drift from it
 // without anything failing.
