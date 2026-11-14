@@ -3,7 +3,7 @@
 > Status: **implemented** (v1.17.1 — the cast curves close their loop on the finished
 > frame; colour bands replace a zone only if the finished frame is no worse; the
 > colour-grade wheels obey the strength budget; a channel at the clip in both frames
-> testifies to the colour field; the zone confidence is read on the render that ships;
+> testifies to the colour field (since v1.18.0 a channel at the clip on either side); the zone confidence is read on the render that ships;
 > our own sidecar is read against the document it was written as; the analyzer and
 > the engine render the colour field in one arithmetic;
 > v1.17.0 — one develop law for every recipe, a
@@ -4546,6 +4546,18 @@ two log-gain axes, the chroma dials and the channel curves on brightness and
 the sRGB chroma as a Cartesian vector at the hue. A cell no evidence speaks for on a class's axes that
 the class moves anyway is BLIND: refused under `VetoPolicy::Withhold`,
 disclosed under `Disclose` (`FIT_NOTE_VETO_DISCLOSED`, the report capped).
+A population ask speaks for where a brightness range sits, not for its
+contrast (2026-11-13): the tone is also read on what its SHAPE — the
+contrast, the four range sliders, the master curve — does to a range a
+population asks, as the slope of the members' display luma on the candidate
+against their display luma on the candidate without the shape, its exposure
+kept (`validity::Cells::stretched`, `solve::without_tone_shape`). Above 1 by
+more than its error the range is STRETCHED: refused and disclosed as the
+blind cells are, marked `(contrast)` in the note. Rank matching maps a flat
+sky's dense ranks onto a painted cloud deck's spread ones at a slope that is
+the ratio of the two densities, and a curve that follows it amplifies the
+flat sky's own ripple. A range that pairs is not read (its pixels' own
+distance reads its contrast in J*), and compressing a range is not read.
 A start the law refuses is not emptied: the refused class is both
 RE-ESTIMATED from the law's own asks — its coordinates descend on the ask
 misfit `Σ mass · |move − ask|²` (`validity::Cells::asks` / `misfit`,
@@ -4701,8 +4713,9 @@ promises do not rest on the sweeps having settled). Knots the line through
 their neighbours passes within half a code of are dropped — the curve is
 straight between knots, so they carry price and no shape — and the rest are
 rounded to the nearest code. It is a START like the other two: repaired,
-solved where its repair reads a lower F or J* than the best finished solve,
-shipped on a lower finished F. And `withheld_identity_pins` makes no pin
+solved, and shipped on a lower finished F (until J152, below, it was solved
+only where its repair already read a lower F or J* than the best finished
+solve). And `withheld_identity_pins` makes no pin
 where the structural model pairs no population
 (`EvidenceModel::pairs_a_population`): a pin says "the paired reading of
 this range is not trusted", and on such a frame the law itself reads every
@@ -4719,6 +4732,29 @@ projection), the 200-case property test
 `no_range_is_moved_past_its_ask_or_against_it_and_every_slope_is_in_the_budget`,
 `a_frame_nothing_pairs_on_has_no_withheld_range` and
 `two_photographs_tone_is_carried_by_the_asks`.
+
+**Every carrier of the tone is solved (J152, v1.18.0).** The loop over the
+other carriers solved one only where its REPAIRED start already read below
+the best FINISHED solve, in F or in J* — a shortcut past the solve that
+compared the two kinds of reading the paragraph above says cannot be
+compared, in a fit where processing time is a reading and never a gate. What
+a repair leaves is where the law's edge stopped the re-estimate, not what the
+descent reaches from there. Round V14 hid it: on the different-photograph
+pair the asks' start read J* 0.11685 after its repair beside a best of
+0.12456, so it was solved, to 0.05855. Once the fit's plate kept the
+light its base cuts (J151) the same repair stopped at 0.15385 beside a
+best of 0.11687; the carrier was never solved and the pair shipped at
+0.11687, its frame 34.23 from the target where the last release
+reads 32.75 and the round before 31.70. Solved from the same start it
+ends at 0.05834 and the frame reads 31.74. Each carrier is now
+repaired and solved from its own start, and two are compared on finished F
+only (`fit::atmosphere`). No constant is involved. Pinned by
+`every_tone_carrier_is_solved_and_a_chroma_only_edit_ships_no_tone`: one
+population of pixels laid out two ways, the target then developed at
+Saturation +90, an edit with no tone in it — the stage's own start keeps an
+exposure through its solve (finished F 0.07206), the asks' start reads worse
+than that after its repair (F 0.11530) and, solved, drops the tone and ends
+at F 0.05875 with chroma alone.
 
 **One inversion bit, one composition, and the zone picks one home.** This
 engine spells a mask's polarity twice — `LocalAdjustment::inverted` (the GUI's
@@ -5831,15 +5867,48 @@ field's testimony now reads `EvidenceModel::per_place_source_weights` — the
 source weights with the population line lifted; every other pixel, and every
 control that answers per range, as they were; a layout member still on the
 line — and `fit_field::testifying` answers per channel: a channel across the
-clip weighs nothing in the data term, the pixel's other channels keep their
-say, and the pixel counts toward occupancy while any channel does
-(`testifies`). On the planes of that solve under the NumPy model of it
+clip weighed nothing in the data term (until J153, below), the pixel's other
+channels keep their say, and the pixel counts toward occupancy while any
+channel does (`testifies`). On the planes of that solve under the NumPy model of it
 (which reads the build's own render of those bands to 0.01), the clouds' two
 brightest bands in CIE76:
 37.25 / 45.49 before the field, 34.39 / 43.98 as it shipped, 13.19 / 20.16 on the pairs' weights, 4.84 / 6.70 with the rule on the channel.
 No constant is new. Pinned by
 `a_pair_in_a_small_value_range_testifies_to_the_field` and
 `a_channel_across_the_clip_does_not_silence_the_pixels_other_channels`.
+
+**To the colour field a channel at the white clip is the value it meets
+(J153, v1.18.0).** J150 left a channel across the clip — at it on one side
+only — out of the data term, on the reason the rule had carried since
+v1.17.1: its true value on that side is unknown above the clip. Round V15
+showed what that costs. On the seaside street the white clouds' target holds
+its blue at the clip: their brightest 4 % read (248.9, 250.3, 254.8) in the target
+and (242.0, 239.6, 238.7) before the field, the red and the green asked up, nothing
+asked the blue, and the clouds rendered (250.8, 252.8, 243.6) — cream where the target
+is blue-white, 7.10 dE76 from it against 5.46 with no
+field at all and 2.75 in the round before. The reason does not hold
+for this control. The field is a move of the rendered value — the develop
+adds it to the pixel as the stages before it left it, inside the range — and
+it is solved toward a picture, so a channel at the clip is the clip code on
+either side: the difference is the least the frame has to rise where the
+target holds the clip (the render's clamp stops it there), and exactly the
+move to its target where the frame does. What is unknown above the clip is
+the scene's light, which the field does not read. `fit_field::testifying`
+now answers every channel past the luma gate, with the engine's own
+exception: a frame pixel blown in every channel leaves the field neutral
+(`render::blown_white`, the predicate `keep_blown_white` reads), so of such
+a pixel only the channels its target holds at the clip too are asked. Under
+the NumPy model of the solve, the two brightest luma bands in CIE76, channel
+across the clip silent → asked: the seaside street's frame 1.77 / 5.58 →
+1.17 / 1.84 (on the render without the field and the target, every pixel
+weighed alike), the sunset street's clouds over the horizon 4.84 / 6.70 →
+3.90 / 6.13 and the lantern street's frame 0.90 / 0.48 → 0.75 / 0.49 (on those
+solves' planes). The evidence cells keep their target-only clip check, so
+they do not see pixels whose target is at the clip; what the field does
+there is read by the per-band census of a finished render. No constant is
+new. Pinned by
+`a_channel_the_target_alone_holds_at_the_clip_asks_the_frame_up_to_it` and
+`a_frame_pixel_blown_in_every_channel_is_asked_only_where_its_target_is_at_the_clip`.
 
 **The fit's plate keeps the light its base's white clamps cut (J151,
 v1.18.0).** The same per-band reading put the lantern street's overcast sky
@@ -6288,7 +6357,8 @@ fitted move (log-space Kelvin and linear tint) and ships shrunk, disclosed
 with its gain ratios (`FIT_NOTE_WB_BUDGETED`).
 The confidence cap is the measured look-error ladder capped by the strength
 budget: it is 0.50 at strengths 0.00/0.65, 0.414 at 0.85, and 0.35 at full
-strength. From strength 0.85 the law's blind cells are disclosed rather than
+strength. From strength 0.85 the law's blind cells, and the brightness ranges
+a population asks that the tone's shape stretched, are disclosed rather than
 withheld (`VetoPolicy::Disclose`), and the report is capped while any is.
 Its report therefore has one ruler: frame error, harm, confidence and disclosure
 all read a structure-blind re-aggregation that preserves one-sided, sparse and

@@ -1001,10 +1001,13 @@ does not wait for a value range to be a population) — times a local
 structural support term (`1 - D` from one `fit::structure_divergence` reading
 per `12 x 8` cell) times the pair's testimony (`fit_field::testifying`, per
 channel since v1.18.0): nothing unless each frame's luma is above the black
-code 1/255, and then every channel inside 254/255 in both frames or at the
-clip in both. A channel at the clip on both sides is known on both sides; a
-channel clipped on one side only stays out, and since v1.18.0 it stays out
-alone — the pixel's other channels keep their say (J150). Until v1.17.1 only pixels inside the clip
+code 1/255, and then every channel — to a move of the rendered value a
+channel at the white clip is the clip code, on either side (J153) — except
+on a frame pixel blown in every channel, which the develop keeps neutral
+under the field (`render::blown_white`): of it only the channels its target
+holds at the clip too. Until v1.18.0 a channel clipped on one side only kept
+its whole pixel out, then itself alone (J150), on the scene's value being
+unknown above the clip. Until v1.17.1 only pixels inside the clip
 in both frames testified, while the field was still applied to the rest: on
 the sunset-rooftops pair a third of the upper clouds' pixels have red at the
 clip in both frames and the field pulled it 0.999 → 0.972 against a target at
@@ -1917,7 +1920,10 @@ only estimate and ONE objective judges (`fit::joint`): `F = J* + FIT_QUANT · do
 wrote, under one constraint read on every candidate render, each class of controls on its own work (reject only): the
 control-validity law (`fit::validity`) — no class may leave an evidence cell (a source-luma bin × hue band) worse on
 the axes it moves than it found it, `|move − ask| ≤ |ask| + se` against the target's paired or quantile-matched ask;
-a cell no evidence speaks for that a class moves anyway is withheld below strength 0.85 and disclosed from it. The
+a cell no evidence speaks for that a class moves anyway is withheld below strength 0.85 and disclosed from it, and so
+is a brightness range that only a population asks and whose contrast the tone's shape raises (the slope of its
+display luma against the candidate without the shape, the exposure kept, above 1 by more than its error): a
+population ask speaks for where a range sits, not for its contrast. The
 law replaces the four cast vetoes, the luma and hue unsupported-range vetoes and the white balance's foreign-hue,
 rotation and shared-component gates — each had been one consequence of it, read on one class with its own numbers. A
 descent along the finite-difference gradient of J* moves the free coordinates together at steps 8/4/2/1 and a
@@ -2000,7 +2006,9 @@ and zero-confidence fields are conservation-tested to change nothing.
   stands on `EVIDENCE_MIN_SHARE` of the evidence mass and `SUPPORT_MIN_PIXELS` pixels (units short
   of that are pooled along brightness until the pool stands); a
   class's move on a cell is admitted while `|move − ask| ≤ |ask| + se`; a cell with no ask on
-  the class's axes is blind once its displacement passes `UNSUPPORTED_RANGE_MOVE` (**the cell
+  the class's axes is blind once its displacement passes `UNSUPPORTED_RANGE_MOVE`; a brightness
+  range a population asks is stretched once the tone's shape raises its display contrast by
+  more than that reading's own error (**the cell
   floors are the evidence model's own; the law itself has no tuned threshold**).
 - Reimagine flexible-size budget: dimensions are multiples of 16, aspect ratio
   at most `3:1`, and at most `8,294,400` pixels (**current gpt-image-2 contract

@@ -76,6 +76,13 @@ and reference-pair gate before it shipped.
   rule or scaled toward neutral as a whole until the rule admits it —
   whichever leaves the picture closer to the target. The report says which
   class was re-estimated or scaled and by how much.
+- **Where the target's content was replaced, the fit does not sharpen what
+  was there.** When an area's ask comes only from the matched distributions
+  — a flat sky the target paints clouds over — the ask says where that
+  brightness range should sit, not how much contrast it should have. A tone
+  curve that would raise the range's contrast is refused at the default
+  strength and below; from strength 0.85 it ships and the report names the
+  range.
 - **A colour spread thin across brightness still has a say.** A grey road
   or a pale wall can cover a real part of the picture and still be only a
   sliver at any one brightness. Such areas are now heard together, so a
@@ -160,8 +167,9 @@ and reference-pair gate before it shipped.
   white in the target silenced the pixel's other two. Such an area kept
   whatever the whole-frame controls gave it: a pink-white cloud where the
   target's is orange. A correction solved place by place now reads every
-  pixel that pairs, and a channel at pure white on one side only leaves the
-  other channels' reading in.
+  pixel that pairs, and a channel at pure white is read as the white the
+  picture shows: where only the target is white there, the photo is asked
+  up to it.
 - **The colour field's own checks follow the rest of the fit.** A masked
   area the field leaves worse by less than the fit's rounding no longer
   sends the whole field back. Each part of the frame is judged on the
