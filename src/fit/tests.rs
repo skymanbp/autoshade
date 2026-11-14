@@ -458,6 +458,11 @@ fn wb_default_strength_is_byte_identical_to_head() {
     // the base under the law, and under F, no chroma dial earns its quantum
     // against its absence (J* 0.3312 with them, 0.3325 without, one quantum
     // 0.0023 the dof price of seven), and the base ships: 0.3325 -> 0.3325.
+    // READ 2026-11-14 on the release code (gates/wbpin-corpus.out): the six
+    // lines asserted below hold as pinned. "The base ships" above is that
+    // day's record, not today's recipe: clarity -20, texture -20 and the
+    // mixer's orange band (saturation +18, luminance -18) now ship beside
+    // the asserted controls, J* 0.332457 -> 0.330606.
     dump_recipe("wb_default hazy 0.65", &report);
     assert_eq!(report.recipe.temperature_k, None);
     assert_eq!(report.recipe.tint, 0.0);
@@ -511,9 +516,44 @@ fn wb_default_strength_is_byte_identical_to_head() {
     // 0.161 -> 0.090), where the Atmosphere stage's marginal median read
     // -1.00 alone.
     dump_recipe("wb_default cal 0.65", &report);
+    // RESTATED 2026-11-14 (the release's read of the photo-gated tests). The
+    // lines here pinned the Kelvin and the exposure the joint solver shipped
+    // on 2026-11-09 — K 8000 within 100, exposure -0.83 within 0.011. Those
+    // are one solver state's coordinates, and the solver moved under them
+    // (the asks' curve as a start, every tone carrier solved, the contrast
+    // hold) while this pair's fit got nearer its target. What the arm is
+    // about is asserted instead: at the shipped default a white balance
+    // ships; it is inside the default budget, so the stage's over-budget
+    // demand (ratio 1.566) is not what shipped; it warms the frame, as the
+    // target is the warmer picture; the tint the neutral cells' asks refuse
+    // stays out; and the fit is no farther from its target than the reading
+    // the old pins were taken at (J* 0.160934 -> 0.086328, printed to six
+    // places, gates/j122c-four of 2026-11-09).
+    // READ 2026-11-14 on the release code (gates/wbpin-corpus.out): K 8350,
+    // tint 0, exposure -0.88, highlights -16, saturation +30, no curve;
+    // J* 0.160934 -> 0.080493.
     let k = report.recipe.temperature_k.expect("a white balance inside the budget ships");
-    assert!((k - 8000.0).abs() <= 100.0, "K {k}");
+    let default_budget = FitBudget::for_strength(crate::recipe::GradeStrength::new(0.65));
+    let gains = render::wb_gains(report.recipe.as_shot_k.unwrap_or(5500.0), k, report.recipe.tint);
+    assert!(
+        wb_gains_fit_budget(gains, default_budget),
+        "K {k} tint {}: gains {gains:?}, ratio {:.3} against the default budget's {:.2}",
+        report.recipe.tint,
+        super::budget::wb_gain_ratio(gains),
+        default_budget.wb_ratio
+    );
+    assert!(
+        wb_ratio(&report.recipe) > 1.0,
+        "the target is the warmer picture: K {k}, gr/gb {:.3}",
+        wb_ratio(&report.recipe)
+    );
     assert_eq!(report.recipe.tint, 0.0);
+    assert!(
+        report.err_after <= 0.086328 + 1e-6,
+        "no farther than the pinned state's own reading: J* {:.6} -> {:.6}",
+        report.err_before,
+        report.err_after
+    );
     // The EXPOSURE solve stays on the marginal weighted-luma median over
     // the shared-content population, and that is now a measured decision
     // rather than a postponement: the paired per-pixel form was
@@ -525,7 +565,11 @@ fn wb_default_strength_is_byte_identical_to_head() {
     // beside the white balance: -0.87 (gates/j118-toys).
     // -0.83 since the Atmosphere curve carries the withheld ranges' identity
     // (J121/J122, gates/j122-tests; -0.87 on the free knots, J118).
-    assert!((report.recipe.exposure_ev - -0.83).abs() <= 0.011, "exposure {}", report.recipe.exposure_ev);
+    // RESTATED 2026-11-14 with the lines above, as a4185f2 restated the
+    // exposure pins of this pair's three other tests: the exposure is one
+    // coordinate of F beside the rest, and what must hold of it is that the
+    // recipe darkens the frame as the target is the darker picture.
+    assert_the_recipe_darkens_as_the_target_does(&source, &target, &report);
     let full = fit_recipe_from_with(
         &source,
         &target,
@@ -548,10 +592,40 @@ fn wb_default_strength_is_byte_identical_to_head() {
     // With the Atmosphere curve carrying the withheld ranges (J121/J122,
     // gates/j122b-two): K 12350 / tint +75.0, exposure -0.71 (was -0.93),
     // J* 0.161 -> 0.085 (was 0.088).
+    // RESTATED 2026-11-14 with the default arm: "the refusal is a function
+    // of strength" is asserted as that. At full strength a white balance
+    // ships whose gain ratio is past what the default budget allows and
+    // inside the full budget; the recipe darkens the frame as the target
+    // does; and the fit is no farther from its target than the reading the
+    // old pins (K 12350, tint +75.0, exposure -0.71) were taken at
+    // (J* 0.160934 -> 0.085461, printed to six places, gates/j122c-four of
+    // 2026-11-09).
+    // READ 2026-11-14 on the release code (gates/wbpin-corpus.out): K 12800,
+    // tint +81.9, saturation +3.1, exposure 0 and a nine-point tone curve
+    // that carries the darkening; J* 0.160934 -> 0.068280.
     let k = full.recipe.temperature_k.expect("the white balance ships at full strength");
-    assert!((k - 12350.0).abs() <= 100.0, "the stage's Kelvin, admitted at full strength: {k}");
-    assert!((full.recipe.tint - 75.0).abs() <= 1.0, "tint {}", full.recipe.tint);
-    assert!((full.recipe.exposure_ev - -0.71).abs() <= 0.011, "exposure {}", full.recipe.exposure_ev);
+    let full_budget = FitBudget::for_strength(crate::recipe::GradeStrength::new(1.0));
+    let full_gains = render::wb_gains(full.recipe.as_shot_k.unwrap_or(5500.0), k, full.recipe.tint);
+    let full_ratio = super::budget::wb_gain_ratio(full_gains);
+    assert!(
+        wb_gains_fit_budget(full_gains, full_budget),
+        "K {k} tint {}: gains {full_gains:?}, ratio {full_ratio:.3} against the full budget's {:.2}",
+        full.recipe.tint,
+        full_budget.wb_ratio
+    );
+    assert!(
+        full_ratio > default_budget.wb_ratio,
+        "a move the default budget refuses ships at full strength: ratio {full_ratio:.3} against {:.2} (K {k}, tint {})",
+        default_budget.wb_ratio,
+        full.recipe.tint
+    );
+    assert_the_recipe_darkens_as_the_target_does(&source, &target, &full);
+    assert!(
+        full.err_after <= 0.085461 + 1e-6,
+        "no farther than the pinned state's own reading: J* {:.6} -> {:.6}",
+        full.err_before,
+        full.err_after
+    );
 }
 
 /// Step 9 / acceptance A1: a pair in which NO pixel changed its
