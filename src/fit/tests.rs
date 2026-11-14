@@ -3057,19 +3057,28 @@ fn calibration_atmosphere_report_uses_one_population_ruler() {
     assert_the_recipe_darkens_as_the_target_does(&source, &target, &report);
     assert!(report.recipe.saturation.abs() <= ATMOSPHERE_SAT_LIMIT, "{}", report.recipe.saturation);
     assert_eq!((report.recipe.clarity, report.recipe.texture), (0.0, 0.0));
-    // v1.18.0 R12: the tone curve solved on the exposure must earn FIT_QUANT
-    // against its own absence (`eliminate_unearned`). On this pair it earns
-    // 0.000835 of J* (0.137261 with it, 0.138096 without), so it is set back
-    // and named; the exposure (0.209978 without it) ships alone.
+    // A tone curve the stages propose never vanishes unnamed. It ships; or it
+    // was solved and earned less than FIT_QUANT against its own absence, and is
+    // named as set back (`eliminate_unearned`, v1.18.0 R12); or the validity
+    // law refused the stages' tone, curve included, and the solve started from
+    // the cells' own asks, which the report says (`FIT_NOTE_SEED_SCALED`, class
+    // tone controls). On this pair the joint solve's report carries the third
+    // (read 2026-11-14: the exposure at -0.88 and no curve; the unearned note
+    // names the Orange luminance alone), so no curve was solved to be weighed.
     let unearned = report
         .notes
         .iter()
         .find(|n| n.key == crate::rationale::keys::FIT_NOTE_UNEARNED)
         .and_then(|n| n.args.iter().find(|(k, _)| *k == "controls").map(|(_, v)| v.clone()))
         .unwrap_or_default();
+    let tone_reestimated = report.notes.iter().any(|n| {
+        n.key == crate::rationale::keys::FIT_NOTE_SEED_SCALED
+            && n.args.iter().any(|(k, v)| *k == "class" && v.as_str() == crate::rationale::values::CLASS_TONE)
+    });
     assert!(
-        !report.recipe.tone_curve.is_empty() || unearned.contains("tone curve"),
-        "the curve either ships or is named as unearned: {unearned}"
+        !report.recipe.tone_curve.is_empty() || unearned.contains("tone curve") || tone_reestimated,
+        "the curve ships, or is named as unearned, or the stages' tone is named as re-estimated: {unearned}; {}",
+        report.recipe.rationale
     );
     assert!(report.err_after < report.err_before);
     assert!(report.recipe.confidence <= ATMOSPHERE_CONFIDENCE_CAP);
