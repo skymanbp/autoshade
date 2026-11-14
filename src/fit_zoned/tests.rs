@@ -6437,11 +6437,57 @@ fn calibration_sky_zone_survives_luminance_with_partial_chroma_refusal() {
         sky_zones.len(), sky.exposure_ev, sky.color_gains, sky.saturation, report.recipe.rationale
     );
     assert!(sky.exposure_ev < 0.0, "the sky zone carries a darkening luminance move: ev {}", sky.exposure_ev);
+    // RESTATED 2026-11-14 (J156; gates/skyzone-alone.out and
+    // gates/skyzone-trace.out, read on b51535a). The line that stood here
+    // read the colour of ONE mask — `sky`, the sky mask with the lowest
+    // exposure — and asked that its gains not be unity. That named the band
+    // which carried the sky's colour only while every band shipped its own
+    // solve. Since the band rule of 2026-11-10 (`subzones::replace_zone_with`:
+    // a band that does not earn FIT_QUANT over the zone's correction on its
+    // own pixels keeps that correction) the lowest-exposure mask can be the
+    // band that keeps the ZONE's correction, and on this pair it is: the
+    // whole sky's colour is refused by its cells (0.469 converged, 0.426
+    // diverged over 60 cells), the sky is accepted as three bands (deltaE
+    // 15.6337 -> 14.5571), and band 1/3 keeps the zone's correction (its own
+    // solve read 0.09897 on its own pixels against 0.08788 under it). The
+    // mechanism this test is named for is therefore stated over the sky as a
+    // whole: some of the sky's colour ships (the refusal is partial), and a
+    // sky mask that ships none says who refused it — under its own label, or
+    // under the zone's when it keeps the zone's correction. On b51535a the
+    // second half had nothing to read: the zone's account was dropped with
+    // the zone although band 1/3 still shipped its correction, and the
+    // rationale carried no colour sentence under any sky label. The account
+    // now follows the controls (`subzones::drop_replaced_zone_notes`).
+    let says = |label: &str, matches: &dyn Fn(&str) -> bool| {
+        report.notes.iter().any(|note| {
+            matches(note.key) && note.args.iter().any(|(key, value)| *key == "label" && value == label)
+        })
+    };
+    let mut carrying_colour = 0;
+    for mask in sky_zones.iter().copied() {
+        let own = if mask.name.is_empty() { MaskRole::ZoneSky.tag().to_string() } else { mask.name.clone() };
+        let keeps_the_zones = says(&own, &|key| key == crate::rationale::keys::ZONE_BAND_KEEPS_PARENT);
+        let account = if keeps_the_zones { MaskRole::ZoneSky.tag().to_string() } else { own.clone() };
+        let refused = says(&account, &|key| is_colour_refusal(key));
+        let colourless = mask.color_gains.is_none_or(|g| g.iter().all(|v| (v - 1.0).abs() <= 1e-6));
+        eprintln!(
+            "CALIBRATION_SKY mask {own}: ev {:.3} gains {:?} sat {:.1}; keeps the zone's correction: {keeps_the_zones}; a colour refusal is stated under {account}: {refused}",
+            mask.exposure_ev, mask.color_gains, mask.saturation
+        );
+        if colourless {
+            assert!(
+                refused,
+                "{own} ships no colour and no sentence under {account} says who refused it: {}",
+                report.recipe.rationale
+            );
+        } else {
+            carrying_colour += 1;
+        }
+    }
     assert!(
-        !gains_withheld(sky.color_gains),
-        "the sky ships the share of its colour the cells vouched: {:?} sat {}",
-        sky.color_gains,
-        sky.saturation
+        carrying_colour > 0,
+        "the refusal is partial — some of the sky's colour ships: {}",
+        report.recipe.rationale
     );
     let verdicts: Vec<_> =
         report.notes.iter().filter(|note| note.key == crate::rationale::keys::ZONE_BOUNDARY_PASSED).collect();

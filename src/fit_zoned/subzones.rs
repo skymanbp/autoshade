@@ -527,7 +527,7 @@ fn band_attachment(
         attachment.inverted = false;
     }
     attachment.components = band_components(model, band);
-    attachment.name = format!("{} · band {}/{}", parent.label, band + 1, model.breaks.len() + 1);
+    attachment.name = format!("{}{BAND_LABEL_INFIX}{}/{}", parent.label, band + 1, model.breaks.len() + 1);
     attachment.label = attachment.name.clone();
     (attachment, lift)
 }
@@ -1102,6 +1102,11 @@ fn replace_zone_with(
     }
 }
 
+/// What joins a zone's label to its band's ordinal in the band's own label
+/// ("sky · band 1/3", `band_attachment`). `drop_replaced_zone_notes` reads a
+/// band's zone back from it.
+const BAND_LABEL_INFIX: &str = " · band ";
+
 /// The bands REPLACE the single zone, so they replace its account too: every
 /// note the single zone wrote under its own label before the bands were
 /// tried (its divergence reading, its robust down-weighting, its quality
@@ -1113,7 +1118,28 @@ fn replace_zone_with(
 /// four masks). Only notes written before `replaced` (the notes as they stood
 /// when the bands were tried) and labelled exactly `label` go; the bands'
 /// own notes carry their band labels, and every other zone keeps its own.
+///
+/// The account follows the CONTROLS, not the geometry (J156, 2026-11-14). A
+/// band that does not earn over the zone's correction keeps that correction
+/// on its own pixels (`ZONE_BAND_KEEPS_PARENT`), so the recipe still carries
+/// it there, and what the zone said of it — how its tone and its colour were
+/// decided, what its cells refused, its quality verdict — is that band's
+/// account: the band's own sentences went with the controls it lost. The
+/// zone's notes therefore stay whenever a band of the accepted set keeps the
+/// zone's correction. Until then they were dropped all the same, and such a
+/// band shipped the zone's controls with no sentence saying how they were
+/// decided: on the calibration pair the whole sky's colour was refused by
+/// its cells, the refusal left the rationale with the zone's account, and
+/// the band that kept the zone's correction shipped it without colour and
+/// without a word on why (gates/skyzone-alone.out of that day carries no
+/// colour sentence under any sky label).
 fn drop_replaced_zone_notes(report: &mut FitReport, label: &str, replaced: usize) {
+    let band_of_it = format!("{label}{BAND_LABEL_INFIX}");
+    let still_carried = report.notes.iter().skip(replaced).any(|note| {
+        note.key == crate::rationale::keys::ZONE_BAND_KEEPS_PARENT
+            && note.args.iter().any(|(k, v)| *k == "label" && v.starts_with(&band_of_it))
+    });
+    if still_carried { return; }
     take_back_notes(report, |i, note| i < replaced && note.args.iter().any(|(k, v)| *k == "label" && v == label));
 }
 
@@ -1713,5 +1739,49 @@ mod tests {
         assert!(report.recipe.rationale.contains("Local quality gate passed for land:"));
         assert_eq!(crate::rationale::render_en(&report.notes), report.recipe.rationale,
             "the notes and the persisted string still say the same thing");
+    }
+
+    /// The account follows the controls: when a band of the accepted set
+    /// keeps the zone's correction (`ZONE_BAND_KEEPS_PARENT`), the zone's own
+    /// notes stay — in the notes AND in the persisted rationale — because the
+    /// recipe still carries that correction on the band and the band's own
+    /// sentences went with the controls it lost. Another zone's band keeping
+    /// ITS zone's correction holds nothing of this zone's, and with no such
+    /// band the account goes as before. MUTATION: remove the `still_carried`
+    /// return and the sky's colour refusal leaves beside the band that ships
+    /// the colourless correction it explains.
+    #[test]
+    fn a_band_that_keeps_the_zones_correction_keeps_the_zones_account() {
+        let refusal = |label: &str| crate::rationale::Note::new(crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR,
+            vec![("label", label.to_string()), ("hue_bands", "Aqua".to_string())]);
+        let keeps = |label: &str| crate::rationale::Note::new(crate::rationale::keys::ZONE_BAND_KEEPS_PARENT, vec![
+            ("label", label.to_string()), ("with", "0.09897".to_string()), ("without", "0.08788".to_string()),
+            ("quant", format!("{:.4}", fit::FIT_QUANT)),
+        ]);
+        // The colour refusals each zone still states once the sky's bands are
+        // accepted with `band_notes` as the winning trial's own account.
+        let refusals_left = |band_notes: Vec<crate::rationale::Note>| -> (usize, usize) {
+            let (_, _, _, mut report) = fixture(false);
+            for note in [refusal("sky"), refusal("land")] {
+                crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes, note);
+            }
+            let replaced = report.notes.len();
+            for note in band_notes {
+                crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes, note);
+            }
+            drop_replaced_zone_notes(&mut report, "sky", replaced);
+            assert_eq!(crate::rationale::render_en(&report.notes), report.recipe.rationale,
+                "the notes and the persisted rationale agree once the account is settled");
+            let stated = |label: &str| report.notes.iter().filter(|n| n.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR
+                && n.args.iter().any(|(k, v)| *k == "label" && v == label)).count();
+            assert_eq!(report.recipe.rationale.contains("Zoned sky colour controls withheld"), stated("sky") == 1,
+                "the persisted rationale and the notes disagree about the sky's refusal: {}", report.recipe.rationale);
+            (stated("sky"), stated("land"))
+        };
+        assert_eq!(refusals_left(vec![keeps(&format!("sky{BAND_LABEL_INFIX}1/2"))]), (1, 1),
+            "a sky band keeps the sky's correction, so the sky's account stays");
+        assert_eq!(refusals_left(vec![keeps(&format!("land{BAND_LABEL_INFIX}1/2"))]), (0, 1),
+            "a land band keeping the LAND's correction holds nothing of the sky's account");
+        assert_eq!(refusals_left(Vec::new()), (0, 1), "every band earned: the replaced zone's account goes");
     }
 }

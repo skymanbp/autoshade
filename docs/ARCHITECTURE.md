@@ -5358,7 +5358,11 @@ down-weighting, its quality verdict, "correction attached" — leaves the notes
 and the persisted rationale together, so neither claims a correction the
 recipe no longer carries and the quality gate counts no verdict for a mask
 that does not ship; the bands' notes carry their band labels and every other
-zone keeps its own.
+zone keeps its own. The account follows the controls, though (v1.18.0): when a
+band of the accepted set keeps the zone's correction
+(`ZONE_BAND_KEEPS_PARENT`, next paragraph), the recipe still carries that
+correction on the band's pixels, so the zone's notes stay as that band's
+account — its own sentences went with the controls it lost.
 
 **A band is read against the zone's correction on its own pixels
 (v1.18.0).** A band that REPLACES part of a zone competes with the zone's own
