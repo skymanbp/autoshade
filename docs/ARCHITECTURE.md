@@ -1,6 +1,15 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.17.1 — the cast curves close their loop on the finished
+> Status: **implemented** (v1.18.0 — the reverse fit minimises one objective, the
+> perceptual distance to the target plus a price for every control off neutral, taken
+> on the part of the frame the control reaches; one law admits a control class: it may
+> move no brightness-and-hue cell against that cell's own evidence; a local correction
+> is judged on its own pixels; the finished recipe is read again as the export renders
+> it; colour noise leaves the RAW on the mosaic, at the photograph's own measured
+> noise; the sidecar states the lens-correction switch the develop rendered under;
+> how far the reverse fit goes is one control with five steps; the AI analysis can
+> state the look for the reverse fit to find, kept only when its own review prefers it;
+> v1.17.1 — the cast curves close their loop on the finished
 > frame; colour bands replace a zone only if the finished frame is no worse; the
 > colour-grade wheels obey the strength budget; a channel at the clip in both frames
 > testifies to the colour field (since v1.18.0 a channel at the clip on either side); the zone confidence is read on the render that ships;
