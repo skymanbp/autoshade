@@ -250,9 +250,9 @@
 > `scripts/roundtrip_gate.py` is an optional developer instrument (Photoshop
 > with Camera Raw, driven through `scripts/acr_render.ps1`), not part of the
 > release battery.
-> 1837 library + 26 CLI + 297 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1822 pass + 15 `#[ignore]`d forensic probes and
-> the GUI result is 293 pass + four ignored (an explicit scratch-recipe export
+> 1997 library + 28 CLI + 301 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1975 pass + 22 `#[ignore]`d forensic probes and
+> the GUI result is 297 pass + four ignored (an explicit scratch-recipe export
 > probe and the offline panel, window and mode-workspace screenshots) in the ordinary battery. One of the
 > ignored library names is not a probe:
 > `the_real_reverse_fit_reproduces_a_stated_look_on_a_small_frame` is the production reverse fit end to
@@ -289,7 +289,31 @@
 > edit read as the edit, a maskless edit sending no mask and layering only
 > what changed, and the ignored tuning bench on real answers) and two GUI names
 > (no side-panel text runs under the scrollbar, and the ignored offline panel
-> screenshots). For v1.17.1, by name against the v1.17.0 battery: library
+> screenshots). For v1.18.0, by name against the v1.17.1 battery: library
+> +243 / −83 — the 243 added: 56 in `fit` (28 on the joint solve and the
+> validity law, 13 self-consistency cases and measurements, 6 on the asks
+> curve, 4 on the mixer's paired solve, 3 on the strength steps, one each on
+> the report and the solver), 43 in `denoise` (38 on the colour-noise stage
+> in linear light, 5 on its noise model), 41 in `render` (a raster mask's
+> soft edge read by what lies under it, and the colour-noise stage's place in
+> the develop), 36 in `pipeline` and 20 in `advisor` (the AI analysis: the
+> stated look, its judge, and the review that keeps today's develop or takes
+> the stated one), 31 in `fit_zoned` (local corrections judged on their own
+> pixels, the colour field's pairing rule, a mask's colour found again, a
+> zone's account kept beside the band that ships its correction), 10
+> in `fit_field`, 2 each in `xmp` and `fit_cells`, one each in `recipe` and
+> `correspond`; the 83 removed are the tests of the gates the law replaced —
+> 61 in `fit` (the cast vetoes and their projection, the
+> cast-to-white-balance hand-off walk, the rotation and foreign-hue checks,
+> the stage and terminal do-no-harm checks) and 21 in `fit_zoned` (the
+> acceptance arms and the composed-frame regression checks) — and one in
+> `pipeline` (the AI review's earlier rule for replacing a recipe);
+> GUI +4 / −0 (the reverse fit's step and the analysis method in the saved
+> settings); CLI 26 → 28 (`match --level`, `analyze --approach`). For this
+> release no local three-lane battery was run: the names are those the
+> Windows test program lists, the suite ran on the online runners (Linux and
+> macOS), and the names that exist on Windows only were run here by name. For
+> v1.17.1, by name against the v1.17.0 battery: library
 > +8 / −0 — the 8 added: 3 in `xmp` (our own sidecar over a Lightroom base
 > reads back as the develop it carries, a later Lightroom edit to a
 > base-carried key still wins, a written record that does not verify is
