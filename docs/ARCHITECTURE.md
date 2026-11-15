@@ -1,6 +1,9 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.18.0 — the reverse fit minimises one objective, the
+> Status: **implemented** (v1.18.1 — the reverse fit takes the readings of its solve that
+> do not depend on each other side by side and uses them in the order it always did:
+> the same recipe in less time; a brightness run widened by a merge is read again;
+> v1.18.0 — the reverse fit minimises one objective, the
 > perceptual distance to the target plus a price for every control off neutral, taken
 > on the part of the frame the control reaches; one law admits a control class: it may
 > move no brightness-and-hue cell against that cell's own evidence; a local correction
