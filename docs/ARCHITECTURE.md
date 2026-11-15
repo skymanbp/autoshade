@@ -259,8 +259,8 @@
 > `scripts/roundtrip_gate.py` is an optional developer instrument (Photoshop
 > with Camera Raw, driven through `scripts/acr_render.ps1`), not part of the
 > release battery.
-> 1997 library + 28 CLI + 301 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1975 pass + 22 `#[ignore]`d forensic probes and
+> 2003 library + 28 CLI + 301 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1981 pass + 22 `#[ignore]`d forensic probes and
 > the GUI result is 297 pass + four ignored (an explicit scratch-recipe export
 > probe and the offline panel, window and mode-workspace screenshots) in the ordinary battery. One of the
 > ignored library names is not a probe:
@@ -298,7 +298,14 @@
 > edit read as the edit, a maskless edit sending no mask and layering only
 > what changed, and the ignored tuning bench on real answers) and two GUI names
 > (no side-panel text runs under the scrollbar, and the ignored offline panel
-> screenshots). For v1.18.0, by name against the v1.17.1 battery: library
+> screenshots). For v1.18.1, by name against the v1.18.0 battery: library
+> +6 / −0 — four in `fit` (a solve read side by side is the solve read in
+> turn: the elimination, a solve from the base, and a whole fit in both modes;
+> and what is read ahead is found by the recipe it was read for),
+> one in `fit_zoned` (a run widened by a merge is read again on the bins it
+> holds) and one in `panic_guard` (work handed to another thread runs under
+> its caller's containment); GUI and CLI unchanged; the names read as for
+> v1.18.0 (below). For v1.18.0, by name against the v1.17.1 battery: library
 > +243 / −83 — the 243 added: 56 in `fit` (28 on the joint solve and the
 > validity law, 13 self-consistency cases and measurements, 6 on the asks
 > curve, 4 on the mixer's paired solve, 3 on the strength steps, one each on
@@ -4809,10 +4816,10 @@ recipe, the controls set back and F are the same bit for bit:
 - `Joint::direction` reads each coordinate's finite-difference probe, its
   doubling included, by a solve of its own, and keeps the coordinates' order;
 - the descent reads a step and its halvings ahead of the backtracking that
-  walks them, and the next steps of a walk (two, then four, …); the polish
-  reads the next trials of a pass (`Joint::look_ahead`). `Joint::eval`,
-  `Joint::admissible` and `Joint::refusal` find by the recipe what they
-  would have read themselves;
+  walks them, and the next steps of a walk (two, then four, … up to
+  `SolveCtx::candidates_ahead`); the polish reads the next trials of a pass
+  (`Joint::look_ahead`). `Joint::eval`, `Joint::admissible` and
+  `Joint::refusal` find by the recipe what they would have read themselves;
 - the elimination reads a pass's absences together (`Joint::absences_at`);
   an absence read on the state as it stands is held for the pass after a
   drop instead of being read again; and after a drop the next controls are
