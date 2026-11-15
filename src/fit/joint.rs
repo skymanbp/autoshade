@@ -2091,8 +2091,14 @@ impl<'c, 'a> Joint<'c, 'a> {
                     continue;
                 }
                 // The walk's next steps are read ahead — two, then four, …
-                // while it goes on: each is the step from the one before,
-                // should that one be kept.
+                // up to what the context allows, while it goes on: each is
+                // the step from the one before, should that one be kept.
+                // The count stops at the context's width because a long
+                // walk looks many times: doubled without a cap it passed
+                // `usize` at the 63rd look of one walk — a panic under
+                // overflow checks, and in the release profile a wrap to 0
+                // that read the rest of the walk one step at a time (the
+                // online debug job on `9da968a`, 2026-11-15).
                 let mut depth = 2usize;
                 loop {
                     let again = self.apply(p, &d);
@@ -2110,7 +2116,7 @@ impl<'c, 'a> Joint<'c, 'a> {
                             walk.push(next);
                         }
                         self.look_ahead(walk, Verdicts::Below(best.f()));
-                        depth *= 2;
+                        depth = (2 * depth).min(ctx.candidates_ahead);
                     }
                     let e = self.eval(&again);
                     if e.f() < best.f() && self.admissible(&again, &e.px) {
@@ -2192,7 +2198,8 @@ impl<'c, 'a> Joint<'c, 'a> {
                         best = e;
                         accepted = true;
                         width = width.min(2);
-                        // The walk's next steps, read ahead as the descent's.
+                        // The walk's next steps, read ahead as the descent's
+                        // (and capped as the descent's).
                         let mut depth = 2usize;
                         while let Some(trial) = trial_of(p, c, dir, steps) {
                             if ctx.candidates_ahead > 1 && !self.is_ahead(&trial.recipe) {
@@ -2202,7 +2209,7 @@ impl<'c, 'a> Joint<'c, 'a> {
                                     walk.push(next);
                                 }
                                 self.look_ahead(walk, Verdicts::Below(best.f()));
-                                depth *= 2;
+                                depth = (2 * depth).min(ctx.candidates_ahead);
                             }
                             let e = self.eval(&trial);
                             if e.f() < best.f() && self.admissible(&trial, &e.px) {
