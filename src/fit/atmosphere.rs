@@ -370,11 +370,21 @@ pub(super) fn fit_atmosphere_from_parts(
     // distribution, which cannot say which pixel goes where, so each curve
     // keeps the stages' shape and carries one coordinate, its strength
     // (user ruling 2026-11-09, `joint::Coord::CurveStrength`).
-    let mut point = super::joint::Point::bounded(recipe);
-    let mut joint = super::joint::Joint::with_pinned(&ctx, super::joint::Coord::atmosphere_pinned(&point));
-    joint.trace_start(&point);
-    let start = joint.repair(&mut point);
-    let (mut point, mut best, mut unearned) = solve_bounded(&mut joint, point, start, base);
+    // One carrier's start, solved: the point, its reading, what the solve
+    // dropped, and the solve's own readings (`joint::Tally`).
+    let solve_carrier = |carrier: Option<&'static str>, recipe: EditRecipe| {
+        let mut point = super::joint::Point::bounded(recipe);
+        let mut joint = super::joint::Joint::with_pinned(&ctx, super::joint::Coord::atmosphere_pinned(&point));
+        if carrier.is_none() {
+            joint.trace_start(&point);
+        }
+        let start = joint.repair(&mut point);
+        if let Some(carrier) = carrier {
+            joint.trace(&format!("repair ({carrier})"), &point, &start);
+        }
+        let (point, best, unearned) = solve_bounded(&mut joint, point, start, base);
+        (point, best, unearned, joint.tally())
+    };
     // The other carriers (see `curve_carried` and the asks' tone above), one
     // after the other against the best so far, EACH SOLVED from its own
     // repaired start. A finished F is the only F two starts can be compared
@@ -398,19 +408,34 @@ pub(super) fn fit_atmosphere_from_parts(
     // its frame 34.23 from the target where v1.17.1 reads 32.75
     // and the round before 31.70 (legs/V15). Solved, it ends at
     // 0.05834 and the frame reads 31.74.
-    for (carrier, alt) in alternatives {
-        let mut alt_point = super::joint::Point::bounded(alt);
-        let mut alt_joint =
-            super::joint::Joint::with_pinned(&ctx, super::joint::Coord::atmosphere_pinned(&alt_point));
-        let alt_start = alt_joint.repair(&mut alt_point);
-        alt_joint.trace(&format!("repair ({carrier})"), &alt_point, &alt_start);
-        let (alt_point, alt_best, alt_unearned) = solve_bounded(&mut alt_joint, alt_point, alt_start, base);
+    //
+    // No carrier's solve reads another's — each owns its point and its
+    // objective over the one shared context — so they are solved side by
+    // side (`joint::side_by_side`, v1.18.1) and compared afterwards exactly
+    // as they were when each waited for the one before: the stage's own
+    // start first, then the others in their order, a later one shipping only
+    // on a strictly lower F.
+    let starts: Vec<(Option<&'static str>, EditRecipe)> =
+        std::iter::once((None, recipe)).chain(alternatives.into_iter().map(|(carrier, alt)| (Some(carrier), alt))).collect();
+    let mut solved = if ctx.side_by_side && starts.len() > 1 {
+        use rayon::prelude::*;
+        let carried = crate::panic_guard::Carried::here();
+        starts
+            .into_par_iter()
+            .map(|(carrier, start)| carried.run(|| solve_carrier(carrier, start)))
+            .collect::<Vec<_>>()
+    } else {
+        starts.into_iter().map(|(carrier, start)| solve_carrier(carrier, start)).collect::<Vec<_>>()
+    }
+    .into_iter();
+    let (mut point, mut best, mut unearned, mut tally) = solved.next().expect("the stage's own start is solved");
+    for (alt_point, alt_best, alt_unearned, mut alt_tally) in solved {
         if alt_best.f() < best.f() {
             (point, best, unearned) = (alt_point, alt_best, alt_unearned);
-            alt_joint.absorb(&joint);
-            joint = alt_joint;
+            alt_tally.absorb(&tally);
+            tally = alt_tally;
         } else {
-            joint.absorb(&alt_joint);
+            tally.absorb(&alt_tally);
         }
     }
     let mut recipe = point.recipe;
@@ -421,7 +446,7 @@ pub(super) fn fit_atmosphere_from_parts(
     if crate::config::live_env_os("AUTOSHADE_FIT_TRACE").is_some() {
         eprintln!(
             "fit: joint solve (atmosphere) {}, {:.1} s, J* {err_before:.5} -> {err_after:.5}, F {f:.5}",
-            joint.spent_line(),
+            tally.spent_line(),
             started.elapsed().as_secs_f32()
         );
     }
@@ -481,7 +506,7 @@ pub(super) fn fit_atmosphere_from_parts(
             veto_cells,
             wb_clamped: wb_shipped.then_some(facts.clamped).flatten(),
             wb_search_bound: facts.search_bound,
-            scaled: joint.scaled(),
+            scaled: tally.scaled(),
             sat_pegged: sat_pegged.then_some(FitMode::Atmosphere),
             evidence_refused: evidence_has_one_sided(judged),
             regressed: (fit_regressed && solve_regressed).then_some(false),

@@ -394,7 +394,18 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // joint objective decides what ships (`stage_joint`).
     let ctx = SolveCtx::new(&s_img, &sp, &tp, &evidence, &cells, base, &options, pairing);
     let started = std::time::Instant::now();
-    let state = alone_check(&ctx, run_from(&ctx, Stage::Tone, SolveState::at(base)));
+    // The alone starts are proposed from the base and read nothing of the
+    // solve, so they are proposed beside it (`joint::side_by_side`).
+    let (solved, alone) = if ctx.side_by_side {
+        let carried = crate::panic_guard::Carried::here();
+        rayon::join(
+            || carried.run(|| run_from(&ctx, Stage::Tone, SolveState::at(base))),
+            || carried.run(|| alone_starts(&ctx)),
+        )
+    } else {
+        (run_from(&ctx, Stage::Tone, SolveState::at(base)), alone_starts(&ctx))
+    };
+    let state = alone_check(&ctx, solved, alone);
     let SolveState { wb_facts, sat_pegged, grade_held, detail, detail_supported, finished, .. } = state;
     let finished = finished.expect("run_from runs the joint stage");
     let (budget, paired) = (ctx.budget, ctx.paired);
@@ -599,7 +610,7 @@ const ALONE_STARTS: [(&str, &[Stage]); 6] = [
 /// F ships. No start beats the finished solve on a pair the sequence served
 /// (the starts cost their estimates and one repair each); class granularity,
 /// not control granularity, is what this reads.
-fn alone_check(ctx: &SolveCtx<'_>, mut main: SolveState) -> SolveState {
+fn alone_check(ctx: &SolveCtx<'_>, mut main: SolveState, alone: Vec<AloneStart>) -> SolveState {
     let (j_main, f_main) = {
         let done = main.finished.as_ref().expect("run_from runs the joint stage");
         (done.err_after, done.f)
@@ -607,28 +618,13 @@ fn alone_check(ctx: &SolveCtx<'_>, mut main: SolveState) -> SolveState {
     let trace = crate::config::live_env_os("AUTOSHADE_G_TRACE").is_some();
     let mut renders = 0u32;
     let mut triggered: Option<(f32, &'static str, SolveState)> = None;
-    for (name, stages) in ALONE_STARTS {
-        let mut state = SolveState::at(ctx.base);
-        for stage in stages {
-            stage.run(ctx, &mut state);
-        }
-        if joint::dof_of(&state.recipe, ctx.base, ctx.law) == 0 {
-            continue;
-        }
-        let sub = joint::Joint::new(ctx);
-        let mut point = joint::Point::new(state.recipe.clone());
-        let e = sub.repair(&mut point);
-        renders += sub.renders.get();
+    for AloneStart { name, state, j, price, f, renders: took } in alone {
+        renders += took;
         if trace {
-            eprintln!(
-                "alone {name}: repaired J* {:.5} price {:.3} F {:.5} (the solve: J* {j_main:.5} F {f_main:.5})",
-                e.j,
-                e.price,
-                e.f()
-            );
+            eprintln!("alone {name}: repaired J* {j:.5} price {price:.3} F {f:.5} (the solve: J* {j_main:.5} F {f_main:.5})");
         }
-        if (e.f() < f_main || e.j < j_main) && triggered.as_ref().is_none_or(|(f, _, _)| e.f() < *f) {
-            triggered = Some((e.f(), name, state));
+        if (f < f_main || j < j_main) && triggered.as_ref().is_none_or(|(best, _, _)| f < *best) {
+            triggered = Some((f, name, state));
         }
     }
     let read = |state: &mut SolveState, tail: String| {
@@ -640,7 +636,15 @@ fn alone_check(ctx: &SolveCtx<'_>, mut main: SolveState) -> SolveState {
         read(&mut main, String::new());
         return main;
     };
+    if crate::config::live_env_os("AUTOSHADE_FIT_TRACE").is_some() {
+        let done = main.finished.as_ref().expect("run_from runs the joint stage");
+        eprintln!("fit: the sequence's solve {}", done.spent);
+    }
+    let started = std::time::Instant::now();
     stage_joint(ctx, &mut alt);
+    if crate::config::live_env_os("AUTOSHADE_FIT_TRACE").is_some() {
+        eprintln!("fit: solved again from the {name} alone {:.1} s", started.elapsed().as_secs_f32());
+    }
     let (f_alt, spent_alt) = {
         let done = alt.finished.as_ref().expect("stage_joint finishes");
         (done.f, done.spent.clone())
@@ -657,12 +661,62 @@ fn alone_check(ctx: &SolveCtx<'_>, mut main: SolveState) -> SolveState {
     }
 }
 
+/// One class proposed ALONE from the base and repaired into G
+/// ([`alone_check`]): the stages' state, the repaired start's J*, price and
+/// F, and the renders its repair took.
+struct AloneStart {
+    name: &'static str,
+    state: SolveState,
+    j: f32,
+    price: f32,
+    f: f32,
+    renders: u32,
+}
+
+/// The alone starts that move anything, in [`ALONE_STARTS`]' order. Each is
+/// proposed from the base and repaired on its own — none reads another, nor
+/// the solve — so they are taken side by side where the context allows.
+fn alone_starts(ctx: &SolveCtx<'_>) -> Vec<AloneStart> {
+    use rayon::prelude::*;
+    let started = std::time::Instant::now();
+    let propose = |&(name, stages): &(&'static str, &[Stage])| -> Option<AloneStart> {
+        let mut state = SolveState::at(ctx.base);
+        for stage in stages {
+            stage.run(ctx, &mut state);
+        }
+        if joint::dof_of(&state.recipe, ctx.base, ctx.law) == 0 {
+            return None;
+        }
+        let sub = joint::Joint::new(ctx);
+        let mut point = joint::Point::new(state.recipe.clone());
+        let e = sub.repair(&mut point);
+        Some(AloneStart { name, state, j: e.j, price: e.price, f: e.f(), renders: sub.renders.get() })
+    };
+    let proposed: Vec<AloneStart> = if ctx.side_by_side {
+        let carried = crate::panic_guard::Carried::here();
+        ALONE_STARTS.par_iter().filter_map(|start| carried.run(|| propose(start))).collect()
+    } else {
+        ALONE_STARTS.iter().filter_map(propose).collect()
+    };
+    if crate::config::live_env_os("AUTOSHADE_FIT_TRACE").is_some() {
+        eprintln!("fit: the alone starts {:.1} s", started.elapsed().as_secs_f32());
+    }
+    proposed
+}
+
 /// Run the solve from `from` on `state`: that stage and every one after it,
 /// in order. From [`Stage::Tone`] on [`SolveState::at`] the base, this is
 /// the whole global solve.
 fn run_from(ctx: &SolveCtx<'_>, from: Stage, mut state: SolveState) -> SolveState {
+    // Processing time is a reading, never a gate (user rule 2026-11-05):
+    // each stage's seconds, with the trace.
+    let trace = crate::config::live_env_os("AUTOSHADE_FIT_TRACE").is_some();
     for stage in Stage::ALL.into_iter().filter(|s| *s >= from) {
+        let started = std::time::Instant::now();
         stage.run(ctx, &mut state);
+        if trace {
+            eprintln!("fit: stage {stage:?} {:.1} s", started.elapsed().as_secs_f32());
+        }
     }
     state
 }
@@ -762,6 +816,15 @@ pub(super) struct SolveCtx<'a> {
     /// The share of the frame each priced control reaches, read once on the
     /// base render ([`joint::Reach`]).
     pub(super) reach: joint::Reach,
+    /// Are this solve's independent sub-solves run side by side
+    /// ([`joint::side_by_side`], read once here)?
+    pub(super) side_by_side: bool,
+    /// How many absences the elimination reads at once after a drop
+    /// ([`joint::read_ahead`], read once here).
+    pub(super) read_ahead: usize,
+    /// How many candidates a pass of the polish reads at once
+    /// ([`joint::candidates_ahead`], read once here).
+    pub(super) candidates_ahead: usize,
 }
 
 impl<'a> SolveCtx<'a> {
@@ -908,6 +971,9 @@ impl<'a> SolveCtx<'a> {
             wb_weights,
             t_chroma,
             reach: joint::Reach::of(sp, &base.color_grade),
+            side_by_side: joint::side_by_side(),
+            read_ahead: joint::read_ahead(),
+            candidates_ahead: joint::candidates_ahead(),
         };
         ctx.tone_deliverable = {
             let tone_map = |x: f32| ctx.tone_map(x);
@@ -968,6 +1034,9 @@ impl<'a> SolveCtx<'a> {
             wb_weights,
             t_chroma: weighted_mean_chroma(tp, &evidence.target_weights).unwrap_or_else(|| mean_chroma(tp)),
             reach: joint::Reach::of(sp, &base.color_grade),
+            side_by_side: joint::side_by_side(),
+            read_ahead: joint::read_ahead(),
+            candidates_ahead: joint::candidates_ahead(),
         }
     }
 

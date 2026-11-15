@@ -60,6 +60,28 @@ pub fn panic_is_recoverable() -> bool {
     RECOVERABLE_DEPTH.try_with(|d| d.get() > 0).unwrap_or(false)
 }
 
+/// The calling thread's containment, carried into work it hands to another
+/// thread. The mark is per thread, so a body moved onto a pool thread — a
+/// solve run beside its siblings (`fit::joint::side_by_side`) — would raise
+/// its panic on ground the hook reads as fatal, although the pool hands that
+/// panic back to the thread that waits and the guard there catches it. Taken
+/// where the work is handed out, entered where it runs.
+#[derive(Clone, Copy)]
+pub struct Carried(bool);
+
+impl Carried {
+    /// The containment of the thread that hands the work out.
+    pub fn here() -> Self {
+        Self(panic_is_recoverable())
+    }
+
+    /// Run `body` under the containment [`Carried::here`] took.
+    pub fn run<R>(self, body: impl FnOnce() -> R) -> R {
+        let _scope = self.0.then(Recoverable::enter);
+        body()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,5 +111,26 @@ mod tests {
         });
         assert!(caught.is_err(), "the panic was caught, not swallowed");
         assert!(!panic_is_recoverable(), "the guard unwound with the panic");
+    }
+
+    /// Before, inside and after the handed-out body, read on the thread it
+    /// was handed to. MUTATION THIS KILLS: `Carried::run` not entering the
+    /// scope — the middle reading is then fatal ground under a contained
+    /// caller.
+    #[test]
+    fn work_handed_to_another_thread_runs_under_the_callers_containment() {
+        let on_another_thread = |carried: Carried| {
+            std::thread::spawn(move || {
+                (panic_is_recoverable(), carried.run(panic_is_recoverable), panic_is_recoverable())
+            })
+            .join()
+            .expect("the thread ran")
+        };
+        let contained = {
+            let _g = Recoverable::enter();
+            on_another_thread(Carried::here())
+        };
+        assert_eq!(contained, (false, true, false), "a contained caller's work is contained, and only it");
+        assert_eq!(on_another_thread(Carried::here()), (false, false, false), "a bare caller hands out bare ground");
     }
 }

@@ -530,8 +530,11 @@ pub(super) struct Joint<'c, 'a> {
     /// Seconds spent rendering, reading J*, and reading G (the class frames'
     /// extra renders counted under G), the same reading.
     pub(super) spent: std::cell::Cell<(f32, f32, f32)>,
-    /// The render count at the end of each named phase, the same reading.
-    phases: std::cell::RefCell<Vec<(&'static str, u32)>>,
+    /// The render count and the seconds since the solve began at the end of
+    /// each named phase, the same reading.
+    phases: std::cell::RefCell<Vec<(&'static str, u32, f32)>>,
+    /// When the solve began.
+    born: std::time::Instant,
     /// The classes [`Joint::repair`] scaled the start on and the fraction of
     /// the stages' estimate each kept — the report's seed disclosure.
     scaled: std::cell::RefCell<Vec<(Refusal, f32)>>,
@@ -544,12 +547,197 @@ pub(super) struct Joint<'c, 'a> {
     /// The last candidate without the tone's shape that was rendered for the
     /// contrast reading, with its render ([`Joint::stretched`]).
     exposed: std::cell::RefCell<Option<ClassFrame>>,
+    /// The candidates read ahead of the steps that ask for them
+    /// ([`Joint::look_ahead`]).
+    ahead: std::cell::RefCell<Vec<Ahead>>,
     /// The solve's number in this process, for the trace.
     id: u32,
 }
 
+/// A candidate read ahead of the step that asks for it
+/// ([`Joint::look_ahead`]): its render until that step takes it, J* on the
+/// render, and G's verdict where it was read.
+struct Ahead {
+    recipe: EditRecipe,
+    px: Option<Vec<[f32; 3]>>,
+    j: f32,
+    /// [`Joint::admissible`]'s verdict, where that was read.
+    admitted: Option<bool>,
+    /// [`Joint::refusal`]'s — the refusing class, if any — where that was.
+    refused: Option<Option<Refusal>>,
+}
+
+/// Which of G's verdicts is read ahead with a candidate
+/// ([`Joint::look_ahead`]): the one the step that asks will ask for.
+#[derive(Clone, Copy)]
+pub(super) enum Verdicts {
+    /// Whether G admits it, where it reads below this on F: a pass of the
+    /// polish, and a walk, ask G only of a candidate that lowers F.
+    Below(f32),
+    /// The class G refuses it on, of every candidate: the descent's
+    /// backtracking asks it of each step.
+    Every,
+}
+
 /// A candidate WITHOUT one class, and its render.
 type ClassFrame = (EditRecipe, std::rc::Rc<Vec<[f32; 3]>>);
+
+/// What [`Joint::direction`] reads of one coordinate: the coordinate, the
+/// side probed, the probe in quanta and the change read there.
+type Probe = (Coord, f32, f32, f32);
+
+/// A solve's readings apart from the solve: the renders it took, where the
+/// seconds went, the render count at the end of each named phase and what
+/// its repair scaled. A [`Joint`] keeps its class frames in `Rc` and stays on
+/// the thread that solved it; this leaves it, so solves that do not depend
+/// on each other run side by side ([`side_by_side`]) and their readings are
+/// folded afterwards in the order the solves are compared in. The seconds
+/// are each solve's own clock: summed over solves that ran together they
+/// exceed the time on the wall.
+#[derive(Clone, Default)]
+pub(super) struct Tally {
+    renders: u32,
+    spent: (f32, f32, f32),
+    phases: Vec<(&'static str, u32, f32)>,
+    scaled: Vec<(Refusal, f32)>,
+}
+
+impl Tally {
+    /// The renders counted, for a test's comparison.
+    #[cfg(test)]
+    pub(super) fn renders(&self) -> u32 {
+        self.renders
+    }
+
+    /// Another solve's renders and seconds, added to this one's; the phases
+    /// and the repair's fractions stay each solve's own.
+    pub(super) fn absorb(&mut self, other: &Tally) {
+        self.renders += other.renders;
+        let (r, j, g) = self.spent;
+        let (or, oj, og) = other.spent;
+        self.spent = (r + or, j + oj, g + og);
+    }
+
+    /// The classes the repair scaled the start on, named as the report's
+    /// enumerated values, with the fraction of the estimate each kept.
+    pub(super) fn scaled(&self) -> Vec<(&'static str, f32)> {
+        // A class re-estimated twice is named once, with its last fraction.
+        let mut out: Vec<(&'static str, f32)> = Vec::new();
+        for &(class, lambda) in &self.scaled {
+            match out.iter_mut().find(|(c, _)| *c == class.value()) {
+                Some(slot) => slot.1 = lambda,
+                None => out.push((class.value(), lambda)),
+            }
+        }
+        out
+    }
+
+    /// The trace line's tail: renders, where the seconds went, and each
+    /// phase's renders with the seconds it took on the wall.
+    pub(super) fn spent_line(&self) -> String {
+        let (r, j, g) = self.spent;
+        let (mut last, mut last_at) = (0u32, 0.0f32);
+        let phases: Vec<String> = self
+            .phases
+            .iter()
+            .map(|&(name, renders, at)| {
+                let (took, seconds) = (renders - last, at - last_at);
+                (last, last_at) = (renders, at);
+                format!("{name} {took} in {seconds:.0} s")
+            })
+            .collect();
+        format!(
+            "{} renders ({r:.1} s rendering, {j:.1} s reading J*, {g:.1} s reading G; {})",
+            self.renders,
+            phases.join(", ")
+        )
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's own switch for [`side_by_side`]: set, the contexts built on
+    /// this thread solve one after the other (the reading the side-by-side
+    /// solve is compared with).
+    pub(super) static ONE_AFTER_THE_OTHER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A test's own width for [`read_ahead`] and [`candidates_ahead`] on the
+    /// contexts built on this thread: the machine's own is one on a runner
+    /// of two to four threads, where nothing would be read ahead.
+    pub(super) static READ_AHEAD: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    /// A test's record of the verdicts [`Joint::eliminate`] gives on this
+    /// thread, where the test asked for one (`Some`): the pass, the control,
+    /// F of the absence it was judged against (its bits) and whether it was
+    /// dropped. An absence is the state's alone, so the record is the same
+    /// whichever way the absences were taken — and one read on another state
+    /// shows as another F even where the verdict comes out the same.
+    pub(super) static ELIMINATED: std::cell::RefCell<Option<Vec<Verdict>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A verdict of the elimination as a test records it ([`ELIMINATED`]): the
+/// pass, the control, F of the absence it was judged against (its bits) and
+/// whether it was dropped.
+#[cfg(test)]
+pub(super) type Verdict = (usize, Control, u32, bool);
+
+/// A verdict of the elimination, for the test that records them
+/// ([`ELIMINATED`]).
+#[cfg(test)]
+fn eliminated(pass: usize, c: Control, absence: &Eval, dropped: bool) {
+    ELIMINATED.with(|record| {
+        if let Some(record) = record.borrow_mut().as_mut() {
+            record.push((pass, c, absence.f().to_bits(), dropped));
+        }
+    });
+}
+
+/// Are the solves that do not depend on each other run side by side? Read
+/// once per context ([`SolveCtx::side_by_side`]). They are unless
+/// `AUTOSHADE_FIT_SERIAL` is set: the result is the same either way — each
+/// such solve owns its state, reads only the shared context, and is compared
+/// with the others in a fixed order after all have finished — and the switch
+/// is how that is shown on a pair (the two runs' recipes compare equal) and
+/// how a trace is kept in one solve's order.
+pub(super) fn side_by_side() -> bool {
+    #[cfg(test)]
+    if ONE_AFTER_THE_OTHER.with(|s| s.get()) {
+        return false;
+    }
+    crate::config::live_env_os("AUTOSHADE_FIT_SERIAL").is_none()
+}
+
+/// How many controls' absences the elimination reads at once after a drop
+/// ([`Joint::eliminate`]), read once per context ([`SolveCtx::read_ahead`]):
+/// one where the solves run one after the other. A read on the state as it
+/// stands is this state's only until the next drop, so reading every
+/// remaining control ahead would be thrown away at each drop. A quarter of
+/// the worker threads keeps each absence the two to three threads its own
+/// renders use.
+pub(super) fn read_ahead() -> usize {
+    if !side_by_side() {
+        return 1;
+    }
+    #[cfg(test)]
+    if let Some(width) = READ_AHEAD.with(|w| w.get()) {
+        return width.max(1);
+    }
+    (rayon::current_num_threads() / 4).clamp(1, 8)
+}
+
+/// How many candidates a pass of the polish reads at once
+/// ([`Joint::look_ahead`]), read once per context
+/// ([`SolveCtx::candidates_ahead`]): one where the solves run one after the
+/// other, else one per worker thread — a candidate is a render and its
+/// readings.
+pub(super) fn candidates_ahead() -> usize {
+    if !side_by_side() {
+        return 1;
+    }
+    #[cfg(test)]
+    if let Some(width) = READ_AHEAD.with(|w| w.get()) {
+        return width.max(1);
+    }
+    rayon::current_num_threads().clamp(1, 16)
+}
 
 /// The solves started in this process, numbered for the trace.
 static SOLVES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -587,10 +775,12 @@ impl<'c, 'a> Joint<'c, 'a> {
             renders: std::cell::Cell::new(0),
             spent: std::cell::Cell::new((0.0, 0.0, 0.0)),
             phases: std::cell::RefCell::new(Vec::new()),
+            born: std::time::Instant::now(),
             scaled: std::cell::RefCell::new(Vec::new()),
             last_refused: std::cell::Cell::new(None),
             frames: std::cell::RefCell::new(Default::default()),
             exposed: std::cell::RefCell::new(None),
+            ahead: std::cell::RefCell::new(Vec::new()),
             id: SOLVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
@@ -598,15 +788,7 @@ impl<'c, 'a> Joint<'c, 'a> {
     /// The classes the repair scaled the start on, named as the report's
     /// enumerated values, with the fraction of the estimate each kept.
     pub(super) fn scaled(&self) -> Vec<(&'static str, f32)> {
-        // A class re-estimated twice is named once, with its last fraction.
-        let mut out: Vec<(&'static str, f32)> = Vec::new();
-        for &(class, lambda) in self.scaled.borrow().iter() {
-            match out.iter_mut().find(|(c, _)| *c == class.value()) {
-                Some(slot) => slot.1 = lambda,
-                None => out.push((class.value(), lambda)),
-            }
-        }
-        out
+        self.tally().scaled()
     }
 
     /// The phase trace under `AUTOSHADE_G_TRACE`: J*, the degrees of freedom,
@@ -642,39 +824,33 @@ impl<'c, 'a> Joint<'c, 'a> {
     }
 
     /// A sub-solve's readings, added to this one's.
-    pub(super) fn absorb(&self, sub: &Joint<'_, '_>) {
-        self.renders.set(self.renders.get() + sub.renders.get());
+    pub(super) fn absorb(&self, sub: &Tally) {
+        self.renders.set(self.renders.get() + sub.renders);
         let (r, j, g) = self.spent.get();
-        let (sr, sj, sg) = sub.spent.get();
+        let (sr, sj, sg) = sub.spent;
         self.spent.set((r + sr, j + sj, g + sg));
     }
 
-    /// A phase of the solve ended: its name and the renders it took are
-    /// recorded for the trace line.
+    /// This solve's readings as they stand, apart from the solve ([`Tally`]).
+    pub(super) fn tally(&self) -> Tally {
+        Tally {
+            renders: self.renders.get(),
+            spent: self.spent.get(),
+            phases: self.phases.borrow().clone(),
+            scaled: self.scaled.borrow().clone(),
+        }
+    }
+
+    /// A phase of the solve ended: its name, the renders so far and the
+    /// seconds since the solve began are recorded for the trace line.
     pub(super) fn mark(&self, phase: &'static str) {
-        self.phases.borrow_mut().push((phase, self.renders.get()));
+        self.phases.borrow_mut().push((phase, self.renders.get(), self.born.elapsed().as_secs_f32()));
     }
 
     /// The trace line's tail: renders, where the seconds went, and the
     /// renders per phase.
     pub(super) fn spent_line(&self) -> String {
-        let (r, j, g) = self.spent.get();
-        let mut last = 0u32;
-        let phases: Vec<String> = self
-            .phases
-            .borrow()
-            .iter()
-            .map(|&(name, at)| {
-                let took = at - last;
-                last = at;
-                format!("{name} {took}")
-            })
-            .collect();
-        format!(
-            "{} renders ({r:.1} s rendering, {j:.1} s reading J*, {g:.1} s reading G; {})",
-            self.renders.get(),
-            phases.join(", ")
-        )
+        self.tally().spent_line()
     }
 
     fn render(&self, r: &EditRecipe) -> Vec<[f32; 3]> {
@@ -931,7 +1107,7 @@ pub(crate) fn confirm_at_export(
     }
 }
 
-/// A control's absence as [`Joint::absence`] reads it: the point, its
+/// A control's absence as [`Joint::absence_at`] reads it: the point, its
 /// reading, what its repair scaled, and whether the law refused the point as
 /// it stood (it was then scaled into G and read there, unpolished).
 type Absence = (Point, Eval, Vec<(Refusal, f32)>, bool);
@@ -1058,13 +1234,68 @@ pub(super) const CLASSES: [Refusal; 4] = [Refusal::Tone, Refusal::WhiteBalance, 
 impl<'c, 'a> Joint<'c, 'a> {
     /// Render and read `x`.
     pub(super) fn eval(&self, p: &Point) -> Eval {
-        let px = self.render(&p.recipe);
-        let started = std::time::Instant::now();
-        let j = look_err_with_evidence(&px, self.ctx.tp, self.ctx.evidence);
-        let (sr, sj, sg) = self.spent.get();
-        self.spent.set((sr, sj + started.elapsed().as_secs_f32(), sg));
+        let (px, j) = match self.taken_ahead(&p.recipe) {
+            Some(read) => read,
+            None => {
+                let px = self.render(&p.recipe);
+                let started = std::time::Instant::now();
+                let j = look_err_with_evidence(&px, self.ctx.tp, self.ctx.evidence);
+                let (sr, sj, sg) = self.spent.get();
+                self.spent.set((sr, sj + started.elapsed().as_secs_f32(), sg));
+                (px, j)
+            }
+        };
         let price = price_of(&p.recipe, self.ctx.base, self.ctx.law, &self.ctx.reach);
         Eval { px, j, dof: self.dof(&p.recipe), price }
+    }
+
+    /// The render and J* of `r` where they were read ahead
+    /// ([`Joint::look_ahead`]). The render is taken; G's verdict stays for
+    /// [`Joint::admissible`].
+    fn taken_ahead(&self, r: &EditRecipe) -> Option<(Vec<[f32; 3]>, f32)> {
+        let mut ahead = self.ahead.borrow_mut();
+        let read = ahead.iter_mut().find(|a| a.px.is_some() && a.recipe == *r)?;
+        Some((read.px.take()?, read.j))
+    }
+
+    /// Is `r` read ahead and not yet taken?
+    fn is_ahead(&self, r: &EditRecipe) -> bool {
+        self.ahead.borrow().iter().any(|a| a.px.is_some() && a.recipe == *r)
+    }
+
+    /// `candidates` read side by side AHEAD of the steps that will ask for
+    /// them one after another: each one's render, J* on it and the verdict
+    /// of G the step will ask for ([`Verdicts`]), by a solve of its own over
+    /// the shared context. All three are the recipe's alone (a render, a
+    /// reading of it against the target, the law between its leave-one-out
+    /// frames and it), so the step that asks ([`Joint::eval`],
+    /// [`Joint::admissible`], [`Joint::refusal`]) finds exactly what it
+    /// would have read. What an earlier look read and no step asked for is
+    /// dropped; its renders were taken and stay counted.
+    pub(super) fn look_ahead(&self, candidates: Vec<Point>, verdicts: Verdicts) {
+        use rayon::prelude::*;
+        let ctx = self.ctx;
+        let carried = crate::panic_guard::Carried::here();
+        let read: Vec<(Ahead, Tally)> = candidates
+            .into_par_iter()
+            .map(|candidate| {
+                carried.run(|| {
+                    let sub = Joint::new(ctx);
+                    let e = sub.eval(&candidate);
+                    let (admitted, refused) = match verdicts {
+                        Verdicts::Below(below) => ((e.f() < below).then(|| sub.admissible(&candidate, &e.px)), None),
+                        Verdicts::Every => (None, Some(sub.refusal(&candidate, &e.px))),
+                    };
+                    (Ahead { recipe: candidate.recipe, px: Some(e.px), j: e.j, admitted, refused }, sub.tally())
+                })
+            })
+            .collect();
+        let mut ahead = self.ahead.borrow_mut();
+        ahead.clear();
+        for (candidate, tally) in read {
+            self.absorb(&tally);
+            ahead.push(candidate);
+        }
     }
 
     /// G, read on the candidate's render: the strength budget's white-balance
@@ -1090,6 +1321,18 @@ impl<'c, 'a> Joint<'c, 'a> {
     /// class in the stages' order, each read after three classes that
     /// admitted it and a render apiece (legs/V6, 2026-11-11).
     pub(super) fn admissible(&self, p: &Point, px: &[[f32; 3]]) -> bool {
+        // Read ahead with the candidate ([`Joint::look_ahead`]): the verdict
+        // is the recipe's, whichever solve read it — and G admits exactly
+        // what no class refuses.
+        let ahead = self
+            .ahead
+            .borrow()
+            .iter()
+            .find(|a| a.recipe == p.recipe)
+            .and_then(|a| a.admitted.or(a.refused.map(|class| class.is_none())));
+        if let Some(admitted) = ahead {
+            return admitted;
+        }
         self.charged_to_g(|| {
             if self.over_budget(p) {
                 return false;
@@ -1110,6 +1353,11 @@ impl<'c, 'a> Joint<'c, 'a> {
     /// one in the stages' order ([`CLASSES`]); the gates' own renders are
     /// charged to G, not to rendering.
     pub(super) fn refusal(&self, p: &Point, px: &[[f32; 3]]) -> Option<Refusal> {
+        // Read ahead with the candidate, as [`Joint::admissible`] finds it.
+        let ahead = self.ahead.borrow().iter().find(|a| a.recipe == p.recipe).and_then(|a| a.refused);
+        if let Some(refused) = ahead {
+            return refused;
+        }
         self.charged_to_g(|| {
             if self.over_budget(p) {
                 return Some(Refusal::WhiteBalance);
@@ -1267,7 +1515,7 @@ impl<'c, 'a> Joint<'c, 'a> {
 
     /// [`Joint::repair`] with each class re-estimated from the cells' asks at
     /// most `refits_each` times before it is scaled: [`REPAIR_REFITS`] for a
-    /// start, none for an absence ([`Joint::absence`]), which is scaled only
+    /// start, none for an absence ([`Joint::absence_at`]), which is scaled only
     /// — the same rounds, each one evaluation, G's reading and one bisection.
     fn repair_with(&self, p: &mut Point, refits_each: usize) -> Eval {
         let base = self.ctx.base;
@@ -1462,19 +1710,22 @@ impl<'c, 'a> Joint<'c, 'a> {
     /// instead (J103) moved the coordinates the objective barely feels the
     /// farthest — a weak knot by 64 codes — and tripped the curves' law on
     /// every pass (gates/j104). Empty where nothing moves the objective.
+    ///
+    /// A coordinate's probe reads `p` and nothing of another's, so the
+    /// probes are read side by side where the context allows
+    /// ([`side_by_side`]), each by a solve of its own, and kept in the
+    /// coordinates' order: `value` is passed the solve that renders for it.
     fn direction(
         &self,
         p: &Point,
         coords: &[Coord],
         steps: f32,
-        resolution: &dyn Fn(Coord) -> f32,
-        value: &mut dyn FnMut(&Point) -> f32,
+        resolution: &(dyn Fn(Coord) -> f32 + Sync),
+        value: &(dyn Fn(&Joint<'c, 'a>, &Point) -> f32 + Sync),
         v0: f32,
     ) -> Vec<(Coord, f32)> {
         let (ctx, law) = (self.ctx, self.ctx.law);
-        // (coordinate, the side probed, the probe in quanta, the change read)
-        let mut probes: Vec<(Coord, f32, f32, f32)> = Vec::new();
-        for &c in coords {
+        let probe = |on: &Joint<'c, 'a>, c: Coord| -> Option<Probe> {
             let v = c.get(p, law);
             let q = c.quantum(p);
             let mut dir = 1.0f32;
@@ -1494,7 +1745,7 @@ impl<'c, 'a> Joint<'c, 'a> {
                 if trial.recipe == p.recipe {
                     break;
                 }
-                let dv = value(&trial) - v0;
+                let dv = value(on, &trial) - v0;
                 if !dv.is_finite() {
                     break;
                 }
@@ -1506,10 +1757,30 @@ impl<'c, 'a> Joint<'c, 'a> {
                 }
                 h *= 2.0;
             }
-            if let Some((h, dv)) = found {
-                probes.push((c, dir, h, dv));
-            }
-        }
+            found.map(|(h, dv)| (c, dir, h, dv))
+        };
+        let probes: Vec<Probe> = if ctx.side_by_side && coords.len() > 1 {
+            use rayon::prelude::*;
+            let carried = crate::panic_guard::Carried::here();
+            let read: Vec<(Option<Probe>, Tally)> = coords
+                .par_iter()
+                .map(|&c| {
+                    carried.run(|| {
+                        let sub = Joint::new(ctx);
+                        let found = probe(&sub, c);
+                        (found, sub.tally())
+                    })
+                })
+                .collect();
+            read.into_iter()
+                .filter_map(|(found, tally)| {
+                    self.absorb(&tally);
+                    found
+                })
+                .collect()
+        } else {
+            coords.iter().filter_map(|&c| probe(self, c)).collect()
+        };
         // The slope per quantum; the steepest coordinate sets the step: its
         // whole probe, the rest in proportion.
         let slopes: Vec<(Coord, f32, f32, f32)> = probes.into_iter().map(|(c, dir, h, dv)| (c, dir, h, dv / h)).collect();
@@ -1599,15 +1870,18 @@ impl<'c, 'a> Joint<'c, 'a> {
             let px = self.render(&q.recipe);
             (ctx.validity.misfit(&asks, &px), admits(q, &px))
         };
-        let mut m = |q: &Point| -> f32 { misfit(q).0 };
+        // The misfit alone, as the direction's probes read it, on the solve
+        // that renders the probe. (Until v1.18.1 a probe also read the
+        // admission above, which nothing asked for.)
+        let m = |on: &Joint<'c, 'a>, q: &Point| -> f32 { ctx.validity.misfit(&asks, &on.render(&q.recipe)) };
         // From the base of the class: admissible by construction (nothing
         // of the class moved).
         let mut q = p.clone();
         scale_class(&mut q, &coords, 0.0, ctx);
-        let mut m0 = m(&q);
+        let mut m0 = m(self, &q);
         for &steps in &STEP_MULTIPLIERS {
             for _ in 0..ASK_FIT_PASS_CAP {
-                let mut d = self.direction(&q, &coords, steps, &|_| unit, &mut m, m0);
+                let mut d = self.direction(&q, &coords, steps, &|_| unit, &m, m0);
                 let mut accepted = false;
                 while !d.is_empty() {
                     let trial = self.apply(&q, &d);
@@ -1682,10 +1956,16 @@ impl<'c, 'a> Joint<'c, 'a> {
         for &steps in multipliers {
             for _ in 0..DESCENT_PASS_CAP {
                 let j0 = best.j;
-                let mut j = |q: &Point| -> f32 { self.eval(q).j };
                 // Each coordinate's effect is read at the resolution the
                 // objective resolves ITS move at: its own price.
-                let full = self.direction(p, &coords, steps, &|c| FIT_QUANT * ctx.reach.of_coord(c), &mut j, j0);
+                let full = self.direction(
+                    p,
+                    &coords,
+                    steps,
+                    &|c| FIT_QUANT * ctx.reach.of_coord(c),
+                    &|on: &Joint<'c, 'a>, q: &Point| on.eval(q).j,
+                    j0,
+                );
                 let mut d = full.clone();
                 let mut accepted = false;
                 let (mut dropped, mut restricted): (Vec<Refusal>, bool) = (Vec::new(), false);
@@ -1705,6 +1985,24 @@ impl<'c, 'a> Joint<'c, 'a> {
                 while !d.is_empty() {
                     let trial = self.apply(p, &d);
                     if trial.recipe != p.recipe {
+                        if ctx.candidates_ahead > 1 && !self.is_ahead(&trial.recipe) {
+                            // This step and its halvings — the backtracking
+                            // below walks them while each is refused or
+                            // unrewarded, and they are known now.
+                            let mut steps_ahead = vec![trial.clone()];
+                            let mut shorter = Self::halved(&d);
+                            while let Some(h) = shorter {
+                                if steps_ahead.len() >= ctx.candidates_ahead {
+                                    break;
+                                }
+                                let halved = self.apply(p, &h);
+                                if halved.recipe != p.recipe {
+                                    steps_ahead.push(halved);
+                                }
+                                shorter = Self::halved(&h);
+                            }
+                            self.look_ahead(steps_ahead, Verdicts::Every);
+                        }
                         let e = self.eval(&trial);
                         last = self.refusal(&trial, &e.px);
                         if last.is_none() && e.f() < best.f() {
@@ -1792,10 +2090,27 @@ impl<'c, 'a> Joint<'c, 'a> {
                 if reestimated {
                     continue;
                 }
+                // The walk's next steps are read ahead — two, then four, …
+                // while it goes on: each is the step from the one before,
+                // should that one be kept.
+                let mut depth = 2usize;
                 loop {
                     let again = self.apply(p, &d);
                     if again.recipe == p.recipe {
                         break;
+                    }
+                    if ctx.candidates_ahead > 1 && !self.is_ahead(&again.recipe) {
+                        let mut walk = vec![again.clone()];
+                        while walk.len() < depth.min(ctx.candidates_ahead) {
+                            let from = &walk[walk.len() - 1];
+                            let next = self.apply(from, &d);
+                            if next.recipe == from.recipe {
+                                break;
+                            }
+                            walk.push(next);
+                        }
+                        self.look_ahead(walk, Verdicts::Below(best.f()));
+                        depth *= 2;
                     }
                     let e = self.eval(&again);
                     if e.f() < best.f() && self.admissible(&again, &e.px) {
@@ -1807,6 +2122,7 @@ impl<'c, 'a> Joint<'c, 'a> {
                 }
             }
         }
+        self.ahead.borrow_mut().clear();
         best
     }
 
@@ -1823,41 +2139,70 @@ impl<'c, 'a> Joint<'c, 'a> {
     /// is the same descent with fewer passes: one accepted step per pass had
     /// crawled the quantum level a pass per step, every pass a full round of
     /// every coordinate (14529 renders on an exposure-only pair).
+    ///
+    /// A pass asks one trial after another and keeps few of them, and a
+    /// trial is its coordinate's step from the point as it stands. So the
+    /// trials the pass asks next WHILE IT KEEPS NOTHING are read ahead side
+    /// by side ([`Joint::look_ahead`]) and each step finds its reading; a
+    /// kept trial moves the point, and what was read ahead of it is dropped
+    /// at the next look. As many as the context allows are read while trials
+    /// are refused, two after one is kept, doubling
+    /// ([`SolveCtx::candidates_ahead`]).
     pub(super) fn polish(&self, p: &mut Point, mut best: Eval, multipliers: &[f32]) -> Eval {
         let ctx = self.ctx;
         let law = ctx.law;
         let coords: Vec<Coord> = Coord::all(p).into_iter().filter(|c| self.free(*c)).collect();
+        // `c`'s trial a step to one side of `p`, where that is another recipe.
+        let trial_of = |p: &Point, c: Coord, dir: f32, steps: f32| -> Option<Point> {
+            let v = c.get(p, law);
+            let w = c.step(p, v, dir, steps, ctx);
+            if w == v {
+                return None;
+            }
+            let mut trial = p.clone();
+            c.set(&mut trial, w, ctx);
+            (trial.recipe != p.recipe).then_some(trial)
+        };
+        const SIDES: [f32; 2] = [1.0, -1.0];
+        let mut width = ctx.candidates_ahead;
         let mut level = 0usize;
         for _ in 0..POLISH_PASS_CAP {
             let Some(&steps) = multipliers.get(level) else { break };
             let mut accepted = false;
-            for &c in &coords {
-                let v = c.get(p, law);
-                for dir in [1.0f32, -1.0] {
-                    let w = c.step(p, v, dir, steps, ctx);
-                    if w == v {
-                        continue;
-                    }
-                    let mut trial = p.clone();
-                    c.set(&mut trial, w, ctx);
-                    if trial.recipe == p.recipe {
-                        continue;
+            for (at, &c) in coords.iter().enumerate() {
+                for (side, dir) in SIDES.into_iter().enumerate() {
+                    let Some(trial) = trial_of(p, c, dir, steps) else { continue };
+                    if width > 1 && !self.is_ahead(&trial.recipe) {
+                        // This trial and the ones the pass asks after it,
+                        // from the point as it stands.
+                        let next: Vec<Point> = (at..coords.len())
+                            .flat_map(|k| {
+                                let from = if k == at { side } else { 0 };
+                                (from..SIDES.len()).map(move |s| (k, s))
+                            })
+                            .filter_map(|(k, s)| trial_of(p, coords[k], SIDES[s], steps))
+                            .take(width)
+                            .collect();
+                        self.look_ahead(next, Verdicts::Below(best.f()));
+                        width = (2 * width).min(ctx.candidates_ahead);
                     }
                     let e = self.eval(&trial);
                     if e.f() < best.f() && self.admissible(&trial, &e.px) {
                         *p = trial;
                         best = e;
                         accepted = true;
-                        loop {
-                            let v = c.get(p, law);
-                            let w = c.step(p, v, dir, steps, ctx);
-                            if w == v {
-                                break;
-                            }
-                            let mut trial = p.clone();
-                            c.set(&mut trial, w, ctx);
-                            if trial.recipe == p.recipe {
-                                break;
+                        width = width.min(2);
+                        // The walk's next steps, read ahead as the descent's.
+                        let mut depth = 2usize;
+                        while let Some(trial) = trial_of(p, c, dir, steps) {
+                            if ctx.candidates_ahead > 1 && !self.is_ahead(&trial.recipe) {
+                                let mut walk = vec![trial.clone()];
+                                while walk.len() < depth.min(ctx.candidates_ahead) {
+                                    let Some(next) = trial_of(&walk[walk.len() - 1], c, dir, steps) else { break };
+                                    walk.push(next);
+                                }
+                                self.look_ahead(walk, Verdicts::Below(best.f()));
+                                depth *= 2;
                             }
                             let e = self.eval(&trial);
                             if e.f() < best.f() && self.admissible(&trial, &e.px) {
@@ -1875,6 +2220,7 @@ impl<'c, 'a> Joint<'c, 'a> {
                 level += 1;
             }
         }
+        self.ahead.borrow_mut().clear();
         best
     }
 
@@ -1901,16 +2247,20 @@ impl<'c, 'a> Joint<'c, 'a> {
     /// (legs/V5t, 2026-11-11), and neither p36 nor p39 ended a fit in rounds
     /// V2-V5 (10.6 hours in V5, against 1209 s and 2676 s on the build
     /// before, legs/J17). Returns the point, its reading, what the repair
-    /// scaled, and whether the point was displaced.
-    fn absence(&self, p: &Point, c: Control) -> Absence {
-        let ctx = self.ctx;
+    /// scaled, and whether the point was displaced — and the readings of the
+    /// sub-solve that read it. It is read APART from the solve that asks: it
+    /// takes the context, that solve's pinned coordinates and the point, and
+    /// nothing else of it, so a pass's absences are read side by side
+    /// ([`Joint::absences_at`]) and the asking solve adds each one's readings
+    /// to its own in the order it asks them.
+    fn absence_at(ctx: &'c SolveCtx<'a>, pinned: &[Coord], p: &Point, c: Control) -> (Absence, Tally) {
         let mut without = p.clone();
         for coord in Coord::of_control(c, p) {
             let v = without.base_value(coord, ctx);
             coord.set(&mut without, v, ctx);
         }
         c.reset(&mut without.recipe, ctx.base);
-        let mut sub = Joint::with_pinned(ctx, self.pinned.clone());
+        let mut sub = Joint::with_pinned(ctx, pinned.to_vec());
         sub.pinned.extend(Coord::of_control(c, p));
         let start = sub.eval(&without);
         let displaced = !sub.admissible(&without, &start.px);
@@ -1919,9 +2269,22 @@ impl<'c, 'a> Joint<'c, 'a> {
         } else {
             sub.polish(&mut without, start, &STEP_MULTIPLIERS[3..])
         };
-        self.absorb(&sub);
-        let scaled = sub.scaled.borrow().clone();
-        (without, e, scaled, displaced)
+        let tally = sub.tally();
+        ((without, e, tally.scaled.clone(), displaced), tally)
+    }
+
+    /// The absences of `controls` at `p` under `pinned`, in `controls`'
+    /// order, each with its sub-solve's readings: read side by side where the
+    /// context allows ([`side_by_side`]) — every one is read on the same
+    /// state and none reads another.
+    fn absences_at(ctx: &'c SolveCtx<'a>, pinned: &[Coord], p: &Point, controls: &[Control]) -> Vec<(Absence, Tally)> {
+        use rayon::prelude::*;
+        if ctx.side_by_side && controls.len() > 1 {
+            let carried = crate::panic_guard::Carried::here();
+            controls.par_iter().map(|&c| carried.run(|| Self::absence_at(ctx, pinned, p, c))).collect()
+        } else {
+            controls.iter().map(|&c| Self::absence_at(ctx, pinned, p, c)).collect()
+        }
     }
 
     /// The self-consistency law read whole (RULING-1180-joint-r1 (4)): for
@@ -1931,7 +2294,7 @@ impl<'c, 'a> Joint<'c, 'a> {
     /// recipe — unless it is one of the four band sliders and earns on the
     /// luminance band it acts on (R22, the frame a guard). Smallest absence
     /// first, repeated until a pass drops nothing. An absence the law refuses
-    /// as it stands is read scaled into G, unpolished ([`Joint::absence`]);
+    /// as it stands is read scaled into G, unpolished ([`Joint::absence_at`]);
     /// where it is the one kept, the point is settled at the quantum before
     /// the next control is read against it — an unsettled point would lend
     /// its own slack to every later absence. Returns what was dropped.
@@ -1947,30 +2310,90 @@ impl<'c, 'a> Joint<'c, 'a> {
         // The solved point's reading, taken when the point moves, not per
         // candidate.
         let mut solved = reading(best);
+        // The absences read on the state as it stands, of the controls kept
+        // against them. A pass that dropped is followed by another from the
+        // state it ended on, and a control judged after the pass's last drop
+        // was read on that very state: its absence is held, not read again.
+        // (With the solves read in turn nothing is held and each is read
+        // again, as before v1.18.1 — the same reading, taken twice.)
+        let mut standing: Vec<(Control, Absence)> = Vec::new();
+        #[cfg(test)]
+        let mut pass = 0usize;
         loop {
+            #[cfg(test)]
+            {
+                pass += 1;
+            }
             let candidates: Vec<Control> =
                 global_controls().into_iter().filter(|c| c.differs(&p.recipe, ctx.base)).collect();
+            // Every candidate's absence is read on the same state, so the
+            // pass's absences are read side by side; their readings are
+            // added in the candidates' order.
+            let mut held = std::mem::take(&mut standing);
+            let unread: Vec<Control> =
+                candidates.iter().copied().filter(|c| !held.iter().any(|(h, _)| h == c)).collect();
+            let mut read = Self::absences_at(ctx, &self.pinned, p, &unread).into_iter();
             let mut absences: Vec<(f32, Control, Absence)> = Vec::new();
             for c in candidates {
-                let absence = self.absence(p, c);
+                let absence = match held.iter().position(|(h, _)| *h == c) {
+                    Some(at) => held.swap_remove(at).1,
+                    None => {
+                        let (absence, tally) = read.next().expect("every candidate not held was read");
+                        self.absorb(&tally);
+                        absence
+                    }
+                };
                 absences.push((absence.1.f(), c, absence));
             }
             absences.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let order: Vec<Control> = absences.iter().map(|a| a.1).collect();
+            // After a drop: the next controls' absences, read ahead on the
+            // state as it stands, in the order they are asked in.
+            let mut ahead: std::collections::VecDeque<(Control, (Absence, Tally))> = Default::default();
+            // How many are read at once. The controls are asked smallest
+            // absence first, so a drop is most often followed by another:
+            // after a drop ONE is read, and each window asked to its end
+            // without a drop is followed by one twice as wide, up to the
+            // context's width.
+            let mut width = 1usize;
             let mut changed = false;
-            for (_, c, absence) in absences {
+            for (at, (_, c, absence)) in absences.into_iter().enumerate() {
                 // The pass's absences were read on the state they judge;
-                // after a drop the state moved, so this one is read again.
+                // after a drop the state moved, so this one is read again —
+                // with the next few still to be asked ([`read_ahead`]): until
+                // the next drop they are read on the state they will judge,
+                // and a drop discards what was read ahead of it.
                 let (mut without, mut e, scaled, displaced) = if changed {
                     if !c.differs(&p.recipe, ctx.base) {
                         continue;
                     }
-                    self.absence(p, c)
+                    if ahead.front().map(|(next, _)| *next) != Some(c) {
+                        let window: Vec<Control> = order[at..]
+                            .iter()
+                            .copied()
+                            .filter(|next| next.differs(&p.recipe, ctx.base))
+                            .take(width)
+                            .collect();
+                        let read = Self::absences_at(ctx, &self.pinned, p, &window);
+                        ahead = window.into_iter().zip(read).collect();
+                        width = (2 * width).min(ctx.read_ahead);
+                    }
+                    let (_, (absence, tally)) = ahead.pop_front().expect("the window starts at this control");
+                    self.absorb(&tally);
+                    absence
                 } else {
                     absence
                 };
                 if self.keeps(c, &bands, &solved, &reading(&e), best, &e) {
+                    #[cfg(test)]
+                    eliminated(pass, c, &e, false);
+                    if ctx.side_by_side {
+                        standing.push((c, (without, e, scaled, displaced)));
+                    }
                     continue;
                 }
+                #[cfg(test)]
+                eliminated(pass, c, &e, true);
                 self.pinned.extend(Coord::of_control(c, &without));
                 if displaced {
                     e = self.polish(&mut without, e, &STEP_MULTIPLIERS[3..]);
@@ -1982,6 +2405,15 @@ impl<'c, 'a> Joint<'c, 'a> {
                 solved = reading(best);
                 dropped.push(c);
                 changed = true;
+                // The state moved: what was read ahead judged the one before
+                // and is dropped unread. Its renders were taken and are
+                // counted.
+                for (_, (_, tally)) in ahead.drain(..) {
+                    self.absorb(&tally);
+                }
+                // And the absences held were read on the state before.
+                standing.clear();
+                width = 1;
             }
             if !changed {
                 return dropped;

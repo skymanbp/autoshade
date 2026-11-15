@@ -127,20 +127,25 @@ pub(super) fn solve_wheel(
     }
     let want = common_part(&groups);
     let reach = render::WHEEL_SAT_REACH;
-    let mut best = (0.0f32, 0.0f32, want[0] * want[0] + want[1] * want[1]);
-    for hue in (0..360).step_by(GRADE_HUE_STEP) {
+    // Each member's own linear value, the same under every hue.
+    let bases: Vec<[f32; 3]> = members
+        .iter()
+        .map(|&(i, _, _)| std::array::from_fn(|c| render::srgb_to_linear(cur[i][c]).max(1e-5)))
+        .collect();
+    // One hue's Saturation and what it leaves of the demand; `None` where the
+    // hue moves the region away from it.
+    let at_hue = |hue: usize| -> Option<(f32, f32, f32)> {
         let h = hue as f32;
         // The wheel's move per unit amount on the region's own pixels, on the
         // demand's two axes: each pixel's log linear change, linearised at
         // amount 0, trust- and region-weighted, then averaged.
         let (mut dir, mut mass) = ([0.0f64; 2], 0.0f64);
-        for &(i, w, l) in &members {
+        for (&(i, w, l), base) in members.iter().zip(&bases) {
             let m = (weights[i].max(0.0) * w) as f64;
             let tint = render::wheel_tint(h, l);
             let slope: [f32; 3] = std::array::from_fn(|c| {
-                let base = render::srgb_to_linear(cur[i][c]).max(1e-5);
                 let moved = render::srgb_to_linear((cur[i][c] + 1e-3 * w * (tint[c] - cur[i][c])).clamp(0.0, 1.0));
-                (moved.max(1e-5) / base).ln() / 1e-3
+                (moved.max(1e-5) / base[c]).ln() / 1e-3
             });
             dir[0] += m * (slope[0] - slope[1]) as f64;
             dir[1] += m * (slope[2] - slope[1]) as f64;
@@ -150,12 +155,26 @@ pub(super) fn solve_wheel(
         let den = dir[0] * dir[0] + dir[1] * dir[1];
         let num = dir[0] * want[0] + dir[1] * want[1];
         if num <= 0.0 || den <= 0.0 {
-            continue;
+            return None;
         }
         let amount = (num / den).min(reach);
         let left = (want[0] - amount * dir[0]).powi(2) + (want[1] - amount * dir[1]).powi(2);
+        Some((h, amount / reach * 100.0, left))
+    };
+    // A hue reads the members and nothing of another hue: the hues are read
+    // side by side (v1.18.1; each one's sums in the members' order) and the
+    // least remainder is taken in the hues' order, a tie the earlier hue's.
+    let hues: Vec<usize> = (0..360).step_by(GRADE_HUE_STEP).collect();
+    let read: Vec<Option<(f32, f32, f32)>> = if super::joint::side_by_side() {
+        use rayon::prelude::*;
+        hues.par_iter().map(|&hue| at_hue(hue)).collect()
+    } else {
+        hues.iter().map(|&hue| at_hue(hue)).collect()
+    };
+    let mut best = (0.0f32, 0.0f32, want[0] * want[0] + want[1] * want[1]);
+    for (h, saturation, left) in read.into_iter().flatten() {
         if left < best.2 {
-            best = (h, amount / reach * 100.0, left);
+            best = (h, saturation, left);
         }
     }
     (best.0, best.1)

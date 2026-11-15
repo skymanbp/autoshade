@@ -723,6 +723,13 @@ fn derive_luminance_bands(
         }
     }
 
+    // A run widened by a merge is read again on the bins it now holds: its
+    // residual signs every merge after it and its score ranks it under the
+    // cap. Until v1.18.1 a merge moved the bounds only, and the run kept the
+    // reading it had before it. (A run's target bounds are its first and
+    // last bins' own, so they follow.)
+    let widened = |first: usize, last: usize| residual_run(first, last, &bin_residual, &target_bounds, evidence);
+
     for proposal in proposals {
         let Some((first, last)) = evidence_bins_for_span(proposal, source_px, evidence) else {
             out.abstentions.push(RangeAbstention {
@@ -772,17 +779,12 @@ fn derive_luminance_bands(
             .filter_map(|(i, run)| touches(run).then_some(i)).collect::<Vec<_>>();
         if let Some(&into) = merged.first() {
             let old = proposed.clone();
-            valid[into].first = valid[into].first.min(proposed.first);
-            valid[into].last = valid[into].last.max(proposed.last);
-            valid[into].target_first = valid[into].target_first.min(proposed.target_first);
-            valid[into].target_last = valid[into].target_last.max(proposed.target_last);
+            let (mut lo, mut hi) = (valid[into].first.min(proposed.first), valid[into].last.max(proposed.last));
             for &index in merged.iter().skip(1).rev() {
                 let joined = valid.remove(index);
-                valid[into].first = valid[into].first.min(joined.first);
-                valid[into].last = valid[into].last.max(joined.last);
-                valid[into].target_first = valid[into].target_first.min(joined.target_first);
-                valid[into].target_last = valid[into].target_last.max(joined.target_last);
+                (lo, hi) = (lo.min(joined.first), hi.max(joined.last));
             }
+            valid[into] = widened(lo, hi);
             out.merges.push(RangeMerge {
                 lo: old.first as f32 / 17.0,
                 hi: (old.last + 1) as f32 / 17.0,
@@ -843,10 +845,7 @@ fn derive_luminance_bands(
                 .min_by_key(|&i| valid[i].first.abs_diff(valid[drop].first));
             let old = valid[drop].clone();
             if let Some(nearest) = nearest {
-                valid[nearest].first = valid[nearest].first.min(old.first);
-                valid[nearest].last = valid[nearest].last.max(old.last);
-                valid[nearest].target_first = valid[nearest].target_first.min(old.target_first);
-                valid[nearest].target_last = valid[nearest].target_last.max(old.target_last);
+                valid[nearest] = widened(valid[nearest].first.min(old.first), valid[nearest].last.max(old.last));
                 out.merges.push(RangeMerge {
                     lo: old.first as f32 / 17.0,
                     hi: (old.last + 1) as f32 / 17.0,
@@ -1993,6 +1992,71 @@ mod tests {
         assert!(refused.bands.is_empty(), "{refused:?}");
         assert!(refused.abstentions.iter().any(|a|
             a.reason == "field proposal sign disagrees with its rank-paired residual"), "{refused:?}");
+    }
+
+    /// v1.18.1. A run a merge widened is ranked, and signed, on the bins it
+    /// holds after the merge.
+    ///
+    /// BEFORE THE CAP. A one-bin run of 0.065 absorbs a field proposal over
+    /// its two neighbours (0.02 each): three bins at a mean of 0.035, more
+    /// evidence than any of the four one-bin runs beside it (0.10 to 0.07).
+    /// It is kept as it is, and the cap drops the weakest of the four.
+    /// MUTATION THIS CATCHES: the widened run keeping the reading of its one
+    /// bin — it then ranks last, the cap drops IT and merges it into the run
+    /// at bin 8, and the first band is bins 3 to 8.
+    ///
+    /// UNDER THE CAP. The cap drops two weak positive runs, at bins 1 and 9.
+    /// The first merges into the kept run at bin 7 across five bins that read
+    /// a little darker (-0.029 each, under the trigger): bins 1 to 7 now read
+    /// darker on the whole, so the second is not a same-sign neighbour and is
+    /// set down with the cap's sentence. MUTATION THIS CATCHES: the widened
+    /// run keeping the sign it had — the second run is merged into it too,
+    /// and the first band is bins 1 to 9.
+    #[test]
+    fn a_run_widened_by_a_merge_is_read_again_on_the_bins_it_holds() {
+        let cores_of = |derived: &RangeDerivation| {
+            derived
+                .bands
+                .iter()
+                .map(|band| {
+                    let (_, lo, hi, _) = luminance_bounds(band.source);
+                    ((lo * 17.0).round() as usize, (hi * 17.0).round() as usize)
+                })
+                .collect::<Vec<_>>()
+        };
+        let capped = |derived: &RangeDerivation| {
+            derived.merges.iter().filter(|m| m.why == "after the four-band evidence cap").count()
+        };
+        let set_down = |derived: &RangeDerivation| {
+            derived.abstentions.iter().filter(|a| a.reason.contains("no adjacent same-sign")).count()
+        };
+
+        let mut residuals = [0.0; 17];
+        for (bin, residual) in [(3, 0.02), (4, 0.065), (5, 0.02), (8, 0.10), (10, -0.09), (12, 0.08), (14, -0.07)] {
+            residuals[bin] = residual;
+        }
+        let (source, target, evidence) = synthetic_range_case(residuals);
+        let proposal = FieldBandProposal { lo: 3.0 / 17.0, hi: 6.0 / 17.0, sign: 0.1 };
+        let derived = derive_luminance_bands(&source, &target, &evidence, &[proposal]);
+        assert_eq!(
+            derived.merges.first().map(|m| m.why),
+            Some("absorbed by the overlapping rank-paired run before the cap"),
+            "premise: the proposal is absorbed by the run at bin 4: {derived:?}"
+        );
+        assert_eq!(cores_of(&derived), vec![(3, 6), (8, 9), (10, 11), (12, 13)], "{derived:?}");
+        assert_eq!((capped(&derived), set_down(&derived)), (0, 1), "{derived:?}");
+
+        let mut residuals = [0.0; 17];
+        for (bin, residual) in [(1, 0.061), (7, 0.062), (9, 0.0615), (11, -0.10), (13, 0.10), (15, -0.08)] {
+            residuals[bin] = residual;
+        }
+        for gap in residuals.iter_mut().take(7).skip(2) {
+            *gap = -0.029;
+        }
+        let (source, target, evidence) = synthetic_range_case(residuals);
+        let derived = derive_luminance_bands(&source, &target, &evidence, &[]);
+        assert_eq!(cores_of(&derived), vec![(1, 8), (11, 12), (13, 14), (15, 16)], "{derived:?}");
+        assert_eq!((capped(&derived), set_down(&derived)), (1, 1), "{derived:?}");
     }
 
     #[test]

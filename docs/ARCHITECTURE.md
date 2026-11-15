@@ -4763,7 +4763,7 @@ the finished recipe is the zoned fit run again in full with the global
 controls held at the base, shipping when the frame reads no worse (a tie
 goes to the smaller domain; note `ZONE_ALONE_SHIPPED`). Three mechanics of
 the solver were set right beside it. An ABSENCE is read inside the law
-(`Joint::absence`): the rest of a point was solved with the control, so the
+(`Joint::absence_at`): the rest of a point was solved with the control, so the
 point without it can be one the law refuses, and the elimination used to
 read such an absence as it stood and could ship it. It is scaled into the
 law first — each refused class toward the base, to the largest fraction its
@@ -4792,6 +4792,55 @@ under an identity field it is the frame's model field for field — a
 restriction that drops nothing moves nothing
 (`a_field_that_drops_nothing_moves_nothing`, which read a saturation of 27.6
 against 29.9 while the estimation weights were multiplied in twice).
+
+**The solve's readings that do not depend on each other are taken side by
+side (v1.18.1).** Every reading of the solve — a render, J* on it, the law's
+verdict between it and its leave-one-class-out frames — is a function of the
+shared context and one recipe, and until v1.18.1 the solve took them one
+after another on one thread: the released program kept two to three
+processors busy through a fit. Since v1.18.1 whatever the next steps will ask
+for is read by solves of their own over the shared context, on the worker
+pool, and USED in the order the one-after-the-other solve used it, so the
+recipe, the controls set back and F are the same bit for bit:
+
+- the six alone starts are proposed and repaired beside the sequence's own
+  solve (`solve::alone_starts`), and the Atmosphere stage's carriers are
+  solved beside each other and folded in their order;
+- `Joint::direction` reads each coordinate's finite-difference probe, its
+  doubling included, by a solve of its own, and keeps the coordinates' order;
+- the descent reads a step and its halvings ahead of the backtracking that
+  walks them, and the next steps of a walk (two, then four, …); the polish
+  reads the next trials of a pass (`Joint::look_ahead`). `Joint::eval`,
+  `Joint::admissible` and `Joint::refusal` find by the recipe what they
+  would have read themselves;
+- the elimination reads a pass's absences together (`Joint::absences_at`);
+  an absence read on the state as it stands is held for the pass after a
+  drop instead of being read again; and after a drop the next controls are
+  read one, then two, then four at a time, up to `SolveCtx::read_ahead` —
+  what was read on a state that then moved is thrown away;
+- the grade stage reads its 180 hues side by side (`grade::solve_wheel`) and
+  takes the least remainder in the hues' order, a tie the earlier hue's.
+
+What is read ahead and never asked for is discarded, so the render count on
+the trace line counts every render TAKEN and differs between the two orders;
+the tests compare what ships. `AUTOSHADE_FIT_SERIAL` in the environment keeps
+the one-after-the-other order (nothing read ahead, nothing held), which is
+how the equality is shown on a pair. Work handed to a pool thread enters the
+calling thread's panic containment (`panic_guard::Carried`): a panic inside a
+solve is handed back to the guarded thread and stays the fit's own failure —
+without it the application's hook would read it, on the pool's thread, as
+fatal. Three tests read a solve both ways at several widths
+(`the_elimination_read_side_by_side_is_the_elimination_read_in_turn`, which
+also compares every verdict with the reading it was given on;
+`a_solve_read_side_by_side_is_the_solve_read_in_turn`;
+`a_fit_solved_side_by_side_is_the_fit_solved_one_after_the_other`), and a
+fourth that what is read ahead is found by the recipe it was read for, in
+whatever order it is asked for
+(`a_reading_taken_ahead_is_the_asked_candidates_own`). With
+`AUTOSHADE_FIT_TRACE` the fit prints each stage's seconds, the alone starts'
+and both solves' lines — the sequence's too, which until v1.18.1 went
+unprinted where the solve from an alone start shipped — each phase with its
+renders and its seconds.
 
 **The tone's third carrier is the law's own asks; a frame nothing pairs on
 has no withheld range (J142, v1.18.0).** With the colour field off the pair
@@ -7859,7 +7908,13 @@ with the field's sign is refused as a disagreement (both typed abstentions), an
 overlapping or adjacent same-sign run absorbs it and the merge note names why
 (`absorbed by the overlapping rank-paired run before the cap`, distinct from the
 cap merge's `after the four-band evidence cap`), and the existing
-disjoint-sorted `debug_assert` in front of the cap still holds. On the
+disjoint-sorted `debug_assert` in front of the cap still holds. A run a merge
+widens — a proposal absorbed, or a run the cap merges into its nearest
+neighbour — is read again on the bins it now holds (`range::residual_run`,
+v1.18.1): its residual signs the merges after it and its score ranks it under
+the cap, and until then it kept the reading it had before the merge
+(`a_run_widened_by_a_merge_is_read_again_on_the_bins_it_holds`; none of the
+eleven fits of v1.18.0's last check merged a run). On the
 calibration pair no proposal survives its own gates (bins 3 and 4 are
 structured, the rest fail the share or 2/255 magnitude line), so the union
 changes no band and no dial — the analyzer's whole live effect there is the

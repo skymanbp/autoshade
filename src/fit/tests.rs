@@ -6352,8 +6352,10 @@ fn a_scaled_seed_is_disclosed_by_class_and_fraction() {
     );
 }
 
-#[test]
-fn tone_stage_keeps_withheld_luma_range_at_identity() {
+/// A bright ramp over a darker one; the target lifts the lower ramp and
+/// replaces the upper with a checker of 0.70 and 0.96 — a withheld top over a
+/// paired bottom ([`tone_stage_keeps_withheld_luma_range_at_identity`]).
+fn withheld_top_pair() -> (DynamicImage, DynamicImage) {
     let (w, h) = (192u32, 128u32);
     let source = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
         let v = if y < 43 {
@@ -6371,6 +6373,13 @@ fn tone_stage_keeps_withheld_luma_range_at_identity() {
         };
         image::Rgb([(v.clamp(0.0, 1.0) * 255.0).round() as u8; 3])
     }));
+    (source, target)
+}
+
+#[test]
+fn tone_stage_keeps_withheld_luma_range_at_identity() {
+    let (source, target) = withheld_top_pair();
+    let w = source.width();
     let report = fit_recipe(&source, &target);
     assert_eq!(report.mode, FitMode::Atmosphere, "premise: the checker sky is divergent");
     let structural = report
@@ -6463,7 +6472,7 @@ fn tone_stage_keeps_withheld_luma_range_at_identity() {
     // into an exposure beside the curve, solved the same way and ships:
     // 0.0467 -> 0.0155 on [exposure, tone curve]. Its exposure stays: without
     // it the law refuses the point, the absence is scaled into the law and
-    // reads worse there (`Joint::absence`; the elimination took 18 renders).
+    // reads worse there (`Joint::absence_at`; the elimination took 18 renders).
     // From 2026-11-10 to J139 that absence was re-estimated from the cells'
     // asks into [shadows, tone curve] and taken at F 0.03033 against 0.03072
     // — four units of price for 0.0072 of the look (0.0467 -> 0.0227, 878
@@ -6472,7 +6481,7 @@ fn tone_stage_keeps_withheld_luma_range_at_identity() {
     // elimination took an absence the law refuses (gates/v1-withheld).
     // MUTATION (J139), as it read until 2026-11-12: repair the absence as a
     // start is repaired (`repair_with(.., REPAIR_REFITS)` in
-    // `Joint::absence`) and the exposure is dropped.
+    // `Joint::absence_at`) and the exposure is dropped.
     // RE-PINNED 2026-11-12 (gates/j145). The start that wins is no longer
     // the stage's. The asks' own curve (J142) — the withheld ranges where
     // they stand, the paired bottom on its cells' asks — enters as a start
@@ -7959,4 +7968,244 @@ fn the_unpaired_distribution_distance_reads_a_colour_offset_as_the_paired_term_d
     assert_eq!((paired.share, unpaired.share), (1.0, 0.0), "the first pairs, the second does not");
     assert!((paired.paired - d).abs() < 1e-4, "paired {} vs d {d}", paired.paired);
     assert!((unpaired.dist - d).abs() < 1e-3, "unpaired {} vs d {d}", unpaired.dist);
+}
+
+/// v1.18.1. The elimination reads a pass's absences side by side, and after
+/// a drop the next few it will ask, ahead, on the state as it stands; a drop
+/// discards what was read ahead of it. Each absence's polish reads the trials
+/// it asks next ahead in the same way. What the elimination ships, what it
+/// drops and the reading it ends on are those of the elimination that reads
+/// each absence, and each trial, when its turn comes — at every width. And
+/// so is every verdict on the way: the control, the reading of the absence
+/// it was judged against, kept or dropped — an absence read on another state
+/// is another reading even where the verdict comes out the same.
+///
+/// The start is a darkening the target asks for beside five tone controls,
+/// a tint and a saturation it does not, sized so that a pass drops, keeps,
+/// then drops again with a control still to ask: there a read-ahead is
+/// thrown away, and an absence held from before a drop must not be used
+/// after it.
+#[test]
+fn the_elimination_read_side_by_side_is_the_elimination_read_in_turn() {
+    use super::joint::{Coord, Joint, Point, ELIMINATED};
+    use crate::recipe::GradeStrength;
+    let src = synth();
+    let base = EditRecipe::default();
+    let asked = EditRecipe { exposure_ev: -0.6, ..EditRecipe::default() };
+    let sp = pixels_of(&render::develop_preview(&src, &base));
+    let tp = pixels_of(&render::develop_preview(&src, &asked));
+    let evidence = evidence_model(&sp, &tp);
+    let law = render::WbLaw::of(&base);
+    let strength = GradeStrength::new(0.85);
+    let start = EditRecipe {
+        contrast: 10.0,
+        highlights: -15.0,
+        shadows: 12.0,
+        whites: 8.0,
+        blacks: -8.0,
+        tint: 5.0,
+        saturation: 6.0,
+        ..asked.clone()
+    };
+    let read = |side_by_side: bool, read_ahead: usize| {
+        let mut ctx = super::solve::SolveCtx::atmosphere(
+            &src,
+            &sp,
+            &tp,
+            &evidence,
+            &base,
+            strength,
+            FitBudget::for_strength(strength),
+            law,
+            vec![1.0; sp.len()],
+        );
+        (ctx.side_by_side, ctx.read_ahead, ctx.candidates_ahead) = (side_by_side, read_ahead, read_ahead);
+        let mut p = Point::bounded(start.clone());
+        let mut joint = Joint::with_pinned(&ctx, Coord::atmosphere_pinned(&p));
+        let mut best = joint.eval(&p);
+        let started = std::time::Instant::now();
+        ELIMINATED.with(|record| *record.borrow_mut() = Some(Vec::new()));
+        let dropped = joint.eliminate(&mut p, &mut best);
+        let verdicts = ELIMINATED.with(|record| record.borrow_mut().take()).expect("the record was asked for");
+        eprintln!(
+            "SIDE_BY_SIDE elimination, {read_ahead} at once: {} renders, {:.1} s",
+            joint.tally().renders(),
+            started.elapsed().as_secs_f32()
+        );
+        let recipe = serde_json::to_string(&p.recipe).expect("a recipe serializes");
+        (recipe, best.f().to_bits(), dropped, verdicts)
+    };
+    let in_turn = read(false, 1);
+    let order: Vec<String> =
+        in_turn.3.iter().map(|(pass, c, _, dropped)| format!("{pass}:{}:{}", if *dropped { "D" } else { "K" }, c.name())).collect();
+    eprintln!("SIDE_BY_SIDE elimination in turn: {}; ships {}", order.join(" "), in_turn.0);
+    // Premise: some pass drops, keeps, then drops again with a control still
+    // to ask. After the first drop one absence is read (kept), then two: the
+    // second drop throws the other away; and the kept one's absence, held
+    // for the next pass, was read before that drop.
+    let thrown_away = in_turn.3.windows(4).any(|w| {
+        let one_pass = w.iter().all(|verdict| verdict.0 == w[0].0);
+        one_pass && w[0].3 && !w[1].3 && w[2].3
+    });
+    assert!(thrown_away, "premise: a pass drops, keeps, drops and asks on: {order:?}");
+    for width in [1usize, 2, 3, 8] {
+        assert_eq!(read(true, width), in_turn, "read {width} at once");
+    }
+}
+
+/// v1.18.1. What a solve reads ahead is found by the recipe it was read for,
+/// in whatever order the steps ask — a step never takes another candidate's
+/// render — and the law's verdict read ahead with a candidate is the verdict
+/// the step would have read itself: a candidate the law refuses stays
+/// refused, on the class it is refused on.
+#[test]
+fn a_reading_taken_ahead_is_the_asked_candidates_own() {
+    use super::joint::{Coord, Joint, Point, Verdicts};
+    use crate::recipe::GradeStrength;
+    let src = synth();
+    let base = EditRecipe::default();
+    let asked = EditRecipe { exposure_ev: -0.6, ..EditRecipe::default() };
+    let sp = pixels_of(&render::develop_preview(&src, &base));
+    let tp = pixels_of(&render::develop_preview(&src, &asked));
+    let evidence = evidence_model(&sp, &tp);
+    let law = render::WbLaw::of(&base);
+    let strength = GradeStrength::new(0.85);
+    let mut ctx = super::solve::SolveCtx::atmosphere(
+        &src,
+        &sp,
+        &tp,
+        &evidence,
+        &base,
+        strength,
+        FitBudget::for_strength(strength),
+        law,
+        vec![1.0; sp.len()],
+    );
+    (ctx.side_by_side, ctx.read_ahead, ctx.candidates_ahead) = (true, 3, 3);
+    // Two steps toward the darkening the target asks for, and one against it.
+    let near = Point::bounded(EditRecipe { exposure_ev: -0.5, ..EditRecipe::default() });
+    let far = Point::bounded(EditRecipe { exposure_ev: -0.2, ..EditRecipe::default() });
+    let against = Point::bounded(EditRecipe { exposure_ev: 0.8, ..EditRecipe::default() });
+    let own = |p: &Point| {
+        let joint = Joint::with_pinned(&ctx, Coord::atmosphere_pinned(p));
+        let e = joint.eval(p);
+        let (admitted, class) = (joint.admissible(p, &e.px), joint.refusal(p, &e.px));
+        (e.j.to_bits(), e.px, admitted, class)
+    };
+    let (own_near, own_far, own_against) = (own(&near), own(&far), own(&against));
+    assert!(own_near.2 && own_far.2, "premise: the law admits the two steps toward the target");
+    assert!(!own_against.2 && own_against.3.is_some(), "premise: the law refuses the step against it: {:?}", own_against.3);
+    assert!(own_near.0 != own_far.0 && own_far.0 != own_against.0, "premise: the three read differently");
+    for verdicts in [Verdicts::Every, Verdicts::Below(f32::INFINITY)] {
+        let joint = Joint::with_pinned(&ctx, Coord::atmosphere_pinned(&near));
+        joint.look_ahead(vec![near.clone(), far.clone(), against.clone()], verdicts);
+        // Asked in another order than they were read in.
+        for (p, own) in [(&against, &own_against), (&far, &own_far), (&near, &own_near)] {
+            let e = joint.eval(p);
+            assert_eq!((e.j.to_bits(), &e.px), (own.0, &own.1), "the candidate's own J* and render");
+            assert_eq!(joint.admissible(p, &e.px), own.2, "G's verdict on it");
+            assert_eq!(joint.refusal(p, &e.px), own.3, "the class that refuses it");
+        }
+    }
+}
+
+/// v1.18.1. A fit whose independent readings are taken side by side — the
+/// alone starts beside the main solve, the carriers' solves together, a
+/// pass's absences together and three read ahead after a drop, a direction's
+/// probes together, three of a polish's trials ahead — is the fit that takes
+/// them one after the other: the recipe with its rationale, the reading
+/// before and after, the confidence cap.
+#[test]
+fn a_fit_solved_side_by_side_is_the_fit_solved_one_after_the_other() {
+    use super::joint::{side_by_side, ONE_AFTER_THE_OTHER, READ_AHEAD};
+    let read = |fit: &dyn Fn() -> FitReport, together: bool| {
+        ONE_AFTER_THE_OTHER.with(|s| s.set(!together));
+        READ_AHEAD.with(|w| w.set(together.then_some(3)));
+        assert_eq!(side_by_side(), together, "premise: the contexts built on this thread read the switch");
+        let report = fit();
+        ONE_AFTER_THE_OTHER.with(|s| s.set(false));
+        READ_AHEAD.with(|w| w.set(None));
+        let recipe = serde_json::to_string(&report.recipe).expect("a recipe serializes");
+        (report.mode, recipe, report.err_before.to_bits(), report.err_after.to_bits(), report.confidence_cap.to_bits())
+    };
+    let source = synth();
+    let relit_target = relit(&source, [1.06, 1.0, 0.95]);
+    let (top_source, top_target) = withheld_top_pair();
+    let fits: [(&str, FitMode, &dyn Fn() -> FitReport); 2] = [
+        ("the relit frame", FitMode::Full, &|| fit_recipe(&source, &relit_target)),
+        ("the withheld top", FitMode::Atmosphere, &|| fit_recipe(&top_source, &top_target)),
+    ];
+    for (name, mode, fit) in fits {
+        let started = std::time::Instant::now();
+        let in_turn = read(fit, false);
+        let turn_s = started.elapsed().as_secs_f32();
+        let started = std::time::Instant::now();
+        let together = read(fit, true);
+        eprintln!(
+            "SIDE_BY_SIDE {name}: {turn_s:.1} s in turn, {:.1} s side by side; ships {}",
+            started.elapsed().as_secs_f32(),
+            in_turn.1
+        );
+        assert_eq!(in_turn.0, mode, "premise: {name} is solved in this mode");
+        assert!(together == in_turn, "{name}: side by side\n{together:?}\nin turn\n{in_turn:?}");
+    }
+}
+
+/// v1.18.1. Inside one solve: the direction's probes are read side by side,
+/// each by a solve of its own, and a pass of the polish reads ahead the
+/// trials it asks next while it keeps nothing — render, J* and G's verdict.
+/// The point the repair, the descent and the polish end on, and its reading,
+/// are those of the solve that reads one candidate after another, at every
+/// width. The target is four controls from the base and the strength is the
+/// default, where the law withholds.
+#[test]
+fn a_solve_read_side_by_side_is_the_solve_read_in_turn() {
+    use super::joint::{Coord, Joint, Point, STEP_MULTIPLIERS};
+    use crate::recipe::GradeStrength;
+    let src = synth();
+    let base = EditRecipe::default();
+    let asked = EditRecipe { exposure_ev: -0.6, contrast: 20.0, shadows: 15.0, tint: 8.0, ..EditRecipe::default() };
+    let sp = pixels_of(&render::develop_preview(&src, &base));
+    let tp = pixels_of(&render::develop_preview(&src, &asked));
+    let evidence = evidence_model(&sp, &tp);
+    let law = render::WbLaw::of(&base);
+    let strength = GradeStrength::default();
+    let read = |side_by_side: bool, ahead: usize| {
+        let mut ctx = super::solve::SolveCtx::atmosphere(
+            &src,
+            &sp,
+            &tp,
+            &evidence,
+            &base,
+            strength,
+            FitBudget::for_strength(strength),
+            law,
+            vec![1.0; sp.len()],
+        );
+        (ctx.side_by_side, ctx.read_ahead, ctx.candidates_ahead) = (side_by_side, ahead, ahead);
+        let mut p = Point::bounded(base.clone());
+        let joint = Joint::with_pinned(&ctx, Coord::atmosphere_pinned(&p));
+        let started = std::time::Instant::now();
+        let start = joint.repair(&mut p);
+        let (before, descended) = (start.f(), joint.descend(&mut p, start, &STEP_MULTIPLIERS));
+        let after_descent = descended.f();
+        let best = joint.polish(&mut p, descended, &STEP_MULTIPLIERS);
+        eprintln!(
+            "SIDE_BY_SIDE solve, {ahead} at once: F {before:.5} -> {after_descent:.5} -> {:.5}, {} renders, {:.1} s",
+            best.f(),
+            joint.tally().renders(),
+            started.elapsed().as_secs_f32()
+        );
+        let recipe = serde_json::to_string(&p.recipe).expect("a recipe serializes");
+        (recipe, after_descent.to_bits(), best.f().to_bits(), before)
+    };
+    let in_turn = read(false, 1);
+    eprintln!("SIDE_BY_SIDE solve in turn ships {}", in_turn.0);
+    assert!(
+        f32::from_bits(in_turn.1) < in_turn.3 && f32::from_bits(in_turn.2) < f32::from_bits(in_turn.1),
+        "premise: the descent and the polish each lower F"
+    );
+    for width in [2usize, 3, 16] {
+        assert_eq!(read(true, width), in_turn, "{width} read at once");
+    }
 }
