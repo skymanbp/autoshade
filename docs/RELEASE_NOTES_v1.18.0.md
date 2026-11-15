@@ -399,10 +399,10 @@ and reference-pair gate before it shipped.
   shipped on, and the full-size re-reading of the finished recipe beside the
   preview's and the starting point's.
 - **A fit takes longer.** The solver renders the candidate many thousands of
-  times; in the last check a real pair took from ten minutes to nearly an
-  hour and a half, four fits running at once on half of the maintainer's
-  processors, where v1.17.1 took minutes. Processing time is a reading, not
-  a gate, in this project.
+  times; in the last check a real pair took from half an hour to two hours,
+  two fits running at once beside the project's own test runs on half of the
+  maintainer's processors, where v1.17.1 took minutes. Processing time is a
+  reading, not a gate, in this project.
 - **A fit takes a few more full-size renders** for the final check.
 - **AI Analyze can take much longer on a photo its review finds clearly
   improvable.** In that case Auto adds two image calls and one local reverse
@@ -427,4 +427,44 @@ crs:LensProfileEnable when its recipe carries a lens profile.
 
 ## Gates
 
-待填_GATES
+No local three-lane battery was run for this release; the suite ran on the
+project's online runners on `8f02faa`, the last commit of this release that
+changes code (those after it change comments, documents and the version
+number), each platform's library tests cut in eight shards. On Linux: library
+**1973 passed / 0 failed / 21 ignored**, CLI **28 / 0**, contract 2 + 2,
+doc-tests 0, GUI **297 / 0 / 4**. On macOS: library 1971 / 0 / 21, CLI 28 / 0,
+GUI 297 / 0 / 4. The debug-assertion library trip: 1973 / 0 / 21. The library
+names that exist on Windows only were run on Windows by name (4 / 0). The
+tests gated on the calibration photos pass on those runners without the
+photos; with the photos they were run on Windows by name: **51 passed / 0
+failed** — the twelve self-consistency cases among them — and 4 more are
+ignored measurements. Two of them first read red. One named the Kelvin and the
+exposure an earlier state of the solver shipped on one pair; it was restated
+to what it guards (the white balance inside its budget, the frame darkened as
+its target is, the fit no farther from its target than when those values were
+written) and passes as restated. The other read one band of a sky for a colour
+that the sky's zone had been refused, and found the sentence saying so missing
+from the fit's explanation; the sentence now stays, the test reads the whole
+sky, and the 17 zoned-fit tests among these were read again on that code.
+`audit_i18n` 0, the font check (924 of 924 code points embedded) and
+`check_doc_drift` (0 findings); clippy 0 warnings on both feature sets; the
+Python suite under `scripts/` 44 tests and the sidecar contract tests under
+`python/` 15, all passing (the rest of `python/` was not run: one helper
+changed since v1.17.1, and every fit below ran through it); `check_docs.py` 28
+/ 0 / 4 PASS / FAIL / SKIP — the four skipped rows are the test-count claims,
+which it checks only against a local battery's transcript. By name against the
+v1.17.1 battery, the names as the Windows test program lists them: library
+1837 → 1997 (+243 / −83); GUI 297 → 301 (+4 / −0); CLI 26 → 28 (+2 / −0). The
+reverse fit changed, so the real pairs were fitted again by the released
+v1.17.1 command line and by this build. The mean colour distance to the target
+at 1000 px, v1.17.1 → this build, over the frame (and over the sky): the
+sunset rooftops (p36) 3.06 → 2.33 (1.97 → 1.18); the lantern street (p38) 3.92
+→ 3.32 (3.96 → 3.58); the seaside street (p39) 3.45 → 2.84 (3.62 → 2.82); the
+neon street pair (p40) 5.28 → 3.80 (5.76 → 3.77); the dusk farmhouse (p41)
+5.91 → 3.47 (6.18 → 2.85); the reference pair 7.91 → 7.21 at 0.85 (8.15 → 7.48
+at 0.65, 7.90 → 7.16 at 1.0). The night pair (p42) fitted from its denoised
+master: 5.14 → 4.41; from its RAW 7.59 → 6.03. The pair whose target is
+another photograph (p37) is not a pixel comparison (62.40 → 62.10 on this
+measure): its ground takes the target's dusk and its sky is kept. No
+same-scene pair is worse than v1.17.1. The three-way sheets (target | v1.17.1
+| this build) were viewed for every pair.
