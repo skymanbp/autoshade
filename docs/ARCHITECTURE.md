@@ -253,7 +253,11 @@
 > 1837 library + 26 CLI + 297 GUI + 2+2 contract tests are enumerated in the GUI
 > build; the library result is 1822 pass + 15 `#[ignore]`d forensic probes and
 > the GUI result is 293 pass + four ignored (an explicit scratch-recipe export
-> probe and the offline panel, window and mode-workspace screenshots) in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
+> probe and the offline panel, window and mode-workspace screenshots) in the ordinary battery. One of the
+> ignored library names is not a probe:
+> `the_real_reverse_fit_reproduces_a_stated_look_on_a_small_frame` is the production reverse fit end to
+> end on a small synthetic pair, ignored for its duration (most of an hour) and run by name for a
+> release. The one CLI name added for v1.6.2 is the `--negative`
 > refusal pair (a RAW source, a baked negative); the library and GUI lists are
 > v1.6.1's. For v1.6.3, four library names (decode: the 16-bit profile lattice
 > hands an identity transform its pixels back, a file tagged with the engine's

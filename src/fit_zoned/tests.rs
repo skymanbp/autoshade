@@ -6458,6 +6458,13 @@ fn calibration_sky_zone_survives_luminance_with_partial_chroma_refusal() {
     // the zone although band 1/3 still shipped its correction, and the
     // rationale carried no colour sentence under any sky label. The account
     // now follows the controls (`subzones::drop_replaced_zone_notes`).
+    // READ 2026-11-14 on that tree (gates/j156-skyzone.out, 1 passed in
+    // 2712.14 s): band 1/3 ev -0.750, gains [1.0 1.0 1.0], sat 0.0 — it keeps
+    // the zone's correction and the zone's refusal is stated under "sky";
+    // band 2/3 ev -0.750, gains [1.0035 0.9860 1.0770], sat -8.4; band 3/3
+    // ev -0.577, gains [1.0420 0.9790 0.9475], sat +7.0. Against the run on
+    // b51535a the rationale gains eight sentences, all the sky zone's own,
+    // and loses none: the other 49, with every reading in them, are the same.
     let says = |label: &str, matches: &dyn Fn(&str) -> bool| {
         report.notes.iter().any(|note| {
             matches(note.key) && note.args.iter().any(|(key, value)| *key == "label" && value == label)
