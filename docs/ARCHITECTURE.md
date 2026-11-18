@@ -262,10 +262,10 @@
 > `scripts/roundtrip_gate.py` is an optional developer instrument (Photoshop
 > with Camera Raw, driven through `scripts/acr_render.ps1`), not part of the
 > release battery.
-> 2003 library + 28 CLI + 301 GUI + 2+2 contract tests are enumerated in the GUI
+> 2003 library + 28 CLI + 323 GUI + 2+2 contract tests are enumerated in the GUI
 > build; the library result is 1981 pass + 22 `#[ignore]`d forensic probes and
-> the GUI result is 297 pass + four ignored (an explicit scratch-recipe export
-> probe and the offline panel, window and mode-workspace screenshots) in the ordinary battery. One of the
+> the GUI result is 316 pass + seven ignored (an explicit scratch-recipe export
+> probe and the offline panel, window, mode-workspace, Settings, controls-width and library screenshots) in the ordinary battery. One of the
 > ignored library names is not a probe:
 > `the_real_reverse_fit_reproduces_a_stated_look_on_a_small_frame` is the production reverse fit end to
 > end on a small synthetic pair, ignored for its duration (most of an hour) and run by name for a
@@ -301,7 +301,17 @@
 > edit read as the edit, a maskless edit sending no mask and layering only
 > what changed, and the ignored tuning bench on real answers) and two GUI names
 > (no side-panel text runs under the scrollbar, and the ignored offline panel
-> screenshots). For v1.18.1, by name against the v1.18.0 battery: library
+> screenshots). For v1.18.2, by name against the v1.18.1 battery: GUI
+> +24 / −2 — four on the Settings window's five pages, three on the mode
+> page's language switch, six on the toolbar and the library line under it,
+> three on the controls column (every row in place at any width, one look
+> per kind of input, a disabled button's plate), one on the library column
+> (one layout in every state), four on the Lightroom loss line (said only
+> at the hand-off; two of these replace the two names removed, which read
+> “save” where they now read “hand-off” and “loss line”) and three ignored
+> offline cameras (the Settings pages, the controls column across its
+> widths, the library column); library and CLI unchanged. For v1.18.1, by
+> name against the v1.18.0 battery: library
 > +6 / −0 — four in `fit` (a solve read side by side is the solve read in
 > turn: the elimination, a solve from the base, and a whole fit in both modes;
 > and what is read ahead is found by the recipe it was read for),
