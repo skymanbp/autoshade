@@ -1,6 +1,9 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.18.1 — the reverse fit takes the readings of its solve that
+> Status: **implemented** (v1.18.2 — the desktop window: Settings in five pages, a language
+> switch on the mode page, one toolbar in two zones, side columns whose width only the
+> drag sets, and the Lightroom loss line said at the export hand-off only;
+> v1.18.1 — the reverse fit takes the readings of its solve that
 > do not depend on each other side by side and uses them in the order it always did:
 > the same recipe in less time; a brightness run widened by a merge is read again;
 > v1.18.0 — the reverse fit minimises one objective, the
