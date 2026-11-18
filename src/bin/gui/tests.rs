@@ -27,3 +27,6 @@
     include!("tests/portrait.rs");
     include!("tests/fit_prompt.rs");
     include!("tests/fit_level.rs");
+    include!("tests/settings.rs");
+    include!("tests/top_bar.rs");
+    include!("tests/width_probe.rs");

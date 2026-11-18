@@ -7,6 +7,18 @@ use crate::*;
 use autoshade::advisor::catalogue::{family_is_active, CONTROL_FAMILIES};
 use crate::panels::grade_wheel::{grade_wheel, GRADE_VIEWS};
 
+/// The names in front of the Export fold's four dropdowns. `row_label` gives
+/// each of them a cell as wide as the widest of the four, so the dropdowns
+/// start on one x as well as ending on one.
+fn export_row_names(lang: Lang) -> [&'static str; 4] {
+    [tr(lang, "Destination"), tr(lang, "Format"), tr(lang, "Long edge"), tr(lang, "Colour space")]
+}
+
+/// The names in front of a mask's two dropdowns — one label cell for both.
+fn mask_row_names(lang: Lang) -> [&'static str; 2] {
+    [tr(lang, "Shapes"), tr(lang, "Range mask")]
+}
+
 impl AutoShadeApp {
     /// One labelled slider; double-click resets to `default` (the Lightroom
     /// gesture), hover + ↑/↓ nudges by a domain-appropriate step (Shift ×10 —
@@ -673,6 +685,7 @@ impl AutoShadeApp {
                                                     "variant_name",
                                                     card_id.as_str(),
                                                 )))
+                                                .margin(field_margin(ui))
                                                 .desired_width(90.0)
                                                 .hint_text(tr(lang, "Name")),
                                         )
@@ -711,7 +724,7 @@ impl AutoShadeApp {
                                         act = Some(VariantAction::Rename(card_id.clone()));
                                     }
                                 } else if let Some(n) = &named {
-                                    ui.label(egui::RichText::new(format!("「{n}」")).small().weak());
+                                    steady_note(ui, format!("「{n}」"));
                                 }
                                 if let Some(a) = self.variant_card_buttons(
                                     ui,
@@ -881,21 +894,23 @@ impl AutoShadeApp {
             .id_salt("sec_tone")
             .default_open(true)
             , |ui| {
-                // R38: wrapped, so the eyedropper drops under the checkbox when
-                // the row is short — the pair is 351 px at the 320 px default,
-                // and a plain `horizontal` never wraps: it widened the
-                // auto-fitting panel by 64 px, the widest row in this panel.
-                ui.horizontal_wrapped(|ui| {
-                    // One cell of the grid for the eyedropper, measured at the
-                    // row's start (2026-09-27); it wraps under the checkbox.
-                    let cell = columns(ui, 2);
+                // The checkbox on its own line and the eyedropper under it, at
+                // EVERY width (2026-11-17). The pair is 351 px, so at the
+                // 320 px default the eyedropper already stood under the
+                // checkbox — R38 wrapped the row, because a plain `horizontal`
+                // widened the panel by 64 px. But a wrapped row un-wraps: near
+                // the panel's widest the button jumped up beside the checkbox
+                // and every row below rose 32 px under the user's drag. Two
+                // rows that never trade places are the same picture as before
+                // at the default, and still at any other width.
+                {
                     // A nonzero tint IS a WB edit (recipes saved before the
                     // uncheck-zeroes-tint fix can carry one with no Temp) —
                     // showing "off = as-shot" over an active tint, with its
                     // slider disabled, was a lie with no way out.
                     let mut custom_wb =
                         self.recipe.temperature_k.is_some() || self.recipe.tint != 0.0;
-                    if ui.checkbox(&mut custom_wb, tr(lang, "Custom white balance (off = as-shot)")).changed() {
+                    if check(ui, &mut custom_wb, tr(lang, "Custom white balance (off = as-shot)")).changed() {
                         // Arm AT the as-shot anchor when stamped: checking
                         // the box must not shift the image — the slider then
                         // starts from the camera's real Kelvin, not 5500.
@@ -909,6 +924,10 @@ impl AutoShadeApp {
                         }
                         changed = true;
                     }
+                }
+                ui.horizontal(|ui| {
+                    // One cell of the two-column grid (2026-09-27).
+                    let cell = columns(ui, 2);
                     let label = if self.wb_picking { tr(lang, "💧 Click in image…") } else { tr(lang, "💧 Eyedropper") };
                     if action_in(ui, cell, true, label)
                         .on_hover_text(tr(lang,
@@ -1068,8 +1087,7 @@ impl AutoShadeApp {
             .id_salt("sec_hsl")
             .default_open(false)
             , |ui| {
-                changed |= ui
-                    .checkbox(&mut self.recipe.convert_to_grayscale, tr(lang, "Black & White"))
+                changed |= check(ui, &mut self.recipe.convert_to_grayscale, tr(lang, "Black & White"))
                     .changed();
                 // What the CANVAS does, not what the checkbox says (v1.5.0 F7):
                 // a monochrome creative profile develops the photograph to grey
@@ -1086,7 +1104,7 @@ impl AutoShadeApp {
                 // has no tabs — its caption stands where they do.
                 ui.horizontal(|ui| {
                     if mono {
-                        ui.label(egui::RichText::new(tr(lang, "B&W mix")).weak().small());
+                        steady_note(ui, tr(lang, "B&W mix"));
                     } else {
                         for (i, name) in ["Hue", "Saturation", "Luminance"].iter().enumerate() {
                             if ui.selectable_label(self.hsl_tab == i, tr(lang, name)).clicked() {
@@ -1156,30 +1174,39 @@ impl AutoShadeApp {
         // Point Color has no colour to act on in black and white, whichever of
         // the two switches produced it (v1.5.0 F7 — see the mixer above).
         ui.add_enabled_ui(!self.recipe.renders_grayscale(), |ui| {
-            ui.horizontal_wrapped(|ui| {
-                // One cell of the grid beside the caption (2026-09-27).
+            // The caption on the left and the verb in the grid's right-hand
+            // cell (2026-11-17). Placed straight after the caption, the
+            // button began wherever the caption's text ended — a different x
+            // in each language, on neither column of the rows around it —
+            // and as a wrapped row it could change lines with the panel's
+            // width.
+            ui.horizontal(|ui| {
                 let cell = columns(ui, 2);
-                ui.label(egui::RichText::new(tr(lang, "Point Color")).weak().small());
+                steady_note(ui, tr(lang, "Point Color"));
                 let label = if self.point_color_picking {
                     tr(lang, "💧 Click in image…")
                 } else {
                     tr(lang, "💧 Pick a color")
                 };
                 let room = self.recipe.point_colors.len() < MAX_POINT_COLORS;
-                if action_in(ui, cell, room, label)
-                    .on_hover_text(tr(lang,
-                        "Click a colour in the image to add a swatch; its sliders then move that colour alone. Click again to cancel.",
-                    ))
-                    // The limit says itself where the button that hit it is —
-                    // the canvas handler repeats it for the click that arrives
-                    // after a paste filled the list behind an armed tool.
-                    .on_disabled_hover_text(trf(
-                        lang,
-                        "Point Color: at most {n} swatches",
-                        &[("n", &MAX_POINT_COLORS.to_string())],
-                    ))
-                    .clicked()
-                {
+                let pick = ui
+                    .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        action_in(ui, cell, room, label)
+                            .on_hover_text(tr(lang,
+                                "Click a colour in the image to add a swatch; its sliders then move that colour alone. Click again to cancel.",
+                            ))
+                            // The limit says itself where the button that hit it
+                            // is — the canvas handler repeats it for the click
+                            // that arrives after a paste filled the list behind
+                            // an armed tool.
+                            .on_disabled_hover_text(trf(
+                                lang,
+                                "Point Color: at most {n} swatches",
+                                &[("n", &MAX_POINT_COLORS.to_string())],
+                            ))
+                    })
+                    .inner;
+                if pick.clicked() {
                     let on = !self.point_color_picking;
                     self.disarm_tools();
                     self.point_color_picking = on;
@@ -1259,7 +1286,7 @@ impl AutoShadeApp {
                 let r = &mut self.recipe;
                 // Lightroom's own order and grouping: the shadows tint first,
                 // then a hue + saturation pair per primary.
-                ui.label(egui::RichText::new(tr(lang, "Shadows")).weak().small());
+                steady_note(ui, tr(lang, "Shadows"));
                 changed |= Self::slider(
                     ui,
                     lang,
@@ -1275,7 +1302,7 @@ impl AutoShadeApp {
                     (tr(lang, "Blue primary"), &mut r.cal_blue_hue, &mut r.cal_blue_sat),
                 ] {
                     ui.add_space(SPACE_XS);
-                    ui.label(egui::RichText::new(primary).weak().small());
+                    steady_note(ui, primary);
                     changed |= Self::slider(ui, lang, tr(lang, "Hue"), hue, -100.0, 100.0, 0.0);
                     changed |= Self::slider(ui, lang, tr(lang, "Saturation"), sat, -100.0, 100.0, 0.0);
                 }
@@ -1300,8 +1327,7 @@ impl AutoShadeApp {
             .id_salt("sec_hdr")
             .default_open(false)
             , |ui| {
-                if ui
-                    .checkbox(&mut self.recipe.hdr_edit, tr(lang, "HDR edit mode"))
+                if check(ui, &mut self.recipe.hdr_edit, tr(lang, "HDR edit mode"))
                     .on_hover_text(tr(
                         lang,
                         "This photograph was edited above diffuse white. Every file this program writes is SDR, so the rendition below is what gets published.",
@@ -1321,12 +1347,8 @@ impl AutoShadeApp {
                     0.0,
                 );
                 ui.add_space(SPACE_SM);
-                ui.label(egui::RichText::new(tr(lang, "SDR rendition")).weak().small());
-                ui.label(
-                    egui::RichText::new(tr(lang, "renders only in HDR mode"))
-                        .weak()
-                        .small(),
-                );
+                steady_note(ui, tr(lang, "SDR rendition"));
+                steady_note(ui, tr(lang, "renders only in HDR mode"));
                 for (label, v) in [
                     (tr(lang, "Blend"), &mut r.sdr_blend),
                     (tr(lang, "Brightness"), &mut r.sdr_brightness),
@@ -1373,34 +1395,44 @@ impl AutoShadeApp {
                 });
                 ui.add_space(SPACE_SM);
                 let cg = &mut self.recipe.color_grade;
-                // One wheel with its luminance slider in a column `width` wide.
-                let wheel = |ui: &mut egui::Ui, title: &str, width: f32, h: &mut f32, s: &mut f32, l: &mut f32| {
+                // One wheel `disc` across with its luminance slider, in a
+                // column `width` wide. The column stretches with the panel;
+                // the disc does NOT (2026-11-17): it is sized from the steady
+                // width, so a wheel is the same circle at every width of a
+                // drag and the rows under it stay where they are. It used to
+                // grow 45 px over the panel's range, twice over in the 3-way
+                // view, and slide everything below it by as much.
+                let wheel = |ui: &mut egui::Ui, title: &str, width: f32, disc: f32, h: &mut f32, s: &mut f32, l: &mut f32| {
                     let mut c = false;
                     ui.vertical(|ui| {
                         ui.set_width(width);
-                        c |= grade_wheel(ui, lang, title, (width - 8.0).min(170.0), h, s);
+                        c |= grade_wheel(ui, lang, title, disc, h, s);
                         c |= Self::slider(ui, lang, tr(lang, "Luminance"), l, -100.0, 100.0, 0.0);
                     });
                     c
                 };
-                let avail = ui.available_width();
+                let disc_in = |column: f32| (column - 8.0).min(170.0);
+                let (avail, steady) = (ui.available_width(), steady_width(ui));
                 if self.grade_region == 0 {
                     // Midtones on top, centred; shadows and highlights under it.
-                    let half = ((avail - ui.spacing().item_spacing.x) / 2.0).floor();
+                    let gap = ui.spacing().item_spacing.x;
+                    let half = ((avail - gap) / 2.0).floor();
+                    let disc = disc_in(((steady - gap) / 2.0).floor());
                     ui.horizontal(|ui| {
                         ui.add_space(((avail - half) / 2.0).floor());
-                        changed |= wheel(ui, tr(lang, "Midtones"), half, &mut cg.midtone_hue, &mut cg.midtone_sat, &mut cg.midtone_lum);
+                        changed |= wheel(ui, tr(lang, "Midtones"), half, disc, &mut cg.midtone_hue, &mut cg.midtone_sat, &mut cg.midtone_lum);
                     });
                     ui.add_space(SPACE_SM);
                     ui.horizontal(|ui| {
-                        changed |= wheel(ui, tr(lang, "Shadows"), half, &mut cg.shadow_hue, &mut cg.shadow_sat, &mut cg.shadow_lum);
-                        changed |= wheel(ui, tr(lang, "Highlights"), half, &mut cg.highlight_hue, &mut cg.highlight_sat, &mut cg.highlight_lum);
+                        changed |= wheel(ui, tr(lang, "Shadows"), half, disc, &mut cg.shadow_hue, &mut cg.shadow_sat, &mut cg.shadow_lum);
+                        changed |= wheel(ui, tr(lang, "Highlights"), half, disc, &mut cg.highlight_hue, &mut cg.highlight_sat, &mut cg.highlight_lum);
                     });
                 } else {
                     let width = (avail * 0.7).floor();
+                    let disc = disc_in((steady * 0.7).floor());
                     ui.horizontal(|ui| {
                         ui.add_space(((avail - width) / 2.0).floor());
-                        changed |= wheel(ui, tr(lang, "Global"), width, &mut cg.global_hue, &mut cg.global_sat, &mut cg.global_lum);
+                        changed |= wheel(ui, tr(lang, "Global"), width, disc, &mut cg.global_hue, &mut cg.global_sat, &mut cg.global_lum);
                     });
                 }
                 // Blending/Balance shape the WHOLE grade, not one wheel — a
@@ -1461,7 +1493,7 @@ impl AutoShadeApp {
                     ui.add_space(SPACE_SM);
                     changed |= Self::slider(ui, lang, tr(lang, "Colour noise reduction"), &mut r.color_nr, 0.0, 100.0, 0.0);
                     if linear_colour {
-                        ui.label(egui::RichText::new(tr(lang, "Colour noise: the linear stage has one strength; detail and smoothness apply to sources without a mosaic")).weak().small());
+                        steady_note(ui, tr(lang, "Colour noise: the linear stage has one strength; detail and smoothness apply to sources without a mosaic"));
                     } else {
                         changed |= Self::companion_slider(ui, lang, tr(lang, "Colour noise detail"), r, "color_nr_detail", 0.0, 100.0, SliderFeel::Int);
                         changed |= Self::companion_slider(ui, lang, tr(lang, "Colour noise smoothness"), r, "color_nr_smooth", 0.0, 100.0, SliderFeel::Int);
@@ -1550,8 +1582,13 @@ impl AutoShadeApp {
             , |ui| {
                 explainer(ui, lang, tr(lang, "Merge several frames of one scene into a new ▦ negative. This card's frame is the reference — its framing and its exposure are the ones the result keeps — and the frames you pick join it."));
                 ui.add_space(SPACE_SM);
+                // The kind of merge is the section's one choice, so its
+                // dropdown takes the row the way the verb under it does
+                // (2026-11-17) — at its text's own width it changed size with
+                // every pick and lined up with nothing.
                 egui::ComboBox::from_id_salt("stack_kind")
                     .selected_text(tr(lang, self.stack_kind.label()))
+                    .width(columns(ui, 1).x)
                     .show_ui(ui, |ui| {
                         for k in autoshade::stack::merge::StackKind::ALL {
                             ui.selectable_value(&mut self.stack_kind, k, tr(lang, k.label()));
@@ -1562,7 +1599,7 @@ impl AutoShadeApp {
                         lang,
                         "HDR merge: an exposure bracket into one frame holding the whole range, with the recovered stops handed to the SDR rendition section. Exposure fusion: the same bracket blended where each frame looks best, with no HDR in between — a finished picture rather than data. Focus stack: a focus sweep into one frame sharp throughout. Noise stack: repeated frames of a still scene averaged, so the signal adds and the noise does not, and anything that moved through one frame is dropped.",
                     ));
-                ui.checkbox(&mut self.stack_tripod, tr(lang, "Shot on a tripod (skip alignment)"))
+                check(ui, &mut self.stack_tripod, tr(lang, "Shot on a tripod (skip alignment)"))
                     .on_hover_text(tr(
                         lang,
                         "Alignment is the expensive half of a stack, and on frames that really are registered there is nothing for it to find — measured on a five-frame noise stack, the grain fell 2.03x with it skipped and 1.97x with it running. Leave it off for handheld frames.",
@@ -1602,7 +1639,7 @@ impl AutoShadeApp {
             .default_open(false)
             , |ui| {
                 let r = &mut self.recipe;
-                ui.label(egui::RichText::new(tr(lang, "Post-crop vignetting")).weak().small());
+                steady_note(ui, tr(lang, "Post-crop vignetting"));
                 changed |= Self::slider(ui, lang, tr(lang, "Vignette amount"), &mut r.post_crop_vignette, -100.0, 100.0, 0.0);
                 changed |= Self::companion_slider(ui, lang, tr(lang, "Midpoint"), r, "post_crop_vignette_mid", 0.0, 100.0, SliderFeel::Int);
                 changed |= Self::companion_slider(ui, lang, tr(lang, "Vignette feather"), r, "post_crop_vignette_feather", 0.0, 100.0, SliderFeel::Int);
@@ -1616,7 +1653,7 @@ impl AutoShadeApp {
                 changed |= Self::companion_slider(ui, lang, tr(lang, "Vignette style"), r, "post_crop_vignette_style", 1.0, 3.0, SliderFeel::Int);
                 changed |= Self::slider(ui, lang, tr(lang, "Vignette highlights"), &mut r.post_crop_vignette_hl, 0.0, 100.0, 0.0);
                 ui.add_space(SPACE_SM);
-                ui.label(egui::RichText::new(tr(lang, "Grain")).weak().small());
+                steady_note(ui, tr(lang, "Grain"));
                 changed |= Self::slider(ui, lang, tr(lang, "Grain amount"), &mut r.grain, 0.0, 100.0, 0.0);
                 changed |= Self::companion_slider(ui, lang, tr(lang, "Grain size"), r, "grain_size", 0.0, 100.0, SliderFeel::Int);
                 changed |= Self::companion_slider(ui, lang, tr(lang, "Grain roughness"), r, "grain_rough", 0.0, 100.0, SliderFeel::Int);
@@ -1662,8 +1699,7 @@ impl AutoShadeApp {
                     ui.label(tr(lang, "Profile corrections (from camera metadata)"));
                     let mut pch = false;
                     ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(has_v, egui::Checkbox::new(&mut lp.vignette_on, tr(lang, "Vignetting")))
+                        if check_if(ui, has_v, &mut lp.vignette_on, tr(lang, "Vignetting"))
                             .on_hover_text(tr(lang, "The camera's own falloff map for this shot, applied in linear light"))
                             .changed()
                         {
@@ -1672,8 +1708,7 @@ impl AutoShadeApp {
                             }
                             pch = true;
                         }
-                        if ui
-                            .add_enabled(has_d, egui::Checkbox::new(&mut lp.distortion_on, tr(lang, "Distortion")))
+                        if check_if(ui, has_d, &mut lp.distortion_on, tr(lang, "Distortion"))
                             .on_hover_text(tr(lang, "The camera's own geometric correction; masks and crop follow the corrected frame"))
                             .changed()
                         {
@@ -1682,8 +1717,7 @@ impl AutoShadeApp {
                             }
                             pch = true;
                         }
-                        if ui
-                            .add_enabled(has_c, egui::Checkbox::new(&mut lp.ca_on, tr(lang, "Chromatic aberration")))
+                        if check_if(ui, has_c, &mut lp.ca_on, tr(lang, "Chromatic aberration"))
                             .on_hover_text(tr(lang, "Per-channel radius correction: removes red/blue colour fringing at edges"))
                             .changed()
                         {
@@ -1710,11 +1744,7 @@ impl AutoShadeApp {
                     }
                     ui.add_space(SPACE_MD);
                 } else if self.src_path.as_deref().is_some_and(autoshade::decode::is_raw) {
-                    ui.label(
-                        egui::RichText::new(tr(lang, "No in-camera lens correction data in this file"))
-                            .weak()
-                            .small(),
-                    );
+                    steady_note(ui, tr(lang, "No in-camera lens correction data in this file"));
                     ui.add_space(SPACE_MD);
                 }
                 // 「Lens vignetting」, not 「Vignette」 (R25 B2): the Effects
@@ -1740,7 +1770,7 @@ impl AutoShadeApp {
                 // even when this photo has no profile data, so a recipe
                 // imported from Lightroom shows what it carries.
                 ui.add_space(SPACE_SM);
-                ui.label(egui::RichText::new(tr(lang, "Profile correction strength")).weak().small());
+                steady_note(ui, tr(lang, "Profile correction strength"));
                 {
                     let r = &mut self.recipe;
                     let hint = tr(lang, "100 = exactly what the profile says; 0 switches that component off.");
@@ -1748,7 +1778,7 @@ impl AutoShadeApp {
                     changed |= Self::slider_hinted(ui, lang, tr(lang, "Vignetting amount"), &mut r.lens_profile_vignetting_scale, 0.0, 200.0, 100.0, hint);
                 }
                 ui.add_space(SPACE_SM);
-                ui.label(egui::RichText::new(tr(lang, "Chromatic aberration (manual)")).weak().small());
+                steady_note(ui, tr(lang, "Chromatic aberration (manual)"));
                 {
                     let r = &mut self.recipe;
                     changed |= Self::slider(ui, lang, tr(lang, "Red / cyan"), &mut r.ca_r, -100.0, 100.0, 0.0);
@@ -1758,8 +1788,7 @@ impl AutoShadeApp {
                 // whole de-fringe block. Carried and unrendered until v1.5.0;
                 // the switch is an INSTRUCTION, so its tooltip says what the
                 // instruction does rather than what the number means.
-                if ui
-                    .checkbox(&mut self.recipe.auto_lateral_ca, tr(lang, "Auto lateral CA"))
+                if check(ui, &mut self.recipe.auto_lateral_ca, tr(lang, "Auto lateral CA"))
                     .on_hover_text(tr(
                         lang,
                         "Measures this frame's own red/blue misalignment and adds the answer to the manual pair above.",
@@ -1769,7 +1798,7 @@ impl AutoShadeApp {
                     changed = true;
                 }
                 ui.add_space(SPACE_SM);
-                ui.label(egui::RichText::new(tr(lang, "Defringe")).weak().small());
+                steady_note(ui, tr(lang, "Defringe"));
                 {
                     let r = &mut self.recipe;
                     // Adobe's own bands and Adobe's own neutrals: the amounts
@@ -1828,10 +1857,10 @@ impl AutoShadeApp {
                     ["Off", "Auto", "Level", "Vertical", "Full", "Guided"];
                 let mut mode = self.recipe.perspective_upright.round().clamp(0.0, 5.0) as usize;
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(tr(lang, "Upright")).small());
+                    row_label(ui, tr(lang, "Upright"), &[]);
                     egui::ComboBox::from_id_salt("upright_mode")
                         .selected_text(tr(lang, MODES[mode]))
-                        .width(90.0)
+                        .width(rest_of_row(ui))
                         .show_ui(ui, |ui| {
                             for (i, name) in MODES.iter().enumerate() {
                                 ui.selectable_value(&mut mode, i, tr(lang, name));
@@ -1871,7 +1900,7 @@ impl AutoShadeApp {
                     } else {
                         UPRIGHT_NOTES[2]
                     };
-                    ui.label(egui::RichText::new(tr(lang, upright_note)).weak().small());
+                    steady_note(ui, tr(lang, upright_note));
                 }
                 ui.add_space(SPACE_SM);
                 changed |= Self::slider(ui, lang, tr(lang, "Vertical"), &mut self.recipe.perspective_vertical, -100.0, 100.0, 0.0);
@@ -1884,8 +1913,7 @@ impl AutoShadeApp {
                 changed |= Self::slider(ui, lang, tr(lang, "Aspect"), &mut self.recipe.perspective_aspect, -100.0, 100.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "X offset"), &mut self.recipe.perspective_x, -100.0, 100.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Y offset"), &mut self.recipe.perspective_y, -100.0, 100.0, 0.0);
-                if ui
-                    .checkbox(&mut self.recipe.crop_constrain_to_warp, tr(lang, "Constrain crop"))
+                if check(ui, &mut self.recipe.crop_constrain_to_warp, tr(lang, "Constrain crop"))
                     .on_hover_text(tr(lang, "Shrink the crop until it lies inside the warped frame instead of showing the empty corners"))
                     .changed()
                 {
@@ -1933,7 +1961,7 @@ impl AutoShadeApp {
                         } else {
                             tr(lang, "Neither its creative colour table nor its baked tone curve and sliders render")
                         };
-                        ui.label(egui::RichText::new(line).weak().small());
+                        steady_note(ui, line);
                     }
                 }
                 if self.recipe.passthrough.is_empty() {
@@ -1954,7 +1982,7 @@ impl AutoShadeApp {
                         return;
                     }
                     if let Some(caption) = caption {
-                        ui.label(egui::RichText::new(caption).weak().small());
+                        steady_note(ui, caption);
                     }
                     for (key, value) in present {
                         ui.horizontal(|ui| {
@@ -2024,11 +2052,11 @@ impl AutoShadeApp {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(tr(lang, "Aspect")).weak().small());
+                    row_label(ui, tr(lang, "Aspect"), &[]);
                     let prev_aspect = self.crop_aspect;
                     egui::ComboBox::from_id_salt("crop_aspect")
                         .selected_text(tr(lang, CROP_ASPECTS[self.crop_aspect].0))
-                        .width(70.0)
+                        .width(rest_of_row(ui))
                         .show_ui(ui, |ui| {
                             for (i, (name, _)) in CROP_ASPECTS.iter().enumerate() {
                                 ui.selectable_value(&mut self.crop_aspect, i, tr(lang, name));
@@ -2521,7 +2549,7 @@ impl AutoShadeApp {
                     };
                     // The frame's own margin (egui's 4 px each side) lies
                     // outside `desired_width`, so it comes off the budget too.
-                    let name_margin = egui::Margin::symmetric(4.0, 2.0);
+                    let name_margin = field_margin(ui);
                     let name_resp = {
                         let buf = &mut self.mask_name_buf.as_mut().expect("seeded above").2;
                         ui.add(
@@ -2653,7 +2681,7 @@ impl AutoShadeApp {
                     // must drive the develop + overlay like every other mask
                     // control (was silently discarded: the toggle mutated the
                     // recipe but never re-rendered until an unrelated edit).
-                    if ui.checkbox(&mut self.recipe.masks[i].inverted, tr(lang, "Invert")).changed() {
+                    if check(ui, &mut self.recipe.masks[i].inverted, tr(lang, "Invert")).changed() {
                         self.overlay_stale = true;
                         changed = true;
                     }
@@ -2667,8 +2695,7 @@ impl AutoShadeApp {
                     // per-mask state that would be remembered per mask. The
                     // label now says what it is, in the same words the F1 sheet
                     // uses for the O key ("Toggle mask overlay").
-                    if ui
-                        .checkbox(&mut self.show_mask_overlay, tr(lang, "Show mask overlay"))
+                    if check(ui, &mut self.show_mask_overlay, tr(lang, "Show mask overlay"))
                         .on_hover_text(tr(lang, "One view switch shared by every mask (shortcut O): shows the hovered-or-selected mask's actual coverage as a red semi-transparent overlay (geometry × range × strength)"))
                         .changed()
                     {
@@ -2690,8 +2717,7 @@ impl AutoShadeApp {
                             1.0,
                             0.5,
                         );
-                        geo_ch |= ui
-                            .checkbox(flipped, tr(lang, "Flip"))
+                        geo_ch |= check(ui, flipped, tr(lang, "Flip"))
                             .on_hover_text(tr(
                                 lang,
                                 "Swap which side of the ellipse the adjustment affects (composes with Invert)",
@@ -2800,9 +2826,17 @@ impl AutoShadeApp {
                 // Lightroom's Add / Subtract / Intersect grammar. Every native
                 // shape projects through the same composition spelling; only
                 // Bitmap components remain a named geometry loss.
+                //
+                // Two rows since 2026-11-17: the mode dropdown takes the rest
+                // of its label's row, and the two shapes are two cells of the
+                // grid under it, armed like the tools above. As one row —
+                // label, a 96 px dropdown, two own-width labels — it was the
+                // widest row of the column: 5 px past its card in English at
+                // the default width, 13 px in Chinese at the old 280 floor,
+                // and the two shapes read as plain text beside a control.
                 {
                     ui.horizontal(|ui| {
-                        ui.label(tr(lang, "Shapes"));
+                        row_label(ui, tr(lang, "Shapes"), &mask_row_names(lang));
                         let mode_label = |m: autoshade::recipe::MaskCombine| match m {
                             autoshade::recipe::MaskCombine::Add => tr(lang, "＋ Add"),
                             autoshade::recipe::MaskCombine::Subtract => tr(lang, "－ Subtract"),
@@ -2810,7 +2844,7 @@ impl AutoShadeApp {
                         };
                         egui::ComboBox::from_id_salt("comp_mode")
                             .selected_text(mode_label(self.component_mode))
-                            .width(96.0)
+                            .width(rest_of_row(ui))
                             .show_ui(ui, |ui| {
                                 for m in [
                                     autoshade::recipe::MaskCombine::Add,
@@ -2820,13 +2854,15 @@ impl AutoShadeApp {
                                     ui.selectable_value(&mut self.component_mode, m, mode_label(m));
                                 }
                             });
+                    });
+                    ui.horizontal(|ui| {
+                        let cell = columns(ui, 2);
                         let mode = self.component_mode;
                         let lin_armed = matches!(
                             self.placing_mask,
                             Some((MaskKind::Linear, PlaceTarget::Component(j, _))) if j == i
                         );
-                        if ui
-                            .selectable_label(lin_armed, tr(lang, "Linear"))
+                        if toggle_in(ui, cell, lin_armed, tr(lang, "Linear"))
                             .on_hover_text(tr(lang, "Drag on the image to add a linear shape to THIS mask"))
                             .clicked()
                         {
@@ -2841,8 +2877,7 @@ impl AutoShadeApp {
                             self.placing_mask,
                             Some((MaskKind::Radial, PlaceTarget::Component(j, _))) if j == i
                         );
-                        if ui
-                            .selectable_label(rad_armed, tr(lang, "Radial"))
+                        if toggle_in(ui, cell, rad_armed, tr(lang, "Radial"))
                             .on_hover_text(tr(lang, "Drag on the image to add an elliptical shape to THIS mask"))
                             .clicked()
                         {
@@ -2898,7 +2933,7 @@ impl AutoShadeApp {
                                 self.overlay_stale = true;
                                 changed = true;
                             }
-                            if ui.checkbox(&mut self.recipe.masks[i].components[c].inverted, tr(lang, "Invert")).changed() {
+                            if check(ui, &mut self.recipe.masks[i].components[c].inverted, tr(lang, "Invert")).changed() {
                                 self.overlay_stale = true;
                                 changed = true;
                             }
@@ -2936,10 +2971,10 @@ impl AutoShadeApp {
                     };
                     let mut sel = cur;
                     ui.horizontal(|ui| {
-                        ui.label(tr(lang, "Range mask"));
+                        row_label(ui, tr(lang, "Range mask"), &mask_row_names(lang));
                         egui::ComboBox::from_id_salt("range_kind")
                             .selected_text([tr(lang, "None"), tr(lang, "Luminance"), tr(lang, "Color")][sel])
-                            .width(70.0)
+                            .width(rest_of_row(ui))
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(&mut sel, 0, tr(lang, "None"));
                                 ui.selectable_value(&mut sel, 1, tr(lang, "Luminance"));
@@ -3157,15 +3192,13 @@ impl AutoShadeApp {
                 // slider — a disclosure plus the one action that makes sense
                 // on a value the user never typed.
                 if m.color_gains.is_some() {
-                    ui.horizontal_wrapped(|ui| {
-                        // One cell of the grid, measured at the row's start;
-                        // it wraps under the note when the note is long (2026-09-27).
+                    // The note on its own line and the verb in a cell under it
+                    // (2026-11-17): as one wrapped row the verb stood beside
+                    // the note or under it depending on the panel's width, so
+                    // dragging the panel's edge moved everything below.
+                    steady_note(ui, tr(lang, "carries reverse-fit recolour (written to XMP as Temp/Tint)"));
+                    ui.horizontal(|ui| {
                         let cell = columns(ui, 2);
-                        ui.label(
-                            egui::RichText::new(tr(lang, "carries reverse-fit recolour (written to XMP as Temp/Tint)"))
-                                .weak()
-                                .small(),
-                        );
                         if action_in(ui, cell, true, tr(lang, "↺ Clear"))
                             .on_hover_text(tr(lang, "Drop this mask's per-channel recolour gains (one Ctrl+Z to undo)"))
                             .clicked()
@@ -3194,11 +3227,7 @@ impl AutoShadeApp {
                 // row (it toggles) lands here, and the section then showed a
                 // list with no adjustments under it and no reason why.
                 ui.add_space(SPACE_XS);
-                ui.label(
-                    egui::RichText::new(tr(lang, "Select a mask above to edit its adjustments"))
-                        .weak()
-                        .small(),
-                );
+                steady_note(ui, tr(lang, "Select a mask above to edit its adjustments"));
             }
         });
         changed
@@ -3380,7 +3409,7 @@ impl AutoShadeApp {
                 let active_id = self.active_variant().map(|v| v.id.clone()).unwrap_or_default();
                 let active_kind = self.active_variant().map(|v| v.kind);
                 if !self.versions.is_empty() {
-                    ui.checkbox(&mut self.versions_current_only, tr(lang, "Only this variant"))
+                    check(ui, &mut self.versions_current_only, tr(lang, "Only this variant"))
                         .on_hover_text(tr(
                             lang,
                             "Show only snapshots taken from the variant you are on. Versions with no recorded source (saved before this) are hidden while it is on.",
@@ -3422,6 +3451,7 @@ impl AutoShadeApp {
                                 ui.add(
                                     egui::TextEdit::singleline(buf)
                                         .id(field_id)
+                                        .margin(field_margin(ui))
                                         .desired_width(110.0)
                                         .hint_text(tr(lang, "Name")),
                                 )
@@ -3481,7 +3511,7 @@ impl AutoShadeApp {
                                 _ => None,
                             };
                             if let Some(note) = note {
-                                ui.label(egui::RichText::new(note).weak().small());
+                                steady_note(ui, note);
                             }
                         }
                         if action(ui, true, tr(lang, "Load")).on_hover_text(tr(lang, "Replace current parameters (one Ctrl+Z to undo)")).clicked() {
@@ -3591,10 +3621,10 @@ impl AutoShadeApp {
                 // the user has to hunt for — so it leads the section instead of
                 // hiding under the encoder dials.
                 ui.horizontal(|ui| {
-                    ui.label(tr(lang, "Destination"));
+                    row_label(ui, tr(lang, "Destination"), &export_row_names(lang));
                     egui::ComboBox::from_id_salt("exp_dest")
                         .selected_text(tr(lang, self.exp_dest.label()))
-                        .width(170.0)
+                        .width(rest_of_row(ui))
                         .show_ui(ui, |ui| {
                             for d in ExportDest::ALL {
                                 ui.selectable_value(&mut self.exp_dest, d, tr(lang, d.label()));
@@ -3615,10 +3645,10 @@ impl AutoShadeApp {
                 // One setting per row: two label+combo pairs in a non-wrapping
                 // horizontal overflowed the 320px panel in Chinese.
                 ui.horizontal(|ui| {
-                    ui.label(tr(lang, "Format"));
+                    row_label(ui, tr(lang, "Format"), &export_row_names(lang));
                     egui::ComboBox::from_id_salt("save_fmt")
                         .selected_text(tr(lang, self.exp_format.label()))
-                        .width(130.0)
+                        .width(rest_of_row(ui))
                         .show_ui(ui, |ui| {
                             for f in ExportFormat::ALL {
                                 ui.selectable_value(&mut self.exp_format, f, tr(lang, f.label()));
@@ -3626,14 +3656,14 @@ impl AutoShadeApp {
                         });
                 });
                 ui.horizontal(|ui| {
-                    ui.label(tr(lang, "Long edge"));
+                    row_label(ui, tr(lang, "Long edge"), &export_row_names(lang));
                     egui::ComboBox::from_id_salt("exp_long_edge")
                         .selected_text(if self.exp_long_edge == 0 {
                             tr(lang, "Original size").to_string()
                         } else {
                             format!("{} px", self.exp_long_edge)
                         })
-                        .width(110.0)
+                        .width(rest_of_row(ui))
                         .show_ui(ui, |ui| {
                             ui.selectable_value(&mut self.exp_long_edge, 0, tr(lang, "Original size"));
                             for px in [1600u32, 2048, 2560, 3840, 5120] {
@@ -3648,10 +3678,10 @@ impl AutoShadeApp {
                     Self::slider(ui, lang, tr(lang, "JPEG quality"), &mut self.exp_quality, 60.0, 100.0, 95.0);
                 });
                 ui.horizontal(|ui| {
-                    ui.label(tr(lang, "Colour space"));
+                    row_label(ui, tr(lang, "Colour space"), &export_row_names(lang));
                     egui::ComboBox::from_id_salt("exp_space")
                         .selected_text(tr(lang, EXPORT_SPACES[(self.exp_space as usize).min(2)]))
-                        .width(170.0)
+                        .width(rest_of_row(ui))
                         .show_ui(ui, |ui| {
                             for (i, name) in EXPORT_SPACES.iter().enumerate() {
                                 ui.selectable_value(&mut self.exp_space, i as u8, tr(lang, name));
@@ -3665,7 +3695,7 @@ impl AutoShadeApp {
                 // pixel until then, that one bakes a clean base into the current
                 // variant immediately. Same-named twins in two panels made the
                 // difference invisible until an export took minutes.
-                ui.checkbox(&mut self.save_denoise, tr(lang, "🤖 AI Denoise on export")).on_hover_text(
+                check(ui, &mut self.save_denoise, tr(lang, "🤖 AI Denoise on export")).on_hover_text(
                     ai_xref(lang, tr(lang, "AI denoise before developing, at the Export denoise strength below — a RAW on its sensor mosaic, an already-rendered image through its own denoiser — for high-ISO / astro (slow, GPU; needs the python sidecar). Batch render skips it, and so does a ◈ Denoised card, whose master is already denoised.")),
                 );
                 // The checkbox's OWN dial, directly under it (user decision
@@ -3687,7 +3717,7 @@ impl AutoShadeApp {
                         ),
                     );
                 });
-                explainer(ui, lang, tr(lang, "Applied by 「Export」 in the toolbar (Ctrl+Shift+E, or Ctrl+E) and by 「Render selected」 in the library. The ▾ beside Export delivers one file to a path you pick without touching the Destination."));
+                explainer(ui, lang, tr(lang, "Applied by 「Export」 in the toolbar (Ctrl+Shift+E, or Ctrl+E) and by 「Render」 in the library. The ▾ beside Export delivers one file to a path you pick without touching the Destination."));
                 // --- SF8-A: hand the Lightroom sidecar over ----------------
                 // The XMP projection has always been written INSIDE the hashed
                 // develop folder, which is the right home for state — but the

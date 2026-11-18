@@ -277,6 +277,76 @@
         rasterise(&prims, &tex, size, out.pixels_per_point, theme.colors().canvas_bed)
     }
 
+    /// A Settings form as `load_settings_form` would fill it for a user on
+    /// API providers for both roles with keys saved and a custom image-gen
+    /// template — filled by hand, because loading it reads the per-user
+    /// settings file, which a test must not. Every conditional row shows.
+    fn app_with_settings_form(lang: crate::i18n::Lang) -> AutoShadeApp {
+        let mut app = AutoShadeApp { lang, show_settings: true, ..Default::default() };
+        let f = &mut app.settings;
+        f.analysis_provider_api = true;
+        f.analysis_model = "gpt-5.5".into();
+        f.analysis_base_url = crate::model::OPENAI_DEFAULT_URL.into();
+        f.analysis_key_present = true;
+        f.analysis_effort = "medium".into();
+        f.image_provider_oauth = false;
+        f.image_model = "gpt-5.5".into();
+        f.image_base_url = crate::model::OPENAI_DEFAULT_URL.into();
+        f.image_gen_model = "gpt-image-1.5".into();
+        f.image_key_present = true;
+        f.image_api_family = "auto".into();
+        f.image_gen_custom = true;
+        f.image_gen_endpoint = autoshade::image_endpoint::EXAMPLE.into();
+        app
+    }
+
+    /// The Settings window as the app hosts it (`settings_window`), alone on
+    /// an 1100 × 760 screen at 2×, over the canvas bed.
+    fn settings_shot(app: &mut AutoShadeApp, theme: crate::theme::ThemePref) -> image::RgbaImage {
+        app.theme = theme;
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::install_theme(&ctx, theme);
+        let size = egui::vec2(1100.0, 760.0);
+        let mut tex = ShotTextures::default();
+        let mut last = None;
+        for i in 0..6 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                time: Some(i as f64 / 2.0),
+                ..Default::default()
+            };
+            input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(2.0);
+            let out = ctx.run(input, |ctx| app.settings_window(ctx));
+            tex.apply(&out.textures_delta);
+            last = Some(out);
+        }
+        let out = last.expect("frames ran");
+        let prims = ctx.tessellate(out.shapes.clone(), out.pixels_per_point);
+        rasterise(&prims, &tex, size, out.pixels_per_point, theme.colors().canvas_bed)
+    }
+
+    /// Not a check — the camera for the Settings window: every page, both
+    /// languages, the Dark and Light themes:
+    /// `AUTOSHADE_SHOT_DIR=<dir> cargo test … settings_screenshots -- --ignored`.
+    #[test]
+    #[ignore = "writes PNGs for a person to look at"]
+    fn settings_screenshots() {
+        let dir = std::path::PathBuf::from(std::env::var("AUTOSHADE_SHOT_DIR").expect("AUTOSHADE_SHOT_DIR"));
+        std::fs::create_dir_all(&dir).unwrap();
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            for theme in [crate::theme::ThemePref::Dark, crate::theme::ThemePref::Light] {
+                for tab in crate::panels::settings::SettingsTab::ALL {
+                    let mut app = app_with_settings_form(lang);
+                    app.settings_tab = tab;
+                    settings_shot(&mut app, theme)
+                        .save(dir.join(format!("settings-{tab:?}-{lang:?}-{theme:?}.png")))
+                        .unwrap();
+                }
+            }
+        }
+    }
+
     /// The whole window as the app lays it — toolbar, status bar, variant
     /// strip, both side panels and the canvas — over a synthetic photo, at
     /// `size` points and 1.5×. The update phases the shell runs, minus the
@@ -338,10 +408,311 @@
             for theme in crate::theme::ThemePref::ALL {
                 let mut app = app_with_every_button(lang);
                 with_long_analysis(&mut app);
-                full_window_shot(&mut app, theme, egui::vec2(1400.0, 880.0))
-                    .save(dir.join(format!("window-{lang:?}-{theme:?}.png")))
+                let img = full_window_shot(&mut app, theme, egui::vec2(1400.0, 880.0));
+                img.save(dir.join(format!("window-{lang:?}-{theme:?}.png"))).unwrap();
+                // The top 120 pt alone (the shot is at 1.5×), so the bars of
+                // two runs can be laid side by side.
+                image::imageops::crop_imm(&img, 0, 0, img.width(), 180)
+                    .to_image()
+                    .save(dir.join(format!("window-strip-{lang:?}-{theme:?}.png")))
                     .unwrap();
+                // A busy app, so the disabled Export split is pictured too.
+                if matches!(theme, crate::theme::ThemePref::Dark | crate::theme::ThemePref::Light) {
+                    let mut app = app_with_every_button(lang);
+                    app.busy = true;
+                    let img = full_window_shot(&mut app, theme, egui::vec2(1400.0, 880.0));
+                    image::imageops::crop_imm(&img, 0, 0, img.width(), 180)
+                        .to_image()
+                        .save(dir.join(format!("window-strip-busy-{lang:?}-{theme:?}.png")))
+                        .unwrap();
+                }
             }
         }
     }
 
+    // ---- The library column (the left-most panel): its scenes, its camera
+    // and its pin.
+
+    /// What the library column is showing, for its pictures and its pin.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum LibraryScene {
+        /// No folder open, no photo open.
+        NoFolder,
+        /// A folder open and one of its photos on the canvas.
+        Open,
+        /// …and that photo's recipe copied.
+        Copied,
+        /// …or three photos picked, nothing copied.
+        Picked,
+        /// A recipe copied and three photos picked: every batch verb can run.
+        Batch,
+        /// A recipe copied and 128 photos picked: the widest counts a label
+        /// is expected to carry.
+        BigPick,
+        /// A folder open in Normal, which runs its batch from the sidebar.
+        Normal,
+    }
+
+    impl LibraryScene {
+        /// The scenes the camera takes.
+        const PICTURED: [Self; 4] = [Self::NoFolder, Self::Open, Self::Batch, Self::Normal];
+        /// The scenes that draw the batch block over a folder — one layout.
+        const WITH_BATCH: [Self; 5] = [Self::Open, Self::Copied, Self::Picked, Self::Batch, Self::BigPick];
+    }
+
+    /// An app whose library column shows `scene`. The thumbnails are already
+    /// resident (textures of `ctx`) and the ● badge is already answered, so
+    /// laying the column starts no decode worker and stats no file.
+    fn app_with_library(ctx: &egui::Context, lang: crate::i18n::Lang, scene: LibraryScene) -> AutoShadeApp {
+        let mut app = AutoShadeApp { lang, ..Default::default() };
+        if scene == LibraryScene::NoFolder {
+            return app;
+        }
+        let dir = PathBuf::from("D:/library/2026-11 canyon trip");
+        let names = [
+            "frame-0412.arw",
+            "frame-0413.arw",
+            "frame-0414.arw",
+            "a-long-name-for-a-stitched-panorama-of-the-canyon-rim.tif",
+            "river-bend.jpg",
+            "p7.png",
+        ];
+        app.gallery = (0..14).map(|i| dir.join(format!("{:02}-{}", i, names[i % names.len()]))).collect();
+        app.gallery_dir = Some(dir);
+        for i in 0..app.gallery.len() {
+            // Landscape, portrait and square frames in turn, each a two-tone
+            // field standing in for a photo.
+            let (w, h) = [(60usize, 40usize), (40, 60), (48, 48)][i % 3];
+            let hue = i as f32 / 14.0;
+            let px: Vec<egui::Color32> = (0..w * h)
+                .map(|p| {
+                    let y = (p / w) as f32 / h as f32;
+                    let c = egui::ecolor::Hsva::new((hue + if y < 0.5 { 0.55 } else { 0.05 }) % 1.0, 0.45, 0.75 - 0.3 * y, 1.0);
+                    egui::Color32::from(c)
+                })
+                .collect();
+            let image = egui::ColorImage { size: [w, h], pixels: px };
+            app.thumbs.insert(i, ctx.load_texture(format!("library-thumb-{i}"), image, egui::TextureOptions::LINEAR));
+            app.edited_badge.insert(i, i % 3 == 0);
+        }
+        app.src_path = Some(app.gallery[2].clone());
+        app.selected = Some(2);
+        let copied = matches!(scene, LibraryScene::Copied | LibraryScene::Batch | LibraryScene::BigPick);
+        if copied {
+            app.copied = Some(EditRecipe::default());
+            app.copied_from = app.src_path.clone();
+        }
+        match scene {
+            LibraryScene::Picked | LibraryScene::Batch => app.multi_sel = [0usize, 3, 4].into_iter().collect(),
+            LibraryScene::BigPick => app.multi_sel = (0usize..128).collect(),
+            LibraryScene::Normal => app.choose_mode(Mode::Normal),
+            LibraryScene::NoFolder | LibraryScene::Open | LibraryScene::Copied => {}
+        }
+        app
+    }
+
+    /// The library column as the app hosts it (`library_side_panel` around
+    /// `gallery_panel`), as if the user had dragged it to `width` points (the
+    /// app's range still clamps it), over `frames` frames of a `size`-point
+    /// screen at `ppp`: the last frame's output, the panel's rect on it, the
+    /// panel's width on every frame, and the textures for a picture.
+    fn library_frames(
+        ctx: &egui::Context,
+        app: &mut AutoShadeApp,
+        width: f32,
+        size: egui::Vec2,
+        ppp: f32,
+        frames: usize,
+    ) -> (egui::FullOutput, egui::Rect, Vec<f32>, ShotTextures) {
+        let stored = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 100.0));
+        ctx.data_mut(|d| d.insert_persisted(egui::Id::new("gallery"), egui::containers::panel::PanelState { rect: stored }));
+        let mut tex = ShotTextures::default();
+        let mut last = None;
+        let mut panel = egui::Rect::NOTHING;
+        let mut widths = Vec::new();
+        for i in 0..frames {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                time: Some(i as f64 / 2.0),
+                ..Default::default()
+            };
+            input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(ppp);
+            // The LAST frame's buttons only.
+            crate::buttons::DRAWN.with_borrow_mut(Vec::clear);
+            let out = ctx.run(input, |ctx| {
+                panel = crate::side_panel::library_side_panel(ctx, |ui| app.gallery_panel(ui)).response.rect;
+            });
+            widths.push(panel.width());
+            tex.apply(&out.textures_delta);
+            last = Some(out);
+        }
+        (last.expect("frames ran"), panel, widths, tex)
+    }
+
+    /// User report 2026-11-17 (「最左侧那一栏的按钮布局、美观还需要再优化」), on a
+    /// column whose title and verb filled their row edge to edge in Chinese
+    /// and left it ragged in English, whose three batch verbs were three
+    /// full-width slabs with ✕ alone after the last, whose paste option
+    /// appeared only after a copy and pushed the thumbnails down a row, and
+    /// whose English option label widened the panel by 4 px.
+    ///
+    /// The column is ONE layout: at every width of its range and in every
+    /// state of the clipboard and the pick, in both languages,
+    ///  * the panel is exactly as wide as the drag left it, on every frame;
+    ///  * nothing is drawn past the column's right edge;
+    ///  * every button's label fits its cell — at the floor width too, with a
+    ///    three-digit pick;
+    ///  * the four batch verbs stand in two rows of two equal cells whose
+    ///    right edge is the one 「Open folder…」 ends on;
+    ///  * the paste's option reads whole, on one line;
+    ///  * the thumbnails start on the column's left edge, where the cells do,
+    ///    and the first one stands at one y — nothing above it changes
+    ///    height, so the list never moves under the pointer.
+    ///
+    /// MUTATIONS THIS CATCHES (each run against this pin, 2026-11-17): the
+    /// option drawn only `if self.copied.is_some()` (it is missing from Open,
+    /// and where it does show the first thumbnail stands a row lower);
+    /// `LIBRARY_W_MIN` lowered to 200 (「Copy recipe」 no longer fits its 88 px
+    /// cell); the title row's verb laid after the title instead of at the far
+    /// end (it ends 40 px short of the edge); the render verb back on a full
+    /// row of its own (the row runs past the panel); the row's frame given
+    /// back its side margin (the thumbnails start 3 px in); the option's label
+    /// made longer than the floor width holds (195 px of its 325 px are
+    /// drawn). NOT caught, on purpose: the option's cut taken away — the
+    /// label fits whole at every width of the range, so the cut never runs
+    /// here (`panels/gallery.rs` says whom it is for).
+    #[test]
+    fn the_library_column_is_one_layout_in_every_state() {
+        use crate::i18n::Lang;
+        let size = egui::vec2(700.0, 900.0);
+        for lang in [Lang::En, Lang::Zh] {
+            let mut first_rows: Vec<(String, f32)> = Vec::new();
+            for asked in [crate::theme::LIBRARY_W_MIN, 300.0, 2000.0] {
+                for scene in [LibraryScene::NoFolder, LibraryScene::Normal].into_iter().chain(LibraryScene::WITH_BATCH) {
+                    let tag = format!("{lang:?} {scene:?} asked {asked}");
+                    let ctx = egui::Context::default();
+                    crate::theme::install_fonts(&ctx);
+                    crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+                    let mut app = app_with_library(&ctx, lang, scene);
+                    let (out, panel, widths, _) = library_frames(&ctx, &mut app, asked, size, 1.0, 4);
+                    let drawn = crate::buttons::DRAWN.with_borrow(|d| d.clone());
+
+                    // ① The drag owns the width.
+                    let expected = asked.clamp(crate::theme::LIBRARY_W_MIN, crate::theme::library_w_max(&ctx.style()));
+                    assert!(
+                        widths.iter().all(|w| (w - expected).abs() <= 0.5),
+                        "{tag}: the panel is not the {expected} px the drag left it: {widths:?}"
+                    );
+
+                    // ② Nothing past the column's right edge.
+                    let margin = egui::Frame::side_top_panel(&ctx.style()).inner_margin;
+                    let (left, right) = (panel.left() + margin.left, panel.right() - margin.right);
+                    let items = probe_items(&out.shapes, panel, None);
+                    let past: Vec<String> = items
+                        .iter()
+                        .filter(|(kind, _, r)| kind == "text" && r.right() > right + 0.5)
+                        .map(|(_, text, r)| format!("{text:?} ends at {:.1}", r.right()))
+                        .chain(drawn.iter().filter(|d| d.rect.right() > right + 0.5).map(|d| format!("button {:?} ends at {:.1}", d.label, d.rect.right())))
+                        .collect();
+                    assert!(past.is_empty(), "{tag}: drawn past the column's right edge {right:.1}: {past:#?}");
+
+                    // ③ Every label fits its cell on one line.
+                    for d in &drawn {
+                        assert!(d.fits, "{tag}: {:?} does not fit its {:.1} px cell", d.label, d.rect.width());
+                    }
+
+                    let open = drawn.iter().find(|d| d.label == tr(lang, "🗂 Open folder…")).unwrap_or_else(|| panic!("{tag}: open-folder is drawn"));
+                    assert!(
+                        (open.rect.right() - right).abs() <= 0.5,
+                        "{tag}: 「Open folder…」 ends at {:.1}, not on the column's right edge {right:.1}",
+                        open.rect.right()
+                    );
+                    if !LibraryScene::WITH_BATCH.contains(&scene) {
+                        assert_eq!(drawn.len(), 1, "{tag}: only open-folder is a button here: {drawn:#?}");
+                        continue;
+                    }
+
+                    // ④ Two rows of two equal cells, ending where the title
+                    // row's verb ends (the cells stop growing at the
+                    // readable ceiling, which is where the panel's cap is).
+                    let cells: Vec<&crate::buttons::Drawn> = drawn.iter().filter(|d| d.cell).collect();
+                    assert_eq!(cells.len(), 4, "{tag}: four batch verbs, each in a cell: {drawn:#?}");
+                    for pair in cells.chunks(2) {
+                        let (a, b) = (pair[0], pair[1]);
+                        assert!((a.rect.top() - b.rect.top()).abs() <= 0.5, "{tag}: {:?} and {:?} share a row", a.label, b.label);
+                        assert!((a.rect.left() - left).abs() <= 0.5, "{tag}: {:?} starts at {:.1}, not at the column's left edge {left:.1}", a.label, a.rect.left());
+                        assert!((b.rect.right() - right).abs() <= 0.5, "{tag}: {:?} ends at {:.1}, not at the column's right edge {right:.1}", b.label, b.rect.right());
+                        assert!((a.rect.width() - b.rect.width()).abs() <= 0.5, "{tag}: {:?} and {:?} are equal cells", a.label, b.label);
+                    }
+                    assert!(cells[2].rect.top() > cells[0].rect.bottom(), "{tag}: the second pair stands under the first");
+
+                    // The paste's option reads whole, on one line: the column
+                    // cuts a label too long for it, and the label is not to
+                    // be one of those at any width of the panel's range.
+                    // (A cut galley still answers its whole text, so the cut
+                    // is told by its width: narrower than the label laid
+                    // out with nothing to stop it.)
+                    let option = tr(lang, "Paste crop / straighten too");
+                    let line = items
+                        .iter()
+                        .find(|(kind, text, _)| kind == "text" && text == option)
+                        .unwrap_or_else(|| panic!("{tag}: the option {option:?} is drawn"));
+                    let row = ctx.style().spacing.interact_size.y;
+                    assert!(line.2.height() <= row, "{tag}: the option {option:?} stands {:.1} px tall — more than one line", line.2.height());
+                    let font = egui::TextStyle::Button.resolve(&ctx.style());
+                    let whole = ctx.fonts(|f| f.layout_no_wrap(option.to_owned(), font, egui::Color32::WHITE).size().x);
+                    assert!(
+                        line.2.width() >= whole - 0.5,
+                        "{tag}: the option {option:?} is cut — {:.1} px of its {whole:.1} px are drawn",
+                        line.2.width()
+                    );
+
+                    // ⑤ The first thumbnail's place: on the column's left
+                    // edge, like the cells above it, and at one y.
+                    let slot = app.gallery_slot_rect.unwrap_or_else(|| panic!("{tag}: the first thumbnail was drawn"));
+                    assert!(
+                        (slot.left() - left).abs() <= 0.5,
+                        "{tag}: the thumbnails start at {:.1}, not on the column's left edge {left:.1}",
+                        slot.left()
+                    );
+                    first_rows.push((tag, slot.top()));
+                }
+            }
+            let (tag0, y0) = first_rows[0].clone();
+            for (tag, y) in &first_rows {
+                assert!(
+                    (y - y0).abs() <= 0.5,
+                    "the first thumbnail stands at {y:.1} in [{tag}] and at {y0:.1} in [{tag0}] — what is above it changed height"
+                );
+            }
+        }
+    }
+
+    /// Not a check — the camera for the library column: the pictured scenes,
+    /// both languages, Dark and Light, at the floor width and a wide one.
+    /// `AUTOSHADE_SHOT_DIR=<dir> cargo test … library_screenshots -- --ignored`.
+    #[test]
+    #[ignore = "writes PNGs for a person to look at"]
+    fn library_screenshots() {
+        let dir = std::path::PathBuf::from(std::env::var("AUTOSHADE_SHOT_DIR").expect("AUTOSHADE_SHOT_DIR"));
+        std::fs::create_dir_all(&dir).unwrap();
+        for lang in [crate::i18n::Lang::Zh, crate::i18n::Lang::En] {
+            for theme in [crate::theme::ThemePref::Dark, crate::theme::ThemePref::Light] {
+                for scene in LibraryScene::PICTURED {
+                    for width in [240.0f32, 340.0] {
+                        let ctx = egui::Context::default();
+                        crate::theme::install_fonts(&ctx);
+                        crate::theme::install_theme(&ctx, theme);
+                        let mut app = app_with_library(&ctx, lang, scene);
+                        app.theme = theme;
+                        let size = egui::vec2(width + 60.0, 520.0);
+                        let (out, panel, _, tex) = library_frames(&ctx, &mut app, width, size, 2.0, 4);
+                        let prims = ctx.tessellate(out.shapes.clone(), out.pixels_per_point);
+                        let img = rasterise(&prims, &tex, size, out.pixels_per_point, theme.colors().canvas_bed);
+                        let crop = image::imageops::crop_imm(&img, 0, 0, (panel.right() * 2.0) as u32 + 2, img.height());
+                        crop.to_image().save(dir.join(format!("library-{scene:?}-{lang:?}-{theme:?}-{width}.png"))).unwrap();
+                    }
+                }
+            }
+        }
+    }

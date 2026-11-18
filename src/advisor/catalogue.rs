@@ -1734,7 +1734,7 @@ pub const RECIPE_CONTROLS: [Control; 116] = [
         // 2026-10-13. The AI lens blur: a depth map MoGe-2 estimated for this
         // photo, a focus point and two dials (`render::LensBlur`).
         // `RenderedNotExported` for `pixel_layers`' reason — classic XMP has
-        // no element for a depth-driven blur, so the save line names it — and
+        // no element for a depth-driven blur, so the sidecar's loss line names it — and
         // `EngineCarrier`/`engine_only` because a depth map is a measurement
         // of THIS photo's scene, not a value an advisor could state: a
         // required schema field would come back empty and delete it on every
@@ -1755,7 +1755,7 @@ pub const RECIPE_CONTROLS: [Control; 116] = [
         // and tone deltas is a coordinate system classic XMP does not have, so
         // there is no `crs:` key to lose it to and no partial projection worth
         // making: the sidecar carries the rest of the recipe unchanged and the
-        // save line NAMES the field as the part it could not take.
+        // sidecar's loss line NAMES the field as the part it could not take.
         //
         // `EngineCarrier`, so the advisor's response schema never asks for it:
         // nothing the model could say about ninety-six vertices would be an

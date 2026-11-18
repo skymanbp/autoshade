@@ -1248,12 +1248,19 @@ impl AutoShadeApp {
                     self.prompt_rects.push(_field.rect);
                 }
                 self.brush_row(ui, BrushOwner::Fill);
-                // R38: wrapped — quality and the full-res switch share a row
-                // that wraps when short; the verb fills the row under them
-                // (2026-09-27: a row's one verb takes the whole row).
-                ui.horizontal_wrapped(|ui| {
+                // Quality and the full-res switch share a row; the verb fills
+                // the row under them (2026-09-27: a row's one verb takes the
+                // whole row). The dropdown is one cell of the two-column grid
+                // and the switch stands in the other half (2026-11-17): as a
+                // wrapped row of two own-width items it could change its
+                // number of lines with the panel's width, and the bare
+                // 「high ▾」 named no setting — it now reads 「Quality · …」,
+                // the Normal panel's spelling of the same dropdown.
+                ui.horizontal(|ui| {
+                    let cell = columns(ui, 2);
                     egui::ComboBox::from_id_salt("fill_quality")
-                        .selected_text(tr(lang, ["high", "medium", "low"][self.fill_quality.min(2)]))
+                        .selected_text(format!("{} · {}", tr(lang, "Quality"), tr(lang, ["high", "medium", "low"][self.fill_quality.min(2)])))
+                        .width(cell.x)
                         .show_ui(ui, |ui| {
                             ui.selectable_value(&mut self.fill_quality, 0, tr(lang, "high"));
                             ui.selectable_value(&mut self.fill_quality, 1, tr(lang, "medium"));
@@ -1269,7 +1276,7 @@ impl AutoShadeApp {
                     // across three panels, and this is the only one still gated
                     // RAW-only — a distinction its label could not carry while it
                     // was a twin of the other three.
-                    ui.add_enabled(src_is_raw, egui::Checkbox::new(&mut self.fill_fullres, tr(lang, "Full-res fill")))
+                    check_if(ui, src_is_raw, &mut self.fill_fullres, tr(lang, "Full-res fill"))
                         .on_hover_text(tr(lang, "Composite onto the full-sensor develop (slow, RAW only)"));
                 });
                 // One verb, two ways in (2026-10-12): a painted area is
@@ -1329,7 +1336,7 @@ impl AutoShadeApp {
                 // types since b4c6c30, but the RAW-only gate left a
                 // 61 MP baked TIFF no way to opt out of the 2048px
                 // downsample the unchecked path bakes into the master.
-                ui.checkbox(&mut self.heal_fullres, tr(lang, "Full-res heal"))
+                check(ui, &mut self.heal_fullres, tr(lang, "Full-res heal"))
                     .on_hover_text(tr(lang, "Heal at full resolution (slow; without it the retouched image is saved at 2048px)"));
                 explainer(ui, lang, tr(lang, "AI auto-detects dust / blemishes, or paint a mask and Heal it. Pixel retouch from surrounding pixels; saved to the delivery folder."));
             });
@@ -1380,7 +1387,7 @@ impl AutoShadeApp {
                 // Enabled for BAKED sources too — clone_stamp honours
                 // the flag on both source types (retouch.rs), the same
                 // rule as Heal beside it (L15-7).
-                ui.checkbox(&mut self.clone_fullres, tr(lang, "Full-res clone"))
+                check(ui, &mut self.clone_fullres, tr(lang, "Full-res clone"))
                     .on_hover_text(tr(lang, "Clone at full resolution (slow; without it the retouched image is saved at 2048px)"));
                 explainer(ui, lang, tr(lang, "Photoshop-style clone stamp: Alt+click to sample a source (cross marker), brush the area to \
                          cover, and pixels are carried over as-is from the source (feathered edges, no tone matching). \

@@ -43,7 +43,7 @@ impl AutoShadeApp {
         }
         let Some(lb) = self.recipe.lens_blur.as_mut() else {
             let hint = tr(lang, "Estimate the depth first, then click the photo to choose what stays sharp.");
-            ui.label(egui::RichText::new(hint).weak().small());
+            steady_note(ui, hint);
             return false;
         };
         let mut changed = false;
@@ -70,7 +70,7 @@ impl AutoShadeApp {
             }
         });
         let carried = tr(lang, "Rendered here and in every export from this app; Lightroom's sidecar cannot carry it.");
-        ui.label(egui::RichText::new(carried).weak().small());
+        steady_note(ui, carried);
         if flip_pick {
             // One canvas tool at a time: every arming site disarms the rest.
             self.disarm_tools();

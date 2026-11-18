@@ -30,7 +30,9 @@ The desktop app opens on a mode page every time it starts: three cards, and a
 click on one enters the workspace. The card you chose last is marked
 **Last used**. Inside the workspace the mode's name is the first button of the
 toolbar; it brings the page back, and the open photo, its edits and the
-library stay as they are.
+library stay as they are. The switch at the top right of the page,
+**English** · **中文**, changes the app's language at once; both names are
+always shown in their own script.
 
 | Mode | What the workspace shows |
 |---|---|
@@ -114,8 +116,8 @@ panel, in four groups, top to bottom.
 every face in the photo, on this computer: the person the same way
 **🤖 Select subject** does, the faces and eyes with Google's MediaPipe face
 finder. MediaPipe is a Python package of its own — install it once with
-`pip install mediapipe` into the Python the app uses (Settings, **Python
-interpreter**); the first run downloads its small face model (about 3.8 MB).
+`pip install mediapipe` into the Python the app uses (Settings → Advanced,
+**Python interpreter**); the first run downloads its small face model (about 3.8 MB).
 MediaPipe pulls in `opencv-contrib-python`, which shares one `cv2` folder with
 `opencv-python`: uninstalling either one means reinstalling the other, and
 installing everything from `python/requirements-common.txt` in one go keeps the
@@ -191,6 +193,27 @@ saved with no base look keeps none. A Lightroom sidecar you open starts from
 the same camera base look; the camera profile it names is colour data, read
 from the Camera Raw install on this computer like a lens profile, and never
 changes how a control behaves (v1.17.0).
+
+The **library** column on the left shows the open folder. Under its title
+stand the folder's name and its photo count (hover the line for the full
+path), with **Open folder…** at the top right, and under those one row per
+photo: its name, and beneath the name the file's format when it is not a RAW
+(JPG, PNG, TIF) and **● edited** when it has a saved develop or a Lightroom
+sidecar. Click a row to open that photo; `Ctrl`/`⌘`+click picks several, and
+each picked row says **✓ selected**. Above the list are the batch buttons, two
+to a row. **Copy recipe** takes the open photo's develop; **Paste (n)** writes
+it into the develop of each of the n picked photos and renders nothing — tick
+**Paste crop / straighten too** to carry the crop as well, which is off by
+default because a composition rarely suits another photo; **Render (n)**
+exports each picked photo by its own saved develop with the Export section's
+settings; **Deselect** unpicks them all. A button that cannot run yet is
+greyed in its place and says under the pointer what it is waiting for, so
+these rows keep one height whatever is copied or picked and the list never
+moves while you pick from it. Normal mode has no
+batch buttons (its Save group applies a look to the folder). The column opens
+240 px wide and keeps the width you drag it to, from 240 px up to the width at
+which its button rows reach the 420 px ceiling; nothing in it ever changes
+that width.
 
 ## 2. Develop the image
 
@@ -453,10 +476,21 @@ Buttons follow one vocabulary: the gold button in a group is its main action
 (Export on the toolbar, AI Analyze, Reverse-fit recipe, Apply in a brush
 session, Save settings), icon-only buttons are squares as tall as the text
 buttons beside them, and rows of equal actions in the side panels sit in
-aligned columns. The controls panel keeps the width you drag it to — opening
-a fold never widens it — between 280 px and the width at which its column is
+aligned columns. The other inputs follow the same grid: a dropdown with its
+name in front runs to the row's right edge, a text field stands as tall as
+the buttons beside it, a checkbox is a square box and a radio button a round
+one, and a hint longer than its field ends in “…” (hover the empty field to
+read all of it). The controls panel keeps the width you drag it to — opening
+a fold never widens it — between 320 px and the width at which its column is
 the prompt fields' 420 px readable ceiling, so every row and fold ends on the
-same right edge. On Windows the toolbar is also the window's title bar: drag
+same right edge. Dragging its edge changes how wide the rows are and never
+where they stand: no row moves onto another line or changes height, so
+nothing under it moves — the colour wheels, the curve editor and the notes
+keep the size they have at the narrowest width. The toolbar starts with the app mark and the mode's name,
+then Open photo… and Reset, Undo and Redo, and the two turns; at its right
+end stand the Compare / Single switch, **Save develop** and **Export** (its ▾
+exports once to a path you pick), and the ⚙ and ⌨ buttons. On a narrow window
+the groups wrap onto a second line. On Windows the toolbar is also the window's title bar: drag
 its empty space to move the window, double-click it to maximize, and use the
 minimize / maximize / close buttons at its right end; the window's edges
 resize it. A slider is laid out with its name on the left and
@@ -475,9 +509,9 @@ stays sharp — everything nearer and farther blurs by how far it is from that
 distance, more the farther. **Blur amount** sets the strongest blur and
 **Focus range** how deep the sharp zone is; 👁 mutes it and 🗑 removes it. The
 blur renders on the canvas and in every export from this app, but a Lightroom
-sidecar has no place for it, so the save line names it; it is not pasted onto
-other photos (each needs its own depth), and a photo with a lens blur cannot
-be rotated until it is removed. The side panel
+sidecar has no place for it, so **Export .xmp beside the photo** names it; it
+is not pasted onto other photos (each needs its own depth), and a photo with a
+lens blur cannot be rotated until it is removed. The side panel
 reads in three levels: a
 panel title (**AI generation & reverse-fit**, **AI analysis & auto develop**,
 Develop, Retouch) in large type over a short gold rule, group
@@ -503,7 +537,13 @@ AI-generated pixels (✨ / ✎): its develop is saved, a projection left by an
 earlier source develop is retired in the same save, and the status line says
 so. To deliver the stored projection where Lightroom reads it, choose
 **Export .xmp beside the photo**; replacing an existing neighboring sidecar
-requires confirmation.
+requires confirmation. That click is also the one moment AutoShade says what
+the sidecar cannot carry (bitmap masks, a lens blur, the camera base curve and
+the like; your `recipe.json` keeps all of it). Saving and an AI analysis write
+the sidecar too, but say nothing about Lightroom: you did not ask for a
+Lightroom file then. A loss you can act on, such as one of your own masks, also
+raises a red notice; the camera base curve and lens profile that every RAW
+gets on opening are named quietly on the status line.
 
 ## 3. Add local masks
 
@@ -618,7 +658,7 @@ exists it *is* the negative: reverse-fit and reimagine read its master, and so
 does a further stack. Its status line reports how far the aligner had to move
 the worst frame, how much of the frame no source could cover, and — for an HDR
 merge — the stops it recovered. A `.xmp` from it carries the sliders only; the
-merged pixels live in its 16-bit master in the masters folder (Settings →
+merged pixels live in its 16-bit master in the masters folder (Settings → Folders →
 **Develop store** names it and opens it).
 
 In the browser the same four merges are in the **Stack** panel beside Heal.
@@ -669,7 +709,8 @@ exactly those shapes into Generative Fill's painted area and re-runs the generat
 model over them (an empty prompt removes; the result lands as a layer on the
 card, like any other fill). One thing to know when you save: a merge into an existing
 `.xmp` keeps your original removal block untouched, but a sidecar written where
-none existed carries no removals at all, and the save line names that.
+none existed carries no removals at all, and **Export .xmp beside the photo**
+names that.
 
 Each of Generative Fill, Heal and Clone Stamp carries its own **🖌 Paint area**
 / **Clear area** row and its own painted area — what you paint for one tool is
@@ -698,10 +739,10 @@ sent the card's picture with no mask, and only the area its answer changed
 lands as the layer (the status line says what share of the picture that is).
 A layer keeps the look it was made with, so after a large slider change,
 fill again. Lightroom has no place for a
-layer: the `.xmp` carries the rest of the develop and the save line says the
-layers stayed behind. Pasting a develop onto another photo leaves the layers
-out (they are this photo's pixels), and turning the photo is off while a card
-holds one. Through v1.6.7 a fill landed as a new **✨ AI generated** card
+layer: the `.xmp` carries the rest of the develop, and **Export .xmp beside the
+photo** says the layers stayed behind. Pasting a develop onto another photo
+leaves the layers out (they are this photo's pixels), and turning the photo is
+off while a card holds one. Through v1.6.7 a fill landed as a new **✨ AI generated** card
 instead. The browser's Fill and the CLI's `retouch` still composite onto the
 source's own develop — since v1.17.0 its base develop, the camera profile and
 Look the photo starts from.
@@ -895,7 +936,7 @@ Lightroom slider; since v1.17.0 the sidecar writes it as that mask's
 Temperature and Tint, the pair whose rendered effect comes nearest on a
 range of greys, with the Exposure nudged back by whatever brightness that
 move adds. Only a recolour stronger than Temperature and Tint can reach is
-still named in the save line.
+still named, by **Export .xmp beside the photo**.
 
 **The colour field.** From the 65% default up (never below it), the fit may
 also attach a smooth 12×8×8 local colour/tone field — the residual its masks
@@ -905,10 +946,9 @@ conservative of the three. It appears in the develop panel's **Local Masks**
 section as its own row, `▦ Colour field · engine-only`, with an eye to mute it
 and an Amount slider; deleting the row removes it. It is the first control in
 this app with **no Lightroom equivalent at all**: classic XMP has no
-coordinate system for a smooth local field, so the save line names it among
-the things Lightroom cannot render, the **Export .xmp beside the photo** note
-names it again, and the `.xmp` itself says so in an `asr:NotCarried` line
-(v1.17.0). Your rendered exports are the faithful delivery of a photo with a
+coordinate system for a smooth local field, so the **Export .xmp beside the
+photo** note names it among the things Lightroom cannot render, and the `.xmp`
+itself says so in an `asr:NotCarried` line (v1.17.0). Your rendered exports are the faithful delivery of a photo with a
 field. Since v1.3.1 the `.xmp` beside your RAW still carries the field inside
 AutoShade's own payload, and reopening that sidecar restores it. Copy/paste to another photo drops it and tells
 you — its cells are measured on this frame's own geometry and mean nothing on
@@ -948,8 +988,8 @@ colour; their sentinel-hosted range components project to Lightroom XMP as the
 masks Lightroom itself writes. The sky and land zones project too, as
 Lightroom's own **Select Sky** mask — the land zone is that same component
 inverted — so Lightroom rebuilds its own sky alpha from them, while the raster
-AutoShade renders from is its own (the save line says 「AI masks ×N re-derived
-locally — not Adobe's raster」). **Invert** now reaches the sidecar on a brush
+AutoShade renders from is its own (**Export .xmp beside the photo** says 「AI
+masks ×N re-derived locally — not Adobe's raster」). **Invert** now reaches the sidecar on a brush
 or AI mask as well as on a gradient, and a Lightroom mask that arrives inverted
 renders inverted here: both used to drop the flag silently, so an imported
 inverted sky selection painted the sky it was meant to exclude. The opt-in
@@ -1002,9 +1042,11 @@ The Export header carries no ●; hover over the toolbar's Export button to read
 the current delivery summary.
 
 An analysis's verdict, rationale and deep-thinking working sit in one box at
-the top of the Analysis fold, about eight lines tall; a longer analysis scrolls
-inside it and adds **View full text…**, which opens the whole text in a
-window you can move, resize and copy from.
+the top of the Analysis fold, as tall as the text needs up to about eight
+lines; a longer analysis scrolls inside it and adds **View full text…**, which
+opens the whole text in a window you can move, resize and copy from. The box
+keeps its height when you drag the panel wider — the text re-wraps inside it
+and nothing below it moves.
 
 **🤖 AI Denoise on export** runs the AI denoise inside every full-resolution
 delivery — a RAW on its sensor mosaic, a baked source through SCUNet — at the
@@ -1217,7 +1259,8 @@ different file already under the name is left alone and the sidecar's copy
 takes a `-2` name, which the status line says). A payload this build cannot
 read is disclosed and the Camera Raw settings stand alone. The payload adds
 roughly 15 KB for a full reverse-fit recipe and 80 KB per zone alpha; rasters
-past a 6 MiB budget are left out and named in the save line. Two smaller
+past a 6 MiB budget are left out and named by **Export .xmp beside the
+photo**. Two smaller
 changes ride with it: `ColorNoiseReduction` is now always written, so a photo
 AutoShade shows without colour noise reduction no longer gets Lightroom's RAW
 default of 25 on top; and a sky/land zone whose intent Lightroom stripped is
@@ -1226,7 +1269,15 @@ still recognised from the name the writer gives it (`sky`, `land`,
 
 ## Configure and use the AI features
 
-Open **Settings** (the ⚙ button at the right end of the toolbar) to configure the image/vision role and the analysis-verifier
+**Settings** (the ⚙ button at the right end of the toolbar) has five pages,
+listed on its left: **General** (language, theme, accent colour — these apply
+at once), **Folders** (the delivery folder and the develop store), **AI
+models** (the analysis model and the image model), **Advanced** (the Python
+interpreter and the segmentation helper) and **About** (the version). The
+**Save settings** button at the bottom of the Folders, AI models and Advanced
+pages saves those three pages' fields together.
+
+Open the **AI models** page to configure the image/vision role and the analysis-verifier
 role. The image role uses an OpenAI-compatible API for visual proposals and
 generative images: any server that speaks that API works from its base URL
 and a key. **API style** says which request shape the vision calls use —
@@ -1504,7 +1555,7 @@ the separate, confirmed per-photo sidecar exception.
 The Delivery folder holds exports only. The full-resolution images AI denoise,
 stacking, heal, clone, fill and AI edits produce — the masters their cards are
 built on — live in a `masters` folder inside the develop store, so cleaning out
-the Delivery folder never breaks a card. Settings → **Develop store** shows
+the Delivery folder never breaks a card. Settings → Folders → **Develop store** shows
 that folder and opens it; delete a card before deleting its master. Masters
 made before v1.12.0 stay where they were written. If one of those is deleted,
 a ▣ Original card that used it goes back to the photo file itself and says so,

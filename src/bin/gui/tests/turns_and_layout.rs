@@ -524,10 +524,15 @@
                             sections[2] = ui.min_rect().width();
                         });
                     });
-                    egui::Window::new(tr(lang, "Settings"))
-                        .id(egui::Id::new("settings_window"))
-                        .default_width(480.0)
-                        .show(ctx, |ui| app.settings_ui(ui));
+                    // Every Settings page, each in a window of its own with
+                    // its footer, so every Settings button is measured.
+                    for tab in crate::panels::settings::SettingsTab::ALL {
+                        app.settings_tab = tab;
+                        egui::Window::new(tr(lang, "Settings"))
+                            .id(egui::Id::new(("settings_window", tab as u8)))
+                            .fixed_size(crate::panels::settings::settings_window_size(ctx.screen_rect()))
+                            .show(ctx, |ui| app.settings_ui(ui));
+                    }
                     widths.push([gallery.response.rect.width(), controls.response.rect.width()]);
                     rects.push([gallery.response.rect, controls.response.rect]);
                 });

@@ -129,6 +129,6 @@ impl AutoShadeApp {
             // belt for a typed or dragged in-between value.
             self.fit_level = FitLevel::from_step(step.round() as u8).unwrap_or_default();
         }
-        ui.label(egui::RichText::new(fit_level_summary(lang, self.fit_level)).weak().small());
+        steady_note(ui, fit_level_summary(lang, self.fit_level));
     }
 }

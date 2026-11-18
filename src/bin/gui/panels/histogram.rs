@@ -200,7 +200,11 @@ impl AutoShadeApp {
             }
         });
 
-        let side = ui.available_width().clamp(160.0, 240.0);
+        // Sized from the STEADY width (`side_panel.rs`): the square is the
+        // same at every width of the column, so the rows under it do not
+        // move while the panel's edge is dragged. On the real width it grew
+        // until its 240 cap, and pushed the column down as it did.
+        let side = steady_width(ui).clamp(160.0, 240.0);
         let (rect, resp) =
             ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click_and_drag());
         #[cfg(test)]

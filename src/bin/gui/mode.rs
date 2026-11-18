@@ -157,14 +157,34 @@ impl AutoShadeApp {
         let lang = self.lang;
         window_chrome::edge_resize(ctx);
         window_chrome::window_outline(ctx);
-        let bar = egui::Frame::side_top_panel(&ctx.style())
-            .inner_margin(egui::Margin::symmetric(8.0, SPACE_MD))
-            .fill(self.theme.colors().bar_fill);
+        // The workspace bar's own frame, so the two bars cannot drift apart.
+        let bar = window_chrome::bar_frame(&ctx.style(), self.theme.colors().bar_fill);
+        // The language switch, at the bar's right end (2026-11-17, user:
+        // nowhere on this page to change the language — "what if someone
+        // cannot read Chinese?"). Both names always in their own script, so
+        // whichever language the app is in, the other one can be read and
+        // found; the chosen one is selected.
+        let mut picked = None;
         egui::TopBottomPanel::top("top").frame(bar).show(ctx, |ui| {
+            let mark = &mut self.app_mark;
             window_chrome::toolbar_row(ui, lang, |ui| {
+                window_chrome::app_mark(ui, mark);
                 ui.label(egui::RichText::new("AutoShade").strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_XS;
+                    // Right to left: 中文 is laid first so English stands on
+                    // its left.
+                    for l in [Lang::Zh, Lang::En] {
+                        if ui.selectable_label(lang == l, l.label()).clicked() {
+                            picked = Some(l);
+                        }
+                    }
+                });
             });
         });
+        if let Some(l) = picked {
+            self.set_language(l);
+        }
         let bed = egui::Frame::central_panel(&ctx.style()).fill(self.theme.colors().canvas_bed);
         let mut picked = None;
         egui::CentralPanel::default().frame(bed).show(ctx, |ui| {
@@ -200,6 +220,29 @@ impl AutoShadeApp {
         // Written at once (`update` flushes it), so the remembered card is
         // right even if the app does not get to exit cleanly.
         self.prefs_save_due = true;
+    }
+
+    /// The one door for changing the UI language: the mode page's switch and
+    /// the Settings window's picker both come here. Written at once, like a
+    /// chosen mode. The status line is re-said in the new language only when
+    /// it is one of the two RESTING lines the old language rendered — the
+    /// greeting or a folder scan's count; anything else on it (an error, a
+    /// result, a count carrying the skipped-items warning) is a message about
+    /// something that happened and is left as it was said.
+    pub(crate) fn set_language(&mut self, lang: Lang) {
+        let old = self.lang;
+        if lang == old {
+            return;
+        }
+        self.lang = lang;
+        self.prefs_save_due = true;
+        let greeting = |l| tr(l, "Open a photo, or open a folder to browse your library.");
+        let n = self.gallery.len();
+        if self.status == greeting(old) {
+            self.status = greeting(lang).into();
+        } else if self.status == crate::workers::folder_count_line(old, n) {
+            self.status = crate::workers::folder_count_line(lang, n);
+        }
     }
 
     /// Back to the mode page from the workspace — nothing else changes.

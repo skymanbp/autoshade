@@ -2,6 +2,21 @@
 
 use super::*;
 
+/// The status line a folder scan of `n` photos rests on. One function for
+/// the scan's landing and `set_language`, which re-says this line in the new
+/// language when it is still showing — so the two can never word it apart.
+pub(crate) fn folder_count_line(lang: Lang, n: usize) -> String {
+    if n == 0 {
+        // The plural line says "click a thumbnail" — with
+        // zero rows there is none to click.
+        tr(lang, "no photos found in this folder").to_string()
+    } else if n == 1 {
+        tr(lang, "1 photo — click a thumbnail to open").to_string()
+    } else {
+        trf(lang, "{n} photos — click a thumbnail to open", &[("n", &n.to_string())])
+    }
+}
+
 impl AutoShadeApp {
     /// Spawn a worker whose PANIC still delivers a terminal message. Every
     /// worker's last act is sending the `Msg` that clears `busy` (or an
@@ -2092,16 +2107,25 @@ impl AutoShadeApp {
                                             };
                                             if autoshade::decode::is_raw(&p) && !generated {
                                                 match xmp_outcome {
-                                                    // Regenerated-not-merged AND
-                                                    // the M6a projection losses:
-                                                    // the same disclosure as
-                                                    // Ctrl+S, in the same two
-                                                    // voices. Analyze is where
-                                                    // AI bitmap masks arrive, so
-                                                    // this landing needs the
-                                                    // export-side line as much
-                                                    // as the save does.
-                                                    Ok((merge_note, losses)) => {
+                                                    // The same as Ctrl+S: the
+                                                    // regenerated-not-merged
+                                                    // note is said, and neither
+                                                    // direction of the Lightroom
+                                                    // disclosure is — not what
+                                                    // the projection cannot
+                                                    // carry (the writer's mask
+                                                    // verdicts, ignored here),
+                                                    // not what Lightroom renders
+                                                    // and this canvas does not.
+                                                    // Owner's ruling 2026-11-17:
+                                                    // an independent program
+                                                    // does not talk about
+                                                    // Lightroom when no
+                                                    // Lightroom file was asked
+                                                    // for. 「Export .xmp beside
+                                                    // the photo」 says both, at
+                                                    // the hand-off.
+                                                    Ok((merge_note, _)) => {
                                                         // A regenerated-not-merged
                                                         // sidecar always
                                                         // interrupts: it dropped
@@ -2110,44 +2134,6 @@ impl AutoShadeApp {
                                                         if let Some(m) = merge_note {
                                                             self.toast(ToastKind::Error, m.clone());
                                                             s = format!("{s} — ⚠ {m}");
-                                                        }
-                                                        // The projection's own
-                                                        // losses, with Ctrl+S's
-                                                        // interrupt rule (MED-2 —
-                                                        // engine calibration is
-                                                        // said quietly, a user's
-                                                        // own mask is not).
-                                                        let globals =
-                                                            autoshade::xmp::global_export_losses(
-                                                                &stamped,
-                                                            );
-                                                        if let Some(m) =
-                                                            xmp_loss_line(lang, &losses, &globals)
-                                                        {
-                                                            if xmp_loss_interrupts(&losses, &globals)
-                                                            {
-                                                                self.toast(
-                                                                    ToastKind::Error,
-                                                                    m.clone(),
-                                                                );
-                                                                s = format!("{s} — ⚠ {m}");
-                                                            } else {
-                                                                s = format!("{s} · {m}");
-                                                            }
-                                                        }
-                                                        // R25 B4, the other
-                                                        // corner: what LR
-                                                        // renders and this
-                                                        // canvas does not.
-                                                        // Quiet channel only —
-                                                        // nothing was lost.
-                                                        if let Some(m) = render_gap_line(
-                                                            lang,
-                                                            &autoshade::xmp::global_render_gaps(
-                                                                &stamped,
-                                                            ),
-                                                        ) {
-                                                            s = format!("{s} · {m}");
                                                         }
                                                     }
                                                     Err(e) => {
@@ -2483,15 +2469,7 @@ impl AutoShadeApp {
                         self.selected = None;
                         self.multi_sel.clear(); // indices belong to the old folder
                         self.busy = false;
-                        self.status = if n == 0 {
-                            // The plural line says "click a thumbnail" — with
-                            // zero rows there is none to click.
-                            tr(lang, "no photos found in this folder").to_string()
-                        } else if n == 1 {
-                            tr(lang, "1 photo — click a thumbnail to open").to_string()
-                        } else {
-                            trf(lang, "{n} photos — click a thumbnail to open", &[("n", &n.to_string())])
-                        };
+                        self.status = folder_count_line(lang, n);
                         // L08: each unreadable entry went to stderr as the
                         // scan hit it — invisible in the windowed GUI, so
                         // the count rides the scan's own status answer.

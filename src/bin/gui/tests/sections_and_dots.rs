@@ -908,17 +908,18 @@
     /// a `Command::new` target into the trusted settings file, which is what
     /// `config::SETTINGS` registers the variable `env_only(Trust::Destination)`
     /// to forbid. So the NEGATIVE half is the point: the heading and the
-    /// resolved path are drawn, and no 「Browse…」 button appears beside them
-    /// (the delivery-root row above has one, which is what makes the absence
-    /// here a decision rather than an oversight).
+    /// resolved path are drawn on the Advanced page, and no 「Browse…」 button
+    /// appears there (the delivery-root row on the Folders page has one, which
+    /// is what makes the absence here a decision rather than an oversight).
     #[test]
     fn the_settings_panel_shows_the_sidecar_path_without_offering_to_change_it() {
+        use crate::panels::settings::SettingsTab;
         for (lang, heading, browse) in [
             (crate::i18n::Lang::En, "Segmentation helper", "Browse…"),
             (crate::i18n::Lang::Zh, "分割脚本", "浏览…"),
         ] {
             let mut app = AutoShadeApp { lang, ..Default::default() };
-            let seen = tall_frame(&mut app, |a, ui| a.settings_ui(ui));
+            let seen = tall_frame(&mut app, |a, ui| a.settings_page(ui, SettingsTab::Advanced));
             let at = seen.iter().position(|t| t == heading).unwrap_or_else(|| {
                 panic!("{lang:?}: the sidecar heading was not drawn: {seen:?}")
             });
@@ -928,15 +929,16 @@
                 seen[at + 1..].iter().any(|t| t.contains("segment.py")),
                 "{lang:?}: no resolved sidecar path under the heading: {seen:?}"
             );
-            // The delivery root's picker proves the panel CAN draw one here.
+            // The delivery root's picker proves the window CAN draw one.
+            let folders = tall_frame(&mut app, |a, ui| a.settings_page(ui, SettingsTab::Folders));
             assert!(
-                seen.iter().any(|t| t == browse),
+                folders.iter().any(|t| t == browse),
                 "{lang:?}: the delivery-root Browse button is gone — the negative \
-                 assertion below would then prove nothing: {seen:?}"
+                 assertion below would then prove nothing: {folders:?}"
             );
             assert!(
-                seen[at + 1..].iter().all(|t| t != browse),
-                "{lang:?}: a picker appeared beside the executed sidecar path: {seen:?}"
+                seen.iter().all(|t| t != browse),
+                "{lang:?}: a picker appeared on the page of the executed sidecar path: {seen:?}"
             );
         }
     }
@@ -1097,8 +1099,8 @@
     }
 
     /// R22 #16h (verification, no behaviour change): the export-side MaskLoss
-    /// disclosure rides `toast()`, so repeating the SAME save must not stack
-    /// copies — the dedup refreshes the live toast and moves it to the BACK of
+    /// disclosure rides `toast()`, so repeating the SAME hand-off to Lightroom
+    /// must not stack copies — the dedup refreshes the live toast and moves it to the BACK of
     /// the 5-deep ring, which is also what stops a repeat from evicting the
     /// other four. Pinned because the release note describes this behaviour.
     #[test]
@@ -1110,7 +1112,7 @@
             app.toast(ToastKind::Success, format!("saved {i}"));
         }
         assert_eq!(app.toasts.len(), 5, "the ring is exactly full");
-        // Ctrl+S three more times on the same photo: byte-identical disclosure.
+        // Three more hand-offs of the same photo: byte-identical disclosure.
         for _ in 0..3 {
             app.toast(ToastKind::Error, loss);
         }

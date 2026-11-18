@@ -259,6 +259,10 @@ pub(crate) struct AutoShadeApp {
     // it off, the checkbox at the foot of the Generate fold turns it back on.
     pub(crate) ask_fit_after_generate: bool,
     pub(crate) show_settings: bool,    // the Settings window is open
+    // The bars' app mark, decoded on first draw (`window_chrome::app_mark`).
+    pub(crate) app_mark: Option<egui::TextureHandle>,
+    // The Settings window's open page — session state, never persisted.
+    pub(crate) settings_tab: crate::panels::settings::SettingsTab,
     pub(crate) show_shortcuts: bool,   // the keyboard cheat-sheet window is open (F1 / ? / ⌨)
     pub(crate) show_analysis_full: bool, // the AI analysis full-text window is open
     // Tab hides both side panels (the LR grammar) for an edge-to-edge canvas.
@@ -782,7 +786,7 @@ impl AutoShadeApp {
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::Num0) { do_fit = true; }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::Num1) { do_one = true; }
                 // Ctrl+Shift+C/V (LR's Copy/Paste Develop Settings):
-                // keyboard twins of ⎘ Copy recipe / ⇩ Paste to selected.
+                // keyboard twins of 「Copy recipe」 / 「Paste」.
                 // EVENT-level, not consume_key: egui-winit swallows every
                 // Ctrl(+Shift)+C into Event::Copy and emits NO Key event
                 // (egui-winit lib.rs is_copy_command — the Codex 阶段5
@@ -1010,7 +1014,7 @@ impl AutoShadeApp {
                 }
             }
             // Ctrl+C mirrors ⎘ Copy recipe (same guards + the pending-rename
-            // flush); Ctrl+V mirrors ⇩ Paste to selected — and like the
+            // flush); Ctrl+V mirrors 「Paste」 — and like the
             // disabled buttons, a press that would not act stays silent. Where
             // the mode draws no such rows (Normal), the keys are dead too.
             let batch_keys = self.mode.shell().library_batch_rows;
@@ -1024,7 +1028,7 @@ impl AutoShadeApp {
                 self.copied_from = self.src_path.clone();
                 self.status = tr(
                     self.lang,
-                    "Recipe copied — Ctrl/⌘+click to pick several, then “Paste to selected”",
+                    "Recipe copied — Ctrl/⌘+click to pick several, then “Paste”",
                 )
                 .to_string();
             }
@@ -1121,9 +1125,8 @@ impl AutoShadeApp {
         // at that spacing the action row visually touches the strip edges.
         window_chrome::edge_resize(ctx);
         window_chrome::window_outline(ctx);
-        let frame = egui::Frame::side_top_panel(&ctx.style())
-            .inner_margin(egui::Margin::symmetric(8.0, SPACE_MD))
-            .fill(self.theme.colors().bar_fill);
+        // The same frame as the mode page's bar (`window_chrome::bar_frame`).
+        let frame = window_chrome::bar_frame(&ctx.style(), self.theme.colors().bar_fill);
         egui::TopBottomPanel::top("top").frame(frame).show(ctx, |ui| {
             let lang = self.lang;
             // ONE wrapped row of ACTIONS only (UX batch): settings that used
@@ -1132,8 +1135,12 @@ impl AutoShadeApp {
             // style trio into the AI section. The row wraps, never clips (the
             // "shrink the window and lose the buttons" bug); wrapping only
             // works between ATOMIC widget allocations, so the enabled gating
-            // stays per-widget (ui.add_enabled), and groups are fenced with
-            // add_space (a separator that wraps to a line start orphans).
+            // stays per-widget (ui.add_enabled), and groups are divided by a
+            // hairline inside each group's own allocation (a separator that
+            // wraps to a line start orphans).
+            // Two zones (2026-11-17, user: the bar's art and look need
+            // redoing): where you are and what you undo on the left, how you
+            // look and what you deliver flush right.
             // AI Analyze moved INTO the AI section, onto the same row as
             // the Direction prompt it consumes (user feedback: a trigger
             // stranded in the toolbar, far from its input, reads as
@@ -1144,28 +1151,36 @@ impl AutoShadeApp {
             // so a narrow window moves a whole group to the next line instead
             // of splitting Undo from Redo; a plain `ui.horizontal` would be
             // laid at the cursor at whatever width was left and never wrap.
-            // The group fence sits INSIDE each group's end, where a wrapped
+            // The group divider sits INSIDE each group's end, where a wrapped
             // line start cannot orphan it. Export is the row's one primary
             // verb; Settings and the shortcut sheet are glyph squares.
             // On Windows the row is also the title bar (`window_chrome`).
             window_chrome::toolbar_row(ui, lang, |ui| {
-                // The mode's name, at the bar's left end: back to the mode
-                // page (`mode.rs`), the open photo and the library untouched.
+                // Normal (`mode::Shell`) keeps open, undo, redo, compare and
+                // settings; saving is its sidebar's Save group.
+                let full = self.mode.shell().full_toolbar;
                 let mode_name = self.mode.name(lang);
-                group(ui, &[mode_name], 0, |ui| {
-                    if action(ui, true, mode_name)
+                let (open_photo, reset) = (tr(lang, "Open photo…"), tr(lang, "Reset"));
+                let (undo, redo) = (tr(lang, "↶ Undo"), tr(lang, "↷ Redo"));
+                let (turn_left, turn_right) = (tr(lang, "⭯ Turn left"), tr(lang, "⭮ Turn right"));
+                let (compare, single) = (tr(lang, "◫ Compare"), tr(lang, "⬛ Single"));
+                let (save, export) = (tr(lang, "Save develop"), bar_label(tr(lang, "Export")));
+                // ---- the LEFT zone: where you are and what you undo --------
+                // The app mark, then the mode's name as a chip: back to the
+                // mode page (`mode.rs`), the open photo and the library
+                // untouched. A chip, not a quiet verb: it says where you ARE.
+                group(ui, &[Item::Mark, Item::Text(mode_name)], true, |ui| {
+                    window_chrome::app_mark(ui, &mut self.app_mark);
+                    if chip(ui, mode_name)
                         .on_hover_text(tr(lang, "Back to the mode page — the open photo, its edits and the library stay as they are"))
                         .clicked()
                     {
                         self.return_to_mode_page();
                     }
                 });
-                // Normal (`mode::Shell`) keeps open, undo, redo, compare and
-                // settings; saving is its sidebar's Save group.
-                let full = self.mode.shell().full_toolbar;
-                let open_group = [tr(lang, "Open photo…"), tr(lang, "Reset")];
-                group(ui, if full { &open_group } else { &open_group[..1] }, 0, |ui| {
-                    if action(ui, !self.busy, tr(lang, "Open photo…"))
+                let open_items = [Item::Text(open_photo), Item::Text(reset)];
+                group(ui, if full { &open_items } else { &open_items[..1] }, true, |ui| {
+                    if action(ui, !self.busy, open_photo)
                         .on_hover_text(tr(lang, "Ctrl+O · or drag a file into the window"))
                         .clicked()
                         && let Some(path) = open_photo_dialog(self.mode)
@@ -1173,7 +1188,7 @@ impl AutoShadeApp {
                         self.selected = None; // a one-off file isn't a gallery selection
                         self.open_path(path);
                     }
-                    if full && action(ui, ready, tr(lang, "Reset"))
+                    if full && action(ui, ready, reset)
                         .on_hover_text(tr(lang, "Back to this photo's fresh-open look: sliders neutral on the camera's own default colour and tone, like the in-camera JPEG (one undo brings it back)"))
                         .clicked()
                     {
@@ -1219,15 +1234,17 @@ impl AutoShadeApp {
                         self.resync_recipe_display();
                     }
                 });
-                group(ui, &[tr(lang, "↶ Undo"), tr(lang, "↷ Redo")], 0, |ui| {
-                    if action(ui, ready && !self.undo_stack.is_empty(), tr(lang, "↶ Undo"))
+                // The last group of Normal's left zone (no Turn group there),
+                // so it carries a divider only in the full bar.
+                group(ui, &[Item::Text(undo), Item::Text(redo)], full, |ui| {
+                    if action(ui, ready && !self.undo_stack.is_empty(), undo)
                         .on_hover_text(tr(lang, "Ctrl+Z · undo the last edit"))
                         .clicked()
                     {
                         let ctx = ui.ctx().clone();
                         self.undo(&ctx);
                     }
-                    if action(ui, ready && !self.redo_stack.is_empty(), tr(lang, "↷ Redo"))
+                    if action(ui, ready && !self.redo_stack.is_empty(), redo)
                         .on_hover_text(tr(lang, "Ctrl+Y · redo the undone edit"))
                         .clicked()
                     {
@@ -1236,88 +1253,130 @@ impl AutoShadeApp {
                     }
                 });
                 if full {
-                group(ui, &[tr(lang, "⭯ Turn left"), tr(lang, "⭮ Turn right")], 0, |ui| {
-                    // Rotate (R27). NOT ↶/↷ — those two glyphs are Undo/Redo one
-                    // button to the left, and ↺/↻ are already 「reset all」/
-                    // 「Clear」/「↻ Redraw」 in the panels. ⭯/⭮ (U+2B6F/U+2B6E) are
-                    // unused anywhere in the tree and both ship in
-                    // NotoSansSymbols2-autoshade.ttf, so no subset regeneration.
-                    let can_rotate = self.can_rotate();
-                    // Disabled buttons state their reason (the pixel-state rule):
-                    // a control that greys out in silence reads as a broken app.
-                    // Spelled at each site rather than through a helper — the
-                    // i18n audit reads `tr()` LEXICALLY, and a key that reaches it
-                    // through a closure parameter is a key it cannot check.
-                    let blocked = tr(
-                        lang,
-                        "rotation is off while this photo carries rendered pixels (retouch / AI rendition) or a tool is armed — its master raster is a file in the frame it was rendered in; turn first, retouch after",
-                    );
-                    let left_hover = if can_rotate {
-                        tr(lang, "A quarter turn anticlockwise — the crop and every mask turn with it (one undo)")
-                    } else {
-                        blocked
-                    };
-                    if action(ui, can_rotate, tr(lang, "⭯ Turn left"))
-                        .on_hover_text(left_hover)
-                        .clicked()
-                    {
-                        let ctx = ui.ctx().clone();
-                        self.rotate_photo(3, &ctx); // anticlockwise = three clockwise
-                    }
-                    let right_hover = if can_rotate {
-                        tr(lang, "A quarter turn clockwise — the crop and every mask turn with it (one undo)")
-                    } else {
-                        blocked
-                    };
-                    if action(ui, can_rotate, tr(lang, "⭮ Turn right"))
-                        .on_hover_text(right_hover)
-                        .clicked()
-                    {
-                        let ctx = ui.ctx().clone();
-                        self.rotate_photo(1, &ctx);
-                    }
-                });
-                }
-                if !full {
-                    // Normal: the two view buttons are one switch.
-                    group(ui, &[tr(lang, "◫ Compare")], 0, |ui| {
-                        let on = self.view_mode == ViewMode::SideBySide;
-                        if ui
-                            .selectable_label(on, tr(lang, "◫ Compare"))
-                            .on_hover_text(tr(lang, "Before and after side by side — click again for the photo alone; hold B to see the original"))
+                    group(ui, &[Item::Text(turn_left), Item::Text(turn_right)], false, |ui| {
+                        // Rotate (R27). NOT ↶/↷ — those two glyphs are Undo/Redo one
+                        // button to the left, and ↺/↻ are already 「reset all」/
+                        // 「Clear」/「↻ Redraw」 in the panels. ⭯/⭮ (U+2B6F/U+2B6E) are
+                        // unused anywhere in the tree and both ship in
+                        // NotoSansSymbols2-autoshade.ttf, so no subset regeneration.
+                        let can_rotate = self.can_rotate();
+                        // Disabled buttons state their reason (the pixel-state rule):
+                        // a control that greys out in silence reads as a broken app.
+                        // Spelled at each site rather than through a helper — the
+                        // i18n audit reads `tr()` LEXICALLY, and a key that reaches it
+                        // through a closure parameter is a key it cannot check.
+                        let blocked = tr(
+                            lang,
+                            "rotation is off while this photo carries rendered pixels (retouch / AI rendition) or a tool is armed — its master raster is a file in the frame it was rendered in; turn first, retouch after",
+                        );
+                        let left_hover = if can_rotate {
+                            tr(lang, "A quarter turn anticlockwise — the crop and every mask turn with it (one undo)")
+                        } else {
+                            blocked
+                        };
+                        if action(ui, can_rotate, turn_left)
+                            .on_hover_text(left_hover)
                             .clicked()
                         {
-                            self.view_mode = if on { ViewMode::AfterOnly } else { ViewMode::SideBySide };
+                            let ctx = ui.ctx().clone();
+                            self.rotate_photo(3, &ctx); // anticlockwise = three clockwise
+                        }
+                        let right_hover = if can_rotate {
+                            tr(lang, "A quarter turn clockwise — the crop and every mask turn with it (one undo)")
+                        } else {
+                            blocked
+                        };
+                        if action(ui, can_rotate, turn_right)
+                            .on_hover_text(right_hover)
+                            .clicked()
+                        {
+                            let ctx = ui.ctx().clone();
+                            self.rotate_photo(1, &ctx);
                         }
                     });
-                } else {
-                group(ui, &[tr(lang, "◫ Compare"), tr(lang, "⬛ Single")], 0, |ui| {
-                    // View mode: side-by-side vs a full-width edit (hold B =
-                    // compare). ◫ lives in egui's bundled fonts — the old ⿲
-                    // (U+2FF2) only rendered when the OPTIONAL CJK fallback font
-                    // loaded, tofu otherwise.
-                    ui.selectable_value(&mut self.view_mode, ViewMode::SideBySide, tr(lang, "◫ Compare"))
-                        .on_hover_text(tr(lang, "Before/After side by side"));
-                    ui.selectable_value(&mut self.view_mode, ViewMode::AfterOnly, tr(lang, "⬛ Single"))
-                        .on_hover_text(tr(lang, "The edit fills the canvas; hold B to quickly compare the original"));
+                }
+                // ---- the RIGHT zone: how you look, and what you deliver ----
+                // Measured with the same `group_width` the groups below lay
+                // themselves out by. When the whole row fits on one line, one
+                // flexible gap pushes the zone to the row's right end, just
+                // left of the window buttons; when it does not, nothing is
+                // inserted and the row wraps between groups exactly as before.
+                let view: &[&str] = if full { &[compare, single] } else { &[compare] };
+                let squares = [Item::Glyph; 2];
+                let squares = if full { &squares[..] } else { &squares[..1] };
+                let mut zone = vec![group_width(ui, &[Item::Segmented(view)], true)];
+                if full {
+                    zone.push(group_width(ui, &[Item::Text(save), Item::Split(export)], true));
+                }
+                zone.push(group_width(ui, squares, false));
+                let zone_w = zone.iter().sum::<f32>() + ui.spacing().item_spacing.x * (zone.len() - 1) as f32;
+                let one_line = (ui.cursor().top() - ui.max_rect().top()).abs() < 0.5;
+                // A hair of slack, so float rounding can never push the
+                // zone's first group onto a line of its own.
+                let gap = (ui.available_rect_before_wrap().width() - zone_w - 1.0).floor();
+                if one_line && gap > 0.0 {
+                    ui.add_space(gap);
+                }
+                group(ui, &[Item::Segmented(view)], true, |ui| {
+                    if full {
+                        // View mode: side-by-side vs a full-width edit (hold B =
+                        // compare). ◫ lives in egui's bundled fonts — the old ⿲
+                        // (U+2FF2) only rendered when the OPTIONAL CJK fallback font
+                        // loaded, tofu otherwise. One segmented control: the two
+                        // choices are one switch, and it reads as one.
+                        let side = self.view_mode == ViewMode::SideBySide;
+                        match segmented(ui, &[
+                            (compare, side, tr(lang, "Before/After side by side")),
+                            (single, !side, tr(lang, "The edit fills the canvas; hold B to quickly compare the original")),
+                        ]) {
+                            Some(0) => self.view_mode = ViewMode::SideBySide,
+                            Some(_) => self.view_mode = ViewMode::AfterOnly,
+                            None => {}
+                        }
+                    } else {
+                        // Normal: the two view buttons are one switch.
+                        let on = self.view_mode == ViewMode::SideBySide;
+                        let hover = tr(lang, "Before and after side by side — click again for the photo alone; hold B to see the original");
+                        if segmented(ui, &[(compare, on, hover)]).is_some() {
+                            self.view_mode = if on { ViewMode::AfterOnly } else { ViewMode::SideBySide };
+                        }
+                    }
                 });
-                group(ui, &[tr(lang, "Export"), "▾", tr(lang, "Save develop")], 0, |ui| {
-                    // Delivery ACTIONS (their settings live in the Develop panel's
-                    // Export section; the hover echoes the current delivery state
-                    // so it stays glanceable without a toolbar row of combos).
-                    //
-                    // ONE split button (R22-7). 「Export」 and 「Download…」 were the
-                    // same code path — start_render_to — differing only in where
-                    // the target came from, which made "where do my files go" a
-                    // property of WHICH BUTTON you pressed instead of a setting.
-                    // The main half now follows the Destination setting; the ▾ half
-                    // is the one-off escape hatch that leaves the setting alone.
-                    // Zero item_spacing joins the two halves visually into one
-                    // control (egui has no split-button widget).
-                    let summary = self.export_summary(lang);
-                    ui.scope(|ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        if primary(ui, ready, tr(lang, "Export"))
+                if full {
+                    group(ui, &[Item::Text(save), Item::Split(export)], true, |ui| {
+                        // Delivery ACTIONS (their settings live in the Develop panel's
+                        // Export section; the hover echoes the current delivery state
+                        // so it stays glanceable without a toolbar row of combos).
+                        // Save develop stands LEFT of Export (2026-11-17), so the
+                        // primary verb is the bar's last text verb — where the main
+                        // action conventionally sits.
+                        if action(ui, ready, save)
+                            .on_hover_text(tr(lang, "Ctrl+S · save this photo's develop (recipe + a Lightroom/ACR XMP for RAW; a baked retouch master is linked so reopening restores it) to your develop store"))
+                            .clicked()
+                        {
+                            self.save_xmp();
+                        }
+                        // ONE split button (R22-7). 「Export」 and 「Download…」 were the
+                        // same code path — start_render_to — differing only in where
+                        // the target came from, which made "where do my files go" a
+                        // property of WHICH BUTTON you pressed instead of a setting.
+                        // The main half now follows the Destination setting; the ▾ half
+                        // is the one-off escape hatch that leaves the setting alone.
+                        // `buttons::split_button` joins the halves into one pill in
+                        // both states (egui has no split-button widget).
+                        let summary = self.export_summary(lang);
+                        let (main, chevron) = split_button(ui, ready, export, |ui| {
+                            if ui
+                                .button(tr(lang, "Export to…"))
+                                .on_hover_text(tr(lang, "Pick a path for THIS export only — the Destination setting is left as it is"))
+                                .clicked()
+                            {
+                                ui.close_menu();
+                                self.export_to_chosen_path();
+                            }
+                        });
+                        chevron.on_hover_text(tr(lang, "Export to a one-off path…"));
+                        if main
                             .on_hover_text(format!(
                                 "{}\n{summary}",
                                 tr(lang, "Ctrl+Shift+E (or Ctrl+E) · full-resolution render to the Destination below (follows the current variant's pixels); Destination + settings live in the Export section")
@@ -1326,32 +1385,9 @@ impl AutoShadeApp {
                         {
                             self.start_export();
                         }
-                        // `add_enabled_ui`, not a disabled Button: menu_button
-                        // returns an InnerResponse and takes no enabled flag.
-                        ui.add_enabled_ui(ready, |ui| {
-                            ui.menu_button("▾", |ui| {
-                                if ui
-                                    .button(tr(lang, "Export to…"))
-                                    .on_hover_text(tr(lang, "Pick a path for THIS export only — the Destination setting is left as it is"))
-                                    .clicked()
-                                {
-                                    ui.close_menu();
-                                    self.export_to_chosen_path();
-                                }
-                            })
-                            .response
-                            .on_hover_text(tr(lang, "Export to a one-off path…"));
-                        });
                     });
-                    if action(ui, ready, tr(lang, "Save develop"))
-                        .on_hover_text(tr(lang, "Ctrl+S · save this photo's develop (recipe + a Lightroom/ACR XMP for RAW; a baked retouch master is linked so reopening restores it) to your develop store"))
-                        .clicked()
-                    {
-                        self.save_xmp();
-                    }
-                });
                 }
-                group(ui, &[], if full { 2 } else { 1 }, |ui| {
+                group(ui, squares, false, |ui| {
                     if glyph(ui, true, "⚙").on_hover_text(tr(lang, "Settings · AI provider / model / API key")).clicked() {
                         // Reload the form only on the closed→open edge — reloading
                         // while open wiped everything already typed (incl. keys).
@@ -1466,6 +1502,10 @@ impl AutoShadeApp {
     /// itself to its content, so the panel shrank a few pixels on every frame
     /// the bar faded in.
     pub(crate) fn controls_column(&mut self, ui: &mut egui::Ui) {
+        // How much wider than its narrowest the column is this frame: what
+        // takes its height from a width measures against the narrowest, so a
+        // drag of the edge moves nothing up or down (`side_panel.rs`).
+        let _slack = ColumnSlack::enter(ui);
         let gutter = controls_gutter(ui.style());
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui::Frame::none()
@@ -1546,10 +1586,10 @@ impl AutoShadeApp {
         // Left-most: the library gallery (folder browse + thumbnails), then
         // the develop controls. Tab collapses both for an edge-to-edge canvas
         // (LR's panel-hiding grammar); all state lives on, only layout skips.
+        // Both are hosted by `side_panel.rs`: only a drag of the edge sets
+        // either one's width, between its floor and its cap.
         if !self.panels_hidden {
-            egui::SidePanel::left("gallery").default_width(240.0).show(ctx, |ui| {
-                self.gallery_panel(ui);
-            });
+            library_side_panel(ctx, |ui| self.gallery_panel(ui));
 
             let controls = controls_side_panel(ctx, |ui| self.controls_column(ui));
             // ↑/↓ routing (see upd_shortcuts): over this panel the keys
@@ -1655,35 +1695,39 @@ impl AutoShadeApp {
         });
     }
 
+    /// The Settings window (provider / model / API keys), when it is open —
+    /// its own function so the screenshot camera draws it through the same
+    /// host code the app runs. A local `open` avoids a double &mut self
+    /// borrow (Window::open vs the closure that reads self).
+    pub(crate) fn settings_window(&mut self, ctx: &egui::Context) {
+        if !self.show_settings {
+            return;
+        }
+        let mut open = true;
+        // A fixed size, capped below the screen: the navigation and the
+        // footer are panels inside it and only the page scrolls, so on a
+        // small display the 保存 button stays reachable instead of ending up
+        // off-screen under a long page.
+        let size = crate::panels::settings::settings_window_size(ctx.screen_rect());
+        egui::Window::new(tr(self.lang, "Settings"))
+            // Fixed id: the TITLE now varies with the language, and egui
+            // keys window state (position, size) off the id.
+            .id(egui::Id::new("settings_window"))
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size(size)
+            .open(&mut open)
+            .show(ctx, |ui| self.settings_ui(ui));
+        if !open {
+            self.show_settings = false;
+        }
+    }
+
     /// One update() phase — body extracted verbatim from the eframe
     /// update loop (round-12 decomposition).
     fn upd_sheets(&mut self, ctx: &egui::Context) {
         self.analysis_full_window(ctx);
-        // Settings window (provider / model / API keys). A local `open` avoids a
-        // double &mut self borrow (Window::open vs the closure that reads self).
-        if self.show_settings {
-            let mut open = true;
-            // Scroll inside the window, capped below the screen height: the
-            // provider sections outgrow a small display, and without a scroll
-            // area the 保存 button ends up unreachable off-screen.
-            let max_h = ctx.screen_rect().height() * 0.85;
-            egui::Window::new(tr(self.lang, "Settings"))
-                // Fixed id: the TITLE now varies with the language, and egui
-                // keys window state (position, size) off the id.
-                .id(egui::Id::new("settings_window"))
-                .collapsible(false)
-                .resizable(false)
-                .default_width(480.0)
-                .open(&mut open)
-                .show(ctx, |ui| {
-                    egui::ScrollArea::vertical()
-                        .max_height(max_h)
-                        .show(ui, |ui| self.settings_ui(ui));
-                });
-            if !open {
-                self.show_settings = false;
-            }
-        }
+        self.settings_window(ctx);
 
         // Keyboard cheat-sheet (F1 / ? / the ⌨ toolbar button) — the full
         // shortcut + gesture map lived only in tooltips and a code comment;
@@ -1854,6 +1898,8 @@ impl Default for AutoShadeApp {
             // Mirror Prefs::default.
             ask_fit_after_generate: true,
             show_settings: false,
+            settings_tab: Default::default(),
+            app_mark: None,
             show_shortcuts: false,
             show_analysis_full: false,
             panels_hidden: false,

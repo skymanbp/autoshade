@@ -132,6 +132,19 @@ impl std::ops::Deref for ThemeColors {
     }
 }
 
+impl ThemeColors {
+    /// A resting plate ON the title/tool bar (the mode chip, a disabled
+    /// Export split): whichever of `widget_fill` / `card_fill` stands further
+    /// from `bar_fill`. On the dark schemes that is `widget_fill`; on Light
+    /// `widget_fill` is the bar's own grey (232 on 234, contrast 1.02), so a
+    /// plate there read as plain text — `card_fill` (1.18) is the existing
+    /// surface that shows. Picked, not a new token.
+    pub(crate) fn bar_plate(&self) -> egui::Color32 {
+        let (w, c) = (self.widget_fill, self.card_fill);
+        if contrast(w, self.bar_fill) >= contrast(c, self.bar_fill) { w } else { c }
+    }
+}
+
 const DARK_SURFACES: Surfaces = Surfaces {
     thumb_placeholder: egui::Color32::from_gray(24),
     canvas_bed: egui::Color32::from_rgb(17, 17, 19),
@@ -713,9 +726,14 @@ pub(crate) fn ease_out(t: f32) -> f32 {
 }
 
 /// The controls panel's width: where it opens, and the narrowest a drag may
-/// take it (below this the two-cell button rows clip their labels).
+/// take it. ONE number since 2026-11-17: the column is designed at this
+/// width — every row fits it in both languages — and a drag only widens it.
+/// The old 280 floor was narrower than the design: there the mask rows ran
+/// 13 px past their card, button cells cut their labels, and the English
+/// column needed 324. It is also the width `side_panel::steady_width`
+/// measures against, so the layout a drag keeps is the one drawn here.
 pub(crate) const CONTROLS_W_DEFAULT: f32 = 320.0;
-pub(crate) const CONTROLS_W_MIN: f32 = 280.0;
+pub(crate) const CONTROLS_W_MIN: f32 = CONTROLS_W_DEFAULT;
 
 /// The widest the controls panel may be dragged: the panel whose content
 /// column is exactly [`FIELD_W_MAX`] wide — the side panel frame's own
@@ -731,6 +749,22 @@ pub(crate) fn controls_w_max(style: &egui::Style) -> f32 {
 /// and a breath (see `AutoShadeApp::controls_column`).
 pub(crate) fn controls_gutter(style: &egui::Style) -> f32 {
     style.spacing.scroll.bar_width + SPACE_SM
+}
+
+/// The library panel's width: where it opens, and the narrowest a drag may
+/// take it — one number, as for the controls panel. The column is designed at
+/// this width: its title row and its two-cell button rows fit it in both
+/// languages (`the_library_column_is_one_layout_in_every_state`), and a drag
+/// only widens it. Before 2026-11-17 the panel had no floor of its own; its
+/// content pushed back instead — at 239 px in Chinese, 197 px in English.
+pub(crate) const LIBRARY_W_DEFAULT: f32 = 240.0;
+pub(crate) const LIBRARY_W_MIN: f32 = LIBRARY_W_DEFAULT;
+
+/// The widest the library panel may be dragged: the panel whose content is
+/// exactly [`FIELD_W_MAX`] wide, where `buttons::columns` stops growing its
+/// cells — past it the button rows would end short of the column's right edge.
+pub(crate) fn library_w_max(style: &egui::Style) -> f32 {
+    FIELD_W_MAX + egui::Frame::side_top_panel(style).inner_margin.sum().x
 }
 
 // The theme `install_theme` last installed on this thread. egui hands a

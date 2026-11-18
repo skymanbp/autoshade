@@ -98,8 +98,11 @@
     /// pushed 「✕ 清除」 out of the card. A cell button truncates its label
     /// instead (`buttons::place`), so no cell button reaches past the panel
     /// at the minimum width, in either language, laid in the app's REAL fonts.
-    /// MUTATION: drop the `.truncate()` in `place` and the rows grow the
-    /// 280 px panel (281 px in English, 282 px in Chinese) — red.
+    /// MUTATION, as measured while the minimum was 280 px: drop the
+    /// `.truncate()` in `place` and the rows grew that panel to 281 px in
+    /// English and 282 px in Chinese — red. Since 2026-11-17 the minimum is
+    /// the 320 px design width, where today's labels fit their cells; the
+    /// pin now holds the property for whatever label comes later.
     #[test]
     fn no_cell_button_reaches_past_the_narrowest_panel() {
         use crate::buttons::DRAWN;

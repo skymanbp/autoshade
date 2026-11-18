@@ -3583,8 +3583,8 @@ stored (pre-geometry) coordinates. The layer files load through the mask
 raster snapshot under the same aggregate budget — strict (an export bails on
 an unreadable one), best-effort in the preview. The catalogue row is
 `EngineCarrier` / `RenderedNotExported`, so the advisor never states it and
-the save line names it; `paste_payload` drops it from a foreign paste and
-`can_rotate` is off while any card holds one. Until then the fill landed as a
+the export-beside loss line names it; `paste_payload` drops it from a foreign
+paste and `can_rotate` is off while any card holds one. Until then the fill landed as a
 new ✨ card, `RetouchKind::NewGenerated`. Since 2026-10-12 every composited
 answer is LEVELLED first: the model redraws the whole frame shifted from the
 one it was sent (+42 / +40 / +24 levels in R/G/B at a user's fill edge, the
@@ -3974,10 +3974,18 @@ cannot drift from the file) and handed back with the document itself —
 `xmp::recipe_to_xmp_with_losses` / `MergeOutcome::losses`, one pass per save;
 `xmp::mask_export_losses` is the same list for a surface that only wants the
 disclosure and writes nothing. It rides `pipeline::write_xmp`'s return value to
-every surface: the GUI localises it into the save status line and a toast, the
-web reply carries it in the note it already had, and stderr gets one line from
-`write_xmp_doc` for the CLI. `recipe.json` remains the lossless sidecar, which
-is what the disclosure says. Since v0.30.0 the GUI's line NAMES the masks
+every surface: the web reply carries it in the note it already had, and stderr
+gets one line from `write_xmp_doc` for the CLI. The GUI says it at ONE moment
+only — **Export .xmp beside the photo** (`export_xmp_beside`), the click that
+hands the file to Lightroom — and not on Save or an Analyze landing, which
+write the projection without being asked for a Lightroom file (the owner's
+ruling of 2026-11-17: an independent program does not warn about Lightroom
+unasked). That click re-runs the save's projection on the saved develop
+(`pipeline::xmp_projection_bytes`, bytes discarded) for the writer's own mask
+verdicts, so nothing is carried over from the save and a photo saved in an
+earlier session gets the same sentence; `gui::util::xmp_loss_interrupts`
+decides between a toast plus ⚠ and the quiet status note. `recipe.json`
+remains the lossless sidecar, which is what the disclosure says. Since v0.30.0 the GUI's line NAMES the masks
 rather than counting them (the CLI's has since M6a; 「which of my twelve?」 was
 the half a count could not answer).
 
@@ -4255,9 +4263,9 @@ silently drops what you are looking at」 were both unrepresentable claims.
 | tier | engine renders | own `crs:` property | members today | disclosed by |
 |---|---|---|---|---|
 | `Rendered` | yes | yes | the ordinary controls — **98 global, 26 local** (counted from the registry 2026-09-18 and again for v1.17.0; R25 added global `texture` and the manual CA pair `ca_r`/`ca_b`; per mask, the four point curves, and v1.17.0 the Color tint pair `toning_amount`/`toning_hue`; v1.5.0 the Detail panel's eight shaping axes, the parametric curve's seven keys, the Calibration panel's seven, the B&W switch with its eight mixer bands, the Point Color swatch list, F6's Transform panel — seven sliders, its Upright mode and `crop_constrain_to_warp` — F7's `camera_profile`, which arrived by LEAVING `PassThrough` rather than by being invented, and F8's HDR edit mode with its headroom and the seven SDR-rendition controls) | — nothing to disclose |
-| `CarriedOnly` | no | yes | **1**: the mask `name`, a label rather than an operator — the one member that never had an engine stage to wait for. R25 ruled 24 globals into this tier under policy SF4-C; v1.5.0 rendered all of them, batch by batch (the eight Detail axes → `render/detail.rs`, the nine Effects → `render/finish.rs`, the auto-CA switch and the six de-fringe keys → `render/lens.rs`), so **`CARRIED_ONLY_GLOBAL` is now empty**. The list and its gates stay: emptiness is a measurement, and the next carried row discloses itself the day it is added | `xmp::global_render_gaps` → 「carried to Lightroom, not rendered here」, on the control and in the save line |
+| `CarriedOnly` | no | yes | **1**: the mask `name`, a label rather than an operator — the one member that never had an engine stage to wait for. R25 ruled 24 globals into this tier under policy SF4-C; v1.5.0 rendered all of them, batch by batch (the eight Detail axes → `render/detail.rs`, the nine Effects → `render/finish.rs`, the auto-CA switch and the six de-fringe keys → `render/lens.rs`), so **`CARRIED_ONLY_GLOBAL` is now empty**. The list and its gates stay: emptiness is a measurement, and the next carried row discloses itself the day it is added | `xmp::global_render_gaps` → 「carried to Lightroom, not rendered here」, on the control and in the export-beside note |
 | `PassThrough` | no | verbatim | **1 row, 6 keys**: `passthrough`, a `BTreeMap<String,String>` over the named `xmp::PASSTHROUGH_CRS` block — what is left is exactly Lightroom's own Upright SOLVER bookkeeping (`UprightVersion`, `UprightCenterMode`, `UprightCenterNormX/Y`, `UprightFocalMode`, `UprightFocalLength35mm`). (R25 counted 16, the seven `CameraCalibration*` keys included; Lightroom writes no such key, and its Calibration panel renders since v1.5.0. It counted 9 until v1.5.0 F6, when the eight `crs:Perspective*` keys became owned controls, and 7 until F7, when `CameraProfile` became one — the tier shrinking by itself twice, which is what its own note hoped for.) A NAMED key set, deliberately not 「everything unknown」: the merge's strip universe is a static list, so a free-form map would desynchronise from what is actually written. `unmodelled_global_crs` keeps naming the rest — that is the feature, not the omission | the Transform section's read-only tail: values shown, no slider offered, because a slider on something never interpreted would be a lie. The section's own sliders above it are a different matter — those keys render |
-| `RenderedNotExported` | yes | no | **7 global** in registry order: `upright_transform` (F6), `base_curve`, `lens_profile`, `retouch` (F9), `pixel_layers` (v1.7.0), `lens_blur` (2026-10-13), `colour_field`; per mask `enabled`, `color_gains`. F7's `look` left the tier in v1.17.0, when the writer began emitting `<crs:Look>` (it is `Rendered` now). The first three are quiet on save (`catalogue::STAMPED_CALIBRATION`) — nothing the photographer can act on, and for Adobe's Upright the merge preserves the document's own copy anyway — while `retouch`, `pixel_layers`, `lens_blur` and `colour_field` say so out loud. `retouch` is the sharpest illustration of the split: a MERGE keeps the photographer's `crs:RetouchAreas` byte for byte (this writer does not own the element, so it never strips it), and a FRESH `recipe_to_xmp` emits nothing at all for it. The tier names the worse half, because that is the half a disclosure is for | `xmp::global_export_losses` + the mask loss list |
+| `RenderedNotExported` | yes | no | **7 global** in registry order: `upright_transform` (F6), `base_curve`, `lens_profile`, `retouch` (F9), `pixel_layers` (v1.7.0), `lens_blur` (2026-10-13), `colour_field`; per mask `enabled`, `color_gains`. F7's `look` left the tier in v1.17.0, when the writer began emitting `<crs:Look>` (it is `Rendered` now). The first three are quiet at the export-beside hand-off (`catalogue::STAMPED_CALIBRATION`) — nothing the photographer can act on, and for Adobe's Upright the merge preserves the document's own copy anyway — while `retouch`, `pixel_layers`, `lens_blur` and `colour_field` say so out loud. `retouch` is the sharpest illustration of the split: a MERGE keeps the photographer's `crs:RetouchAreas` byte for byte (this writer does not own the element, so it never strips it), and a FRESH `recipe_to_xmp` emits nothing at all for it. The tier names the worse half, because that is the half a disclosure is for | `xmp::global_export_losses` + the mask loss list |
 | `DerivedWriteOnly` | (yes) | no — only a derived value | `as_shot_k`/`as_shot_tint`, which reach the sidecar as `crs:Temperature`/`Tint` | — |
 
 `Control.tier` is `Option<Tier>`; `None` is not "unclassified" but "not a
@@ -4287,11 +4295,15 @@ missing. Outbound, `xmp::global_export_losses` names the active
 `RenderedNotExported` controls — a photo whose look depends on its camera base
 curve or its lens-profile correction used to export a sidecar that renders
 visibly differently in Lightroom, silently — and they join the mask losses in
-the one save sentence: the GUI's, and since 2026-10-26 the CLI's stderr line
-and the browser's reply too (`pipeline::xmp_loss_lines`; until then those two
-named only the masks, so a lens blur saved there left the sidecar in silence). The other direction of the same honesty is
+the one loss sentence: the GUI's (said at **Export .xmp beside the photo**
+only, since 2026-11-17), and since 2026-10-26 the CLI's stderr line and the
+browser's reply when they write the sidecar (`pipeline::xmp_loss_lines`; until
+then those two named only the masks, so a lens blur saved there left the
+sidecar in silence). The other direction of the same honesty is
 `xmp::global_render_gaps` (R25), the symmetric list for `CarriedOnly`: what
-LIGHTROOM will render and this canvas will not. It is the precondition for the
+LIGHTROOM will render and this canvas will not. The GUI says it, quietly, at
+**Export .xmp beside the photo** only — beside the loss sentence, never on
+Save or an Analyze landing (the same ruling of 2026-11-17). It is the precondition for the
 whole carried tier existing — sliders that move a number and no pixel (24 at
 R25, **0 since v1.5.0**) would otherwise be exactly the bug the inclusion laws
 above forbid. It answers empty on every recipe now, which is the point rather
@@ -7662,8 +7674,8 @@ edit rather than a measurement, which moved a rule: `gui::util::xmp_loss_interru
 asked `engine_only` whether an export loss is actionable, which was the right
 answer for the wrong reason (every engine-only global that could be lost
 happened to be stamped calibration). It now asks
-`catalogue::STAMPED_CALIBRATION` directly, so the base curve stays quiet on
-every save and a field the user asked for says so out loud.
+`catalogue::STAMPED_CALIBRATION` directly, so the base curve stays quiet at
+every hand-off to Lightroom and a field the user asked for says so out loud.
 
 **The local-field analyzer (B2, 2026-08-28).** Before any local producer runs,
 `fit_zoned::field::solve_local_field`

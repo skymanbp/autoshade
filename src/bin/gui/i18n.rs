@@ -314,8 +314,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("API (OpenAI-compatible)", "API（兼容 OpenAI）"),
     ("fetching…", "拉取中…"),
     ("🔄 Fetch models", "🔄 拉取可用模型"),
-    ("List the models this endpoint serves (GET /models) so you can pick instead of guess — and a live reachability check for the bridge/API. Uses the key/token typed below; a saved key is only used at the endpoint it was saved for.",
-        "列出该端点提供的模型（GET /models），可挑选而非猜测 —— 并对桥接/API 做一次连通性检查。使用下方输入的密钥/令牌；已保存的密钥只会用于保存它时的那个端点。"),
+    ("List the models this endpoint serves (GET /models) so you can pick instead of guess — and a live reachability check for the bridge/API. Uses the key/token typed above; a saved key is only used at the endpoint it was saved for.",
+        "列出该端点提供的模型（GET /models），可挑选而非猜测 —— 并对桥接/API 做一次连通性检查。使用上方输入的密钥/令牌；已保存的密钥只会用于保存它时的那个端点。"),
     ("{chat} chat · {image} image", "{chat} 对话 · {image} 图像"),
     ("Bridge URL", "桥接地址"),
     ("Vision model", "视觉模型"),
@@ -323,8 +323,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Bridge password", "桥接口令"),
     ("set — blank keeps it", "已设 — 留空则保留"),
     ("the password set in the bridge's own config (api-keys) — it stays on this computer and is not an OpenAI key", "桥接程序配置里设置的口令（api-keys），只在本机使用，不是 OpenAI 密钥"),
-    ("Uses your ChatGPT subscription through the Codex bridge (CLIProxyAPI) running on this computer — no OpenAI key. To set it up: download CLIProxyAPI from its GitHub releases, start it, sign in with your ChatGPT account when it asks, and paste the api-keys value from its configuration file as the bridge password above. Start the bridge before an edit, or the call cannot connect. Generated images are capped at about 1.5 MP by the subscription; for full-resolution edits switch to API with a real key.",
-        "通过本机运行的 Codex 桥（CLIProxyAPI）使用你的 ChatGPT 订阅 —— 无需 OpenAI 密钥。安装：从 CLIProxyAPI 的 GitHub 发布页下载并启动，按提示完成 ChatGPT 验证，再把它配置文件里的 api-keys 值填到上面的桥接口令。编辑前先启动桥，否则无法连接。生成图受订阅限制，约 1.5 MP 封顶；要全分辨率编辑请切换到 API 并用真实密钥。"),
+    ("Uses your ChatGPT subscription through the Codex bridge (CLIProxyAPI) running on this computer — no OpenAI key. To set it up: download CLIProxyAPI from its GitHub releases, start it, sign in with your ChatGPT account when it asks, and paste the api-keys value from its configuration file as the bridge password below. Start the bridge before an edit, or the call cannot connect. Generated images are capped at about 1.5 MP by the subscription; for full-resolution edits switch to API with a real key.",
+        "通过本机运行的 Codex 桥（CLIProxyAPI）使用你的 ChatGPT 订阅 —— 无需 OpenAI 密钥。安装：从 CLIProxyAPI 的 GitHub 发布页下载并启动，按提示完成 ChatGPT 验证，再把它配置文件里的 api-keys 值填到下面的桥接口令。编辑前先启动桥，否则无法连接。生成图受订阅限制，约 1.5 MP 封顶；要全分辨率编辑请切换到 API 并用真实密钥。"),
     ("Tip: gpt-image-1.5 keeps the photo most faithful (input_fidelity); newer models like gpt-image-2 ignore that lock and edit more freely.",
         "提示：gpt-image-1.5 对照片最忠实（input_fidelity）；gpt-image-2 等较新模型会忽略该锁定、编辑更自由。"),
     ("Save settings", "保存设置"),
@@ -443,15 +443,22 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("{dir} · {count} photos", "{dir} · {count} 张照片"),
     ("Copy recipe", "复制配方"),
     ("Copy every develop setting from the current photo", "复制当前照片的全部 develop 参数"),
-    ("Recipe copied — Ctrl/⌘+click to pick several, then “Paste to selected”", "配方已复制 — Ctrl/⌘+点击选多张，再「粘贴到选中」"),
-    ("Paste to selected ({n})", "粘贴到选中({n})"),
+    ("Recipe copied — Ctrl/⌘+click to pick several, then “Paste”", "配方已复制 — Ctrl/⌘+点击选多张，再「粘贴」"),
+    ("Paste", "粘贴"),
+    ("Paste ({n})", "粘贴 ({n})"),
     ("Writes each photo's develop into your develop store (recipe JSON; RAW also gets a Lightroom XMP). Leaves library files untouched, renders nothing.",
         "把每张照片的显影写入显影库（配方 JSON；RAW 另附 Lightroom XMP）。不动库文件、不渲染成品。"),
-    ("Render selected ({n})", "渲染选中({n})"),
+    ("Render", "渲染"),
+    ("Render ({n})", "渲染 ({n})"),
     ("Each renders by its own saved develop from the store (neutral develop if none) → <Destination>/<name>.developed.*, using the current format / long-edge / sharpening / quality; AI Denoise sits out the batch.",
         "每张按它在显影库里保存的显影出图（没有则中性显影）→ <目标位置>/<名>.developed.*，用当前格式/长边/锐化/质量；AI Denoise 不参与批量"),
-    ("Clear selection", "清除多选"),
-    ("Include crop / straighten when pasting", "粘贴时含裁剪/拉直"),
+    ("Deselect", "取消选择"),
+    ("Unpick every photo — Ctrl/⌘+click picks or unpicks one", "取消全部多选 — Ctrl/⌘+点击可逐张选中或取消"),
+    // What a greyed batch verb is waiting for (its hover text while greyed).
+    ("Open a photo first — click a thumbnail below.", "先打开一张照片 — 点下面的缩略图。"),
+    ("Copy a recipe, then Ctrl/⌘+click the photos to paste it onto.", "先复制配方，再 Ctrl/⌘+点击要粘贴到的照片。"),
+    ("Ctrl/⌘+click photos to pick them first.", "先 Ctrl/⌘+点击选中照片。"),
+    ("Paste crop / straighten too", "粘贴时含裁剪/拉直"),
     ("Off by default — composition rarely transfers between photos", "默认不带几何 — 构图在照片间通常不可复用"),
     ("Open a folder to browse your photos here.", "打开一个文件夹，在此浏览照片。"),
     // Round-12 阶段5 empty-state ladder: empty folder ≠ no folder, and the
@@ -1195,11 +1202,13 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // checked against the shipped CJK subset before it was written — the
     // whole-chain font gate (`embedded_fonts_cover_every_ui_symbol`) is what
     // catches a 「递」 that would render as tofu.
-    ("Where finished files land: exports and the extracted style prompt — for this window, the CLI, the web surface and batch renders alike. Blank = the default ./out beside the working directory. Saved develops and the pixel masters cards are built on are NOT here (see 「Develop store」 above), so cleaning this folder never breaks a card.",
-        "成品文件的去处：导出、提取出的风格提示词 —— 本窗口、CLI、网页端和批量渲染共用同一个。留空 = 默认的 ./out（相对于启动目录）。已保存的显影和卡片所用的像素母版都不在这里（见上方「显影库」），所以清理这个文件夹不会影响任何卡片。"),
-    ("Pixel masters: {path}", "像素母版：{path}"),
-    ("The full-resolution images AI denoise, stacking, heal, clone, fill and AI edits produce — the cards built on them read these files. Deleting one breaks its card, so delete the card first. Exports are NOT here (see 「Delivery folder」 below).",
-        "AI 降噪、堆栈、修复、仿制、填充和 AI 修改产出的全分辨率图——建在它们上面的卡片读的就是这些文件。删掉一个，对应的卡片就没法用了，所以请先删卡片。导出的成品不在这里（见下方「成片文件夹」）。"),
+    // Since the 2026-11-17 Settings pages the delivery folder sits ABOVE the
+    // develop store on the Folders page, so the two cross-references flipped.
+    ("Where finished files land: exports and the extracted style prompt — for this window, the CLI, the web surface and batch renders alike. Blank = the default ./out beside the working directory. Saved develops and the pixel masters cards are built on are NOT here (see 「Develop store」 below), so cleaning this folder never breaks a card.",
+        "成品文件的去处：导出、提取出的风格提示词 —— 本窗口、CLI、网页端和批量渲染共用同一个。留空 = 默认的 ./out（相对于启动目录）。已保存的显影和卡片所用的像素母版都不在这里（见下方「显影库」），所以清理这个文件夹不会影响任何卡片。"),
+    ("Pixel masters", "像素母版"),
+    ("The full-resolution images AI denoise, stacking, heal, clone, fill and AI edits produce — the cards built on them read these files. Deleting one breaks its card, so delete the card first. Exports are NOT here (see 「Delivery folder」 above).",
+        "AI 降噪、堆栈、修复、仿制、填充和 AI 修改产出的全分辨率图——建在它们上面的卡片读的就是这些文件。删掉一个，对应的卡片就没法用了，所以请先删卡片。导出的成品不在这里（见上方「成片文件夹」）。"),
     ("🗂 Show masters folder", "🗂 打开母版文件夹"),
     ("No master yet — the folder appears with the first AI denoise, stack or retouch",
         "还没有母版——第一次 AI 降噪、堆栈或修饰之后才会出现这个文件夹"),
@@ -1400,7 +1409,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "配方已保存 — 但 Lightroom XMP 写入失败：{err}"),
     // M6a export-side lossy-projection disclosure (util::xmp_loss_line): the
     // counts come from the writer's own per-mask verdicts, so these are pure
-    // labels — an empty list prints nothing at all.
+    // labels — an empty list prints nothing at all. Said only by 「Export .xmp
+    // beside the photo」, never on Save or an Analyze landing (owner's ruling
+    // 2026-11-17).
     ("the Lightroom XMP does not carry: {list} (recipe.json keeps all of it)",
         "Lightroom XMP 不会带走：{list}（recipe.json 全部保留）"),
     ("bitmap masks ×{n}", "位图蒙版 ×{n}"),
@@ -1562,8 +1573,24 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("AI segmenting {what}… (first run auto-downloads the model; failures are reported here)",
         "AI 分割{what}中…（首次运行自动下载模型；失败会在此报告）"),
     ("Reset to its default", "重置为默认值"),
-    ("Language & Theme apply immediately. The provider sections below persist via 「Save settings」 to autoshade.local.json in your per-user AutoShade folder (never in a repo) and apply to the next AI call (Analyze / Fill / Generate image).",
-        "「语言」与「主题」立即生效。下方的提供商设置经「保存设置」写入你 AutoShade 个人目录下的 autoshade.local.json（不在仓库里），对下一次 AI 调用生效（分析 / 填充 / AI 生成出片）。"),
+    // The Settings window's pages (2026-11-17): the navigation, the group
+    // and row labels the pages added, and the footer's two hints that
+    // replaced the intro paragraph.
+    ("General", "通用"),
+    ("Folders", "文件夹"),
+    ("AI models", "AI 模型"),
+    ("Advanced", "高级"),
+    ("About", "关于"),
+    ("Appearance", "外观"),
+    ("Folder", "文件夹"),
+    ("This photo", "这张照片"),
+    ("All photos", "全部照片"),
+    ("Path", "路径"),
+    ("Version", "版本"),
+    ("Changes on this page apply at once", "本页的更改立即生效"),
+    ("Changes on this page take effect after 「Save settings」", "本页的更改在点「保存设置」后生效"),
+    ("Saves to autoshade.local.json in your per-user AutoShade folder (never in a repo)",
+        "保存到你 AutoShade 个人目录下的 autoshade.local.json（不在仓库里）"),
 
     // ── Status bar · WB / range pick + manual mask placement ─────────────────
     ("WB eyedropper: {k} K · tint {tint} — fine-tune in the Tone section",
@@ -1816,8 +1843,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("empty — saved as OpenAI standard", "留空 = 按 OpenAI 标准保存"),
     ("✓ template is valid", "✓ 模板有效"),
     (
-        "Describe the provider's image-edit call as JSON, sent to the Base URL above with the API key below: \"path\" is added to the Base URL, \"body\" is what is sent, and \"reply\" is \"image\" when the answer is the picture itself, or a JSON pointer to its base64 (default /data/0/b64_json). In the body, {model} {prompt} {image} {image_data_url} {mask} {mask_data_url} {marked} {marked_data_url} {marked_note} {width} {height} {size} {quality} are filled in; {mask} is white where the picture should change. For a provider with no mask parameter, send {marked} (the picture with the painted area tinted red) as another image and put {marked_note} after {prompt}: it tells the model to change only the red area. All three are left out when nothing is painted.",
-        "用 JSON 写下改图请求，发往上面的基础 URL、带下面的 API 密钥：\"path\" 接在基础 URL 后面，\"body\" 是发送的内容，\"reply\" 填 \"image\" 表示回复本身就是图片，或填一个指向其 base64 的 JSON 指针（默认 /data/0/b64_json）。body 里的 {model} {prompt} {image} {image_data_url} {mask} {mask_data_url} {marked} {marked_data_url} {marked_note} {width} {height} {size} {quality} 会被填入实际值；{mask} 中白色是要改的区域。接口没有区域参数时，把 {marked}（涂抹区域染成红色的同一张图）作为另一张图发送，并在 {prompt} 后面接上 {marked_note}：它让模型只改红色区域。没有涂抹时这三项都不发。",
+        "Describe the provider's image-edit call as JSON, sent to the Base URL above with the API key above: \"path\" is added to the Base URL, \"body\" is what is sent, and \"reply\" is \"image\" when the answer is the picture itself, or a JSON pointer to its base64 (default /data/0/b64_json). In the body, {model} {prompt} {image} {image_data_url} {mask} {mask_data_url} {marked} {marked_data_url} {marked_note} {width} {height} {size} {quality} are filled in; {mask} is white where the picture should change. For a provider with no mask parameter, send {marked} (the picture with the painted area tinted red) as another image and put {marked_note} after {prompt}: it tells the model to change only the red area. All three are left out when nothing is painted.",
+        "用 JSON 写下改图请求，发往上面的基础 URL、带上面的 API 密钥：\"path\" 接在基础 URL 后面，\"body\" 是发送的内容，\"reply\" 填 \"image\" 表示回复本身就是图片，或填一个指向其 base64 的 JSON 指针（默认 /data/0/b64_json）。body 里的 {model} {prompt} {image} {image_data_url} {mask} {mask_data_url} {marked} {marked_data_url} {marked_note} {width} {height} {size} {quality} 会被填入实际值；{mask} 中白色是要改的区域。接口没有区域参数时，把 {marked}（涂抹区域染成红色的同一张图）作为另一张图发送，并在 {prompt} 后面接上 {marked_note}：它让模型只改红色区域。没有涂抹时这三项都不发。",
     ),
     ("⚠ takes no images, per /models", "⚠ 按 /models 所列，此模型不接受图像"),
     ("this model takes no tier, per /models — leave blank", "按 /models 所列，此模型没有推理等级，留空即可"),
@@ -1857,8 +1884,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Save develop (recipe + XMP for RAW)", "保存显影（recipe + RAW 的 XMP）"),
     ("Ctrl+Shift+E (or Ctrl+E) · full-resolution render to the Destination below (follows the current variant's pixels); Destination + settings live in the Export section",
         "Ctrl+Shift+E（或 Ctrl+E）· 全分辨率渲染到下方「目标位置」（跟随当前变体的像素）；目标位置与其余设置都在「导出」一节"),
-    ("Applied by 「Export」 in the toolbar (Ctrl+Shift+E, or Ctrl+E) and by 「Render selected」 in the library. The ▾ beside Export delivers one file to a path you pick without touching the Destination.",
-        "由工具栏的「导出」（Ctrl+Shift+E，或 Ctrl+E）和图库的「渲染选中」使用。「导出」旁的 ▾ 只把这一次的文件写到你选的路径，不改「目标位置」。"),
+    ("Applied by 「Export」 in the toolbar (Ctrl+Shift+E, or Ctrl+E) and by 「Render」 in the library. The ▾ beside Export delivers one file to a path you pick without touching the Destination.",
+        "由工具栏的「导出」（Ctrl+Shift+E，或 Ctrl+E）和图库的「渲染」使用。「导出」旁的 ▾ 只把这一次的文件写到你选的路径，不改「目标位置」。"),
     // R22-8 · SF8-A: hand the stored projection to Lightroom (which only ever
     // looks beside the photo). 边车 is this table's word for the RAW-adjacent
     // .xmp — see the terminology note in the XMP-save block.

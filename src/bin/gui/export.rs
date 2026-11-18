@@ -1030,17 +1030,56 @@ impl AutoShadeApp {
                     "Lightroom sidecar delivered → {path}",
                     &[("path", &abs_display(&to))],
                 );
-                // The file handed over is the projection of the SAVED develop,
-                // so its global half is said again here, where the user is
-                // about to open it in Lightroom (a colour field, a lens blur:
-                // the rendered exports carry them, the sidecar cannot). The
-                // mask half was said on the save that wrote the file.
-                let globals = autoshade::xmp::global_export_losses(&self.saved_recipe);
-                if let Some(m) = xmp_loss_line(lang, &[], &globals)
-                    && xmp_loss_interrupts(&[], &globals)
-                {
-                    self.toast(ToastKind::Error, m.clone());
-                    t = format!("{t} — ⚠ {m}");
+                // Both directions of the Lightroom disclosure are said HERE and
+                // nowhere else (owner's ruling 2026-11-17): what the sidecar
+                // cannot carry, and what Lightroom renders that this canvas
+                // does not. AutoShade is an independent program, and this
+                // click is the one moment the user asks for a Lightroom file.
+                // Save and the Analyze landing write the projection but say
+                // nothing about Lightroom.
+                //
+                // So this line says BOTH halves. The file handed over is the
+                // projection of the SAVED develop, and the verdicts are the
+                // writer's own for that develop: the mask half re-runs the
+                // projection the save ran (`pipeline::xmp_projection_bytes` —
+                // same clamp, same photo frame, same raster embedding; the
+                // bytes are discarded, nothing is written), the global half
+                // is the registry's (`xmp::global_export_losses`). Nothing is
+                // remembered from the save itself, so a photo saved in an
+                // earlier session gets the same sentence. A projection that
+                // cannot be rebuilt falls back to the writer's frame-less
+                // verdict (`xmp::mask_export_losses`) rather than to silence.
+                let saved = &self.saved_recipe;
+                let losses = autoshade::pipeline::xmp_projection_bytes(
+                    &path,
+                    saved,
+                    autoshade::diag::silent(),
+                )
+                .map(|(_, _, losses)| losses)
+                .unwrap_or_else(|_| autoshade::xmp::mask_export_losses(saved));
+                let globals = autoshade::xmp::global_export_losses(saved);
+                // The two voices (`xmp_loss_interrupts`): a loss the user can
+                // act on interrupts — an Error toast plus a ⚠ on the line —
+                // while the stamped engine calibration alone rides the quiet
+                // middle dot.
+                if let Some(m) = xmp_loss_line(lang, &losses, &globals) {
+                    if xmp_loss_interrupts(&losses, &globals) {
+                        self.toast(ToastKind::Error, m.clone());
+                        t = format!("{t} — ⚠ {m}");
+                    } else {
+                        t = format!("{t} · {m}");
+                    }
+                }
+                // The OPPOSITE corner, also said here and only here: what
+                // Lightroom will render that this canvas does not. The file
+                // handed over is complete — it is the canvas that is missing
+                // something — so this is never a loss, never a toast, never a
+                // ⚠: the quiet middle dot only. Same saved develop as above.
+                if let Some(m) = render_gap_line(
+                    lang,
+                    &autoshade::xmp::global_render_gaps(&self.saved_recipe),
+                ) {
+                    t = format!("{t} · {m}");
                 }
                 self.status = t.clone();
                 self.toast(ToastKind::Success, t);
@@ -1348,7 +1387,14 @@ impl AutoShadeApp {
                     )
                 } else if raw {
                     match xmp_outcome {
-                        Ok((merge_note, losses)) => {
+                        // What the projection cannot carry (the writer's mask
+                        // verdicts, the second member) is NOT said here: owner's
+                        // ruling 2026-11-17 — an independent program does not
+                        // warn about Lightroom when no Lightroom file was asked
+                        // for. The sentence is said by 「Export .xmp beside the
+                        // photo」 (`export_xmp_beside`), the one moment the user
+                        // hands the file to Lightroom.
+                        Ok((merge_note, _)) => {
                             let p = autoshade::pipeline::xmp_target(&path);
                             // A sidecar we could not MERGE was regenerated, and
                             // that drops the user's Lightroom-only properties.
@@ -1357,63 +1403,21 @@ impl AutoShadeApp {
                             if let Some(m) = &merge_note {
                                 self.toast(ToastKind::Error, m.clone());
                             }
-                            // M6a: the projection's own lossy edges — assembled
-                            // from what the WRITER just skipped/degraded, so the
-                            // counts describe this very file. Empty ⇒ silent.
-                            // R24-5 M0 adds the GLOBAL half beside the mask
-                            // half: an active control the engine renders and
-                            // the sidecar has no property for (the camera base
-                            // curve, the lens-profile correction) used to leave
-                            // no trace at all, and the difference only showed up
-                            // in Lightroom's render.
-                            //
-                            // WHETHER it interrupts is `xmp_loss_interrupts`'
-                            // call (R24 round-end MED-2): a base curve every
-                            // RAW open stamps is a real loss the user cannot
-                            // act on, and an error toast on every single
-                            // Ctrl+S is how the mask half — which they CAN act
-                            // on — stopped being read.
-                            let globals = autoshade::xmp::global_export_losses(&self.recipe);
-                            let interrupts = xmp_loss_interrupts(&losses, &globals);
-                            let mask_note = xmp_loss_line(lang, &losses, &globals);
-                            if let Some(m) = &mask_note
-                                && interrupts
-                            {
-                                self.toast(ToastKind::Error, m.clone());
-                            }
                             let base = trf(
                                 lang,
                                 "XMP + recipe saved → {path}",
                                 &[("path", &p.display().to_string())],
                             );
-                            let mut s = match merge_note {
+                            // Neither direction of the Lightroom disclosure is
+                            // said here — not what the sidecar cannot carry, not
+                            // what Lightroom renders and this canvas does not
+                            // (「Carried to Lightroom, not rendered here」).
+                            // Both are said at the hand-off, `export_xmp_beside`
+                            // (owner's ruling 2026-11-17).
+                            match merge_note {
                                 Some(m) => format!("{base} — ⚠ {m}"),
                                 None => base,
-                            };
-                            if let Some(m) = mask_note {
-                                // The quiet channel is the one the pixel-link
-                                // and re-look notes already use on this very
-                                // line: a middle dot, no ⚠.
-                                s.push_str(&if interrupts {
-                                    format!(" — ⚠ {m}")
-                                } else {
-                                    format!(" · {m}")
-                                });
                             }
-                            // R25 B4: the OPPOSITE corner, on the same line.
-                            // The sidecar just written is complete — it is the
-                            // canvas that is missing something, so this is
-                            // never a loss, never a toast, never a ⚠. Said
-                            // here because this is the moment the file goes to
-                            // Lightroom, which is when the difference between
-                            // the two renders starts to matter.
-                            if let Some(m) = render_gap_line(
-                                lang,
-                                &autoshade::xmp::global_render_gaps(&self.recipe),
-                            ) {
-                                s.push_str(&format!(" · {m}"));
-                            }
-                            s
                         }
                         Err(e) => {
                             let t = trf(

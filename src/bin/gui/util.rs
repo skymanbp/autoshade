@@ -326,24 +326,68 @@ pub(crate) fn fold_open_in_tests() -> Option<bool> {
 /// The id is PREDICTED (`next_auto_id`) and handed to the widget explicitly, so
 /// this frame's width can honour last frame's focus without a second widget or
 /// a caller-supplied salt.
+///
+/// The hint ends in 「…」 when it is longer than the box (`elided_hint`), and
+/// hovering an empty field then shows the whole hint.
 pub(crate) fn prompt_field(ui: &mut egui::Ui, buf: &mut String, hint: &str) -> egui::Response {
     let id = ui.next_auto_id();
     let focused = ui.memory(|m| m.has_focus(id));
     let avail = ui.available_width();
-    let w = if focused { avail } else { avail.min(FIELD_W_MAX) };
+    let w = (if focused { avail } else { avail.min(FIELD_W_MAX) }).max(FIELD_W_MIN);
+    let margin = field_margin(ui);
+    // The width egui gives the field's text: the asked width, held inside the
+    // row less the frame's margin (`TextEdit::show_content`).
+    let shown = elided_hint(ui, hint, w.min(avail - margin.sum().x));
+    let cut = shown.elided;
     let mut resp = ui.add(
         egui::TextEdit::singleline(buf)
             .id(id)
-            .desired_width(w.max(FIELD_W_MIN))
-            .hint_text(hint),
+            .margin(margin)
+            .desired_width(w)
+            .hint_text(shown),
     );
     // Allocate the tooltip string only while it is actually being shown (this
     // runs every frame for every prompt field). `buf`'s borrow ended with the
     // `add` above.
-    if resp.hovered() && !buf.trim().is_empty() {
-        resp = resp.on_hover_text(buf.clone());
+    if resp.hovered() {
+        if !buf.trim().is_empty() {
+            resp = resp.on_hover_text(buf.clone());
+        } else if cut && buf.is_empty() {
+            resp = resp.on_hover_text(hint);
+        }
     }
     resp
+}
+
+/// The horizontal margin inside a text field's frame — egui's own default.
+/// `TextEdit::desired_width` is the text area's width, inside this margin on
+/// each side; a field that is `w` wide on the outside asks for this much
+/// less, so fields and dropdowns of one width end on one edge.
+pub(crate) const FIELD_MARGIN_X: f32 = 4.0;
+
+/// The margin of every single-line text field in the app: it makes the field
+/// one row tall, like the buttons and dropdowns beside it. egui's own
+/// single-line field stands a few points shorter, so a field and a button on
+/// one row had two heights, and a field on its own row read as a thin pill
+/// among the rows around it. Grown by the vertical margin, not by a minimum
+/// size: egui lays a field's text at the top of whatever height it is given.
+///
+/// One function for every field (2026-11-17): the Settings window had this
+/// rule and the controls panel's fields did not. A row that budgets a field's
+/// width reads the same margin from here, so the arithmetic and the widget
+/// cannot disagree.
+pub(crate) fn field_margin(ui: &egui::Ui) -> egui::Margin {
+    let v = ((row_h(ui) - ui.text_style_height(&egui::TextStyle::Body)) / 2.0).max(2.0);
+    egui::Margin::symmetric(FIELD_MARGIN_X, v)
+}
+
+/// A field's hint, laid out to end in 「…」 at the width the field gives its
+/// text (2026-11-17). egui lays a single-line hint out at whatever length it
+/// has and lets the field's frame clip it, so a long hint ended in the middle
+/// of a letter at the frame's edge. `elided` on the result says whether
+/// anything was cut — the caller shows the whole hint on hover then.
+pub(crate) fn elided_hint(ui: &egui::Ui, hint: &str, text_width: f32) -> Arc<egui::Galley> {
+    egui::WidgetText::from(hint).into_galley(ui, Some(egui::TextWrapMode::Truncate), text_width, egui::TextStyle::Body)
 }
 
 /// Section header text with an activity dot when the section holds non-neutral
@@ -431,8 +475,12 @@ fn rotation_degrees(lang: Lang, degs: impl Iterator<Item = i32>) -> Option<Strin
 }
 
 /// The export-side lossy-projection disclosure (M6a, widened by R24-5 M0), in
-/// the UI language: ONE line naming what the Lightroom sidecar just written
-/// does NOT carry. Two buckets, one sentence:
+/// the UI language: ONE line naming what the Lightroom sidecar does NOT carry.
+/// Said only when the user hands that sidecar to Lightroom (「Export .xmp
+/// beside the photo」, `export_xmp_beside`) — never on Save or an Analyze
+/// landing, which write the projection but were not asked for a Lightroom
+/// file (owner's ruling 2026-11-17: an independent program does not warn about
+/// Lightroom unasked). Two buckets, one sentence:
 ///
 ///   * the MASK bucket, per category — and it NAMES the masks now, not just
 ///     counts them. "bitmap masks ×3" left the actionable half unsaid ("which
@@ -447,7 +495,7 @@ fn rotation_degrees(lang: Lang, degs: impl Iterator<Item = i32>) -> Option<Strin
 /// here, so the message can never describe a file that was not written or a
 /// tier that has moved.
 ///
-/// `None` for a faithful projection: a save that lost nothing must not
+/// `None` for a faithful projection: a hand-off that lost nothing must not
 /// interrupt (the four import-side disclosures follow the same rule).
 ///
 /// WHETHER the line interrupts is [`xmp_loss_interrupts`]' decision, not this
@@ -574,16 +622,18 @@ pub(crate) fn xmp_loss_line(
 }
 
 /// Does the loss line [`xmp_loss_line`] just produced deserve to INTERRUPT the
-/// save — an Error toast plus a ⚠ on the status line — or is it a note that
-/// belongs in the quiet channel beside it (R24 round-end MED-2)?
+/// hand-off to Lightroom — an Error toast plus a ⚠ on the status line — or is
+/// it a note that belongs in the quiet channel beside it?
 ///
-/// The rule the disclosure broke: "a save that lost nothing must not
-/// interrupt". `base_curve` is stamped onto the canvas by every RAW OPEN
-/// (`persist::stamp_calibration`), so `RenderedNotExported` is active on
-/// essentially every RAW — and every single Ctrl+S therefore raised an error
-/// toast about a loss that is real, universal and impossible to act on. Alarm
-/// on every save is alarm the user learns to ignore, and the mask half (which
-/// they CAN act on) went with it.
+/// The rule the disclosure broke when it was still said on every save: "a
+/// save that lost nothing must not interrupt". `base_curve` is stamped onto
+/// the canvas by every RAW OPEN (`persist::stamp_calibration`), so
+/// `RenderedNotExported` is active on essentially every RAW — and every single
+/// Ctrl+S raised an error toast about a loss that is real, universal and
+/// impossible to act on. Alarm that always fires is alarm the user learns to
+/// ignore, and the mask half (which they CAN act on) went with it. The line
+/// is said only at 「Export .xmp beside the photo」 now, and the same judgement
+/// keeps that click from crying wolf.
 ///
 /// The judgement comes from the registry, not from a list kept here:
 /// `catalogue::STAMPED_CALIBRATION` is the engine's own per-photo measurement
@@ -633,7 +683,11 @@ pub(crate) fn xmp_loss_interrupts(
 /// blocks. v1.5.0 renders them batch by batch (the Detail section's eight
 /// first), and a family that renders leaves this sentence with no edit here.
 /// Each carried slider says so in its own tooltip; this is the document-level
-/// sentence, said at the moment the file is handed to Lightroom.
+/// sentence, said at the moment the file is handed to Lightroom (「Export .xmp
+/// beside the photo」, `export_xmp_beside`) and only there — like
+/// [`xmp_loss_line`], never on Save or an Analyze landing (owner's ruling
+/// 2026-11-17: an independent program does not talk about Lightroom when no
+/// Lightroom file was asked for).
 ///
 /// NAMED BY SECTION, not by field. `post_crop_vignette_hl` is an internal
 /// symbol and R24 pinned those out of user prose; the develop panel's own
@@ -1070,13 +1124,25 @@ pub(crate) fn key_fingerprint(key: &str) -> u64 {
     h.finish()
 }
 
+/// A dropdown and a free-text field sharing `width` (the Settings window's
+/// one field width): the dropdown takes half, the field the rest after the
+/// row's gap — the field's `desired_width` is its text area, inside egui's
+/// 4 px margin each side. Returns (dropdown width, field desired width).
+fn pair_widths(ui: &egui::Ui, width: f32) -> (f32, f32) {
+    let gap = ui.spacing().item_spacing.x;
+    let combo = ((width - gap) / 2.0).floor();
+    (combo, (width - gap - combo - 8.0).max(0.0))
+}
+
 /// A model picker: a dropdown of `options` that writes the chosen id into `value`,
-/// next to a text field so any custom id can still be typed. Both edit `value`.
-pub(crate) fn model_picker(ui: &mut egui::Ui, salt: &str, value: &mut String, options: &[String], lang: Lang) {
+/// next to a text field so any custom id can still be typed. Both edit `value`;
+/// together they are `width` wide.
+pub(crate) fn model_picker(ui: &mut egui::Ui, salt: &str, value: &mut String, options: &[String], lang: Lang, width: f32) {
+    let (combo, field) = pair_widths(ui, width);
     let sel = if value.trim().is_empty() { tr(lang, "Select…").to_owned() } else { value.clone() };
     egui::ComboBox::from_id_salt(salt)
         .selected_text(sel)
-        .width(200.0)
+        .width(combo)
         .show_ui(ui, |ui| {
             for opt in options {
                 ui.selectable_value(value, opt.clone(), opt.as_str());
@@ -1084,7 +1150,8 @@ pub(crate) fn model_picker(ui: &mut egui::Ui, salt: &str, value: &mut String, op
         });
     ui.add(
         egui::TextEdit::singleline(value)
-            .desired_width(170.0)
+            .desired_width(field)
+            .margin(field_margin(ui))
             .hint_text(tr(lang, "or type a custom id")),
     );
 }
@@ -1103,7 +1170,9 @@ pub(crate) fn effort_picker(
     value: &mut String,
     tiers: &[&str],
     lang: Lang,
+    width: f32,
 ) {
+    let (combo, field) = pair_widths(ui, width);
     let sel = if value.trim().is_empty() {
         tr(lang, "provider default").to_owned()
     } else {
@@ -1111,7 +1180,7 @@ pub(crate) fn effort_picker(
     };
     egui::ComboBox::from_id_salt(salt)
         .selected_text(sel)
-        .width(200.0)
+        .width(combo)
         .show_ui(ui, |ui| {
             ui.selectable_value(value, String::new(), tr(lang, "provider default"));
             for t in tiers {
@@ -1120,7 +1189,8 @@ pub(crate) fn effort_picker(
         });
     ui.add(
         egui::TextEdit::singleline(value)
-            .desired_width(170.0)
+            .desired_width(field)
+            .margin(field_margin(ui))
             .hint_text(tr(lang, "or type a tier")),
     )
     .on_hover_text(tr(
@@ -1146,7 +1216,7 @@ pub(crate) fn tiers_note(ui: &mut egui::Ui, none: bool, lang: Lang) {
 ///
 /// A dropdown and nothing else: the three values are the whole set the
 /// config accepts, so a free-text field could only ever hold a typo.
-pub(crate) fn api_family_picker(ui: &mut egui::Ui, value: &mut String, lang: Lang) {
+pub(crate) fn api_family_picker(ui: &mut egui::Ui, value: &mut String, lang: Lang, width: f32) {
     const CHOICES: [(&str, &str); 3] = [
         ("auto", "Auto (Responses, then Chat)"),
         ("responses", "Responses API"),
@@ -1158,9 +1228,11 @@ pub(crate) fn api_family_picker(ui: &mut egui::Ui, value: &mut String, lang: Lan
         .find(|(v, _)| *v == current)
         .map(|(_, label)| tr(lang, label).to_owned())
         .unwrap_or_else(|| tr(lang, CHOICES[0].1).to_owned());
+    // `width`: the Settings window's one field width, which every dropdown
+    // and field of a page shares so they end on one edge.
     egui::ComboBox::from_id_salt("set_image_api_family")
         .selected_text(sel)
-        .width(200.0)
+        .width(width)
         .show_ui(ui, |ui| {
             for (v, label) in CHOICES {
                 ui.selectable_value(value, v.to_string(), tr(lang, label));

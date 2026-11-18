@@ -1,14 +1,16 @@
-// One part of the GUI's tests (src/bin/gui/tests.rs includes it): the save line, the import banner, the rotation warning, calibration losses and the control census against the engine.
+// One part of the GUI's tests (src/bin/gui/tests.rs includes it): the Lightroom loss line, the import banner, the rotation warning, calibration losses and the control census against the engine.
 
-    /// M6a: the save status line the user actually reads. The projection's
-    /// losses were disclosed on the IMPORT side four times over and on the
-    /// EXPORT side never — a sidecar quietly missing two AI masks looked like
-    /// a clean "XMP + recipe saved". The counts here come from the writer's
-    /// own verdicts (`xmp::mask_export_losses`); this pins that every category
-    /// reaches the UI, in both languages, and that a faithful save says
-    /// NOTHING (an unconditional line would train the user to ignore it).
+    /// M6a: the loss line the user reads when they hand the sidecar to
+    /// Lightroom (「Export .xmp beside the photo」 — the only moment it is said
+    /// since the owner's ruling of 2026-11-17). The projection's losses were
+    /// disclosed on the IMPORT side four times over and on the EXPORT side
+    /// never — a sidecar quietly missing two AI masks looked complete. The
+    /// counts here come from the writer's own verdicts
+    /// (`xmp::mask_export_losses`); this pins that every category reaches the
+    /// UI, in both languages, and that a faithful projection says NOTHING (an
+    /// unconditional line would train the user to ignore it).
     #[test]
-    fn the_save_line_names_every_projection_loss_and_stays_quiet_otherwise() {
+    fn the_loss_line_names_every_projection_loss_and_stays_quiet_otherwise() {
         use autoshade::xmp::{MaskLoss, MaskLossReason as R};
         let loss = |name: &str, reason: R| MaskLoss { name: name.into(), reason };
         let losses = vec![
@@ -57,7 +59,7 @@
             assert_eq!(line.matches('×').count(), 5, "{lang:?}: every category kept: {line}");
             assert!(
                 xmp_loss_line(lang, &[], &[]).is_none(),
-                "{lang:?}: a faithful save is silent"
+                "{lang:?}: a faithful projection is silent"
             );
             // One category alone must not drag the others' labels in.
             let one =
@@ -95,8 +97,8 @@
             assert!(globals.contains(tr(lang, "camera base curve")), "{lang:?}: {globals}");
             assert!(globals.contains(tr(lang, "lens profile correction")), "{lang:?}: {globals}");
             assert_eq!(globals.matches('×').count(), 0, "{lang:?}: no mask category: {globals}");
-            // Both buckets in ONE sentence - two toasts for one save would be
-            // two interruptions describing the same file.
+            // Both buckets in ONE sentence - two toasts for one hand-off would
+            // be two interruptions describing the same file.
             let both =
                 xmp_loss_line(lang, &[loss("sky", R::Bitmap)], &["base_curve"]).expect("a line");
             assert!(both.contains("sky") && both.contains(tr(lang, "camera base curve")));
@@ -106,8 +108,8 @@
         }
     }
 
-    /// The line a ZONED save actually produces now, which is two different
-    /// sentences in one breath.
+    /// The line a ZONED develop's sidecar produces at the hand-off, which is
+    /// two different sentences in one breath.
     ///
     /// The sky/land zones ride out as Lightroom's own Select Sky, so their
     /// entry is the AI one — nothing was left out of the sidecar, and what the
@@ -299,7 +301,7 @@
             // slider key rides in the reason, not on screen.
             assert!(!line.contains("::"), "{lang:?}: internal symbol in UI prose: {line}");
             assert!(!line.contains("InertLocal"), "{lang:?}: variant name on screen: {line}");
-            // A faithful import is silent, the same rule the save line follows.
+            // A faithful import is silent, the same rule the loss line follows.
             assert!(
                 xmp_import_line(lang, 4, &[]).is_none(),
                 "{lang:?}: a clean import says nothing"
@@ -480,17 +482,218 @@
         );
     }
 
-    /// R24 round-end MED-2: the same sentence, said in two different VOICES.
+    /// The owner's ruling of 2026-11-17: AutoShade is an independent program,
+    /// so the sentence naming what the Lightroom sidecar cannot carry is said
+    /// ONLY when the user hands that sidecar to Lightroom (「Export .xmp beside
+    /// the photo」). Save and the Analyze landing still WRITE the projection
+    /// and still say what they saved, but neither their status line nor any
+    /// toast mentions what Lightroom will not get. The hand-off then says the
+    /// WHOLE sentence — the mask half from the writer's verdicts on the saved
+    /// develop, the global half from the registry — and says it from an app
+    /// that never saw the save (a photo saved in an earlier session).
+    ///
+    /// MUTATIONS THIS CATCHES: (1) the loss line put back on Ctrl+S's status
+    /// or toast in `save_xmp`; (2) the same on the Analyze landing in
+    /// `on_analyzed`; (3) the hand-off saying only the global half again
+    /// (`xmp_loss_line(lang, &[], &globals)`) — the bitmap-mask assertion
+    /// fails; (4) the hand-off dropping the global half — the base-curve
+    /// assertion fails; (5) the hand-off losing its interrupting voice — no
+    /// Error toast for a bitmap mask; (6) the mask verdicts taken from
+    /// anything the save left in the app rather than from the saved develop —
+    /// the fresh app below has none, and the mask half goes missing.
+    #[test]
+    fn the_lightroom_loss_line_is_said_only_when_the_sidecar_is_handed_over() {
+        use autoshade::recipe::{LocalAdjustment, MaskGeometry};
+        use autoshade::xmp::MaskLossReason as R;
+        let lang = crate::i18n::Lang::En;
+        let dir = std::env::temp_dir()
+            .join(format!("autoshade-gui-loss-at-handoff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_loss_at_handoff.arw");
+        std::fs::write(&raw, b"raw").unwrap(); // the store keys by path; nothing decodes it
+        let dev = autoshade::store::develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        let _scrub = Scrub(vec![dir.clone(), dev.clone()]);
+        let alpha = dir.join("sky_alpha.png");
+        image::GrayImage::from_fn(8, 8, |x, _| image::Luma([if x < 4 { 255 } else { 0 }]))
+            .save(&alpha)
+            .unwrap();
+        let develop = EditRecipe {
+            base_curve: vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]],
+            masks: vec![LocalAdjustment {
+                name: "sky".into(),
+                mask: MaskGeometry::Bitmap { path: alpha.to_string_lossy().into_owned() },
+                exposure_ev: 0.4,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // Premise: the writer and the registry DO have something to say about
+        // this develop, or every "silent" assertion below would pass vacuously.
+        let globals = autoshade::xmp::global_export_losses(&develop);
+        assert!(globals.contains(&"base_curve"), "premise, the global half: {globals:?}");
+        let losses = autoshade::xmp::mask_export_losses(&develop);
+        assert!(
+            losses.iter().any(|l| l.name == "sky" && l.reason == R::Bitmap),
+            "premise, the mask half: {losses:?}"
+        );
+        let sentence =
+            tr(lang, "the Lightroom XMP does not carry: {list} (recipe.json keeps all of it)");
+        let head = sentence.split("{list}").next().expect("the frame has a head");
+        assert!(head.len() > 10, "a real prefix to search for: {head:?}");
+        // Either direction of the Lightroom disclosure counts: the loss line,
+        // and the render-gap line 「Carried to Lightroom, not rendered here」.
+        // The second is silent on every real recipe today (no control is
+        // carried-only), so its half of this check cannot fail on its own —
+        // `the_render_gap_line_is_wired_only_into_the_handoff` pins it.
+        let gap_head = tr(lang, "Carried to Lightroom, not rendered here");
+        let loss_said = |app: &AutoShadeApp| -> Option<String> {
+            std::iter::once(app.status.clone())
+                .chain(app.toasts.iter().map(|t| t.text.clone()))
+                .find(|t| t.contains(head) || t.contains(gap_head))
+        };
+
+        // (1) Ctrl+S writes the projection and says nothing about Lightroom.
+        let mut app = AutoShadeApp {
+            lang,
+            src_path: Some(raw.clone()),
+            recipe: develop.clone(),
+            ..Default::default()
+        };
+        app.save_xmp();
+        assert!(app.status.starts_with("XMP + recipe saved"), "the save line stands: {}", app.status);
+        assert!(autoshade::store::xmp_target(&raw).exists(), "the projection is still written on save");
+        assert_eq!(
+            loss_said(&app),
+            None,
+            "RULE (owner, 2026-11-17): Save says nothing about what the Lightroom sidecar \
+             cannot carry — no Lightroom file was asked for"
+        );
+
+        // (2) An accepted Analyze landing saves like Ctrl+S, and is as quiet.
+        app.toasts.clear();
+        let epoch = app.gen_epoch;
+        let accept = autoshade::advisor::Verdict {
+            decision: autoshade::advisor::Decision::Accept,
+            reasons: Vec::new(),
+            revised_hint: None,
+        };
+        app.on_analyzed(lang, epoch, Box::new(Ok((develop.clone(), accept, Vec::new()))));
+        assert!(
+            app.status.starts_with("AI develop applied · saved"),
+            "the landing saved: {}",
+            app.status
+        );
+        assert_eq!(
+            loss_said(&app),
+            None,
+            "RULE (owner, 2026-11-17): an Analyze landing says nothing about what the \
+             Lightroom sidecar cannot carry — no Lightroom file was asked for"
+        );
+
+        // (3) The hand-off, from an app that never saw either write: its saved
+        // develop is what an open would have loaded, and nothing else.
+        let mut fresh = AutoShadeApp {
+            lang,
+            src_path: Some(raw.clone()),
+            recipe: develop.clone(),
+            saved_recipe: develop.clone(),
+            ..Default::default()
+        };
+        fresh.export_xmp_beside();
+        assert!(raw.with_extension("xmp").exists(), "delivered: {}", fresh.status);
+        assert!(
+            fresh.status.contains(head),
+            "RULE: 「Export .xmp beside the photo」 says what the sidecar cannot carry: {}",
+            fresh.status
+        );
+        assert!(
+            fresh.status.contains(&trf(lang, "bitmap masks ×{n}", &[("n", "1")]))
+                && fresh.status.contains("(sky"),
+            "the MASK half, from the writer's verdicts on the saved develop: {}",
+            fresh.status
+        );
+        assert!(
+            fresh.status.contains(tr(lang, "camera base curve")),
+            "the GLOBAL half, from the registry: {}",
+            fresh.status
+        );
+        assert!(
+            fresh
+                .toasts
+                .iter()
+                .any(|t| matches!(t.kind, ToastKind::Error) && t.text.contains(head)),
+            "a bitmap mask is actionable, so the hand-off interrupts: {:?}",
+            fresh.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+    }
+
+    /// The OTHER direction of the Lightroom disclosure — 「Carried to
+    /// Lightroom, not rendered here」 — under the same ruling (owner,
+    /// 2026-11-17): said at the hand-off to Lightroom and nowhere else.
+    ///
+    /// A SOURCE PIN, and why: the line is built from the registry's
+    /// carried-only globals (`xmp::global_render_gaps`), v1.5.0 rendered every
+    /// one of them, and the registry is a static slice — so no real recipe can
+    /// make Save or an Analyze landing WANT to say it today, and the
+    /// behavioural "they stay silent" assertion in
+    /// `the_lightroom_loss_line_is_said_only_when_the_sidecar_is_handed_over`
+    /// would pass on the old wiring too. The wiring is read off the source
+    /// instead; the line's own wording is pinned by name in
+    /// `the_render_gap_line_appears_only_when_something_is_carried`.
+    ///
+    /// MUTATIONS THIS CATCHES: (1) the call put back on the Save path —
+    /// a second call in export.rs, outside `export_xmp_beside`; (2) the call
+    /// put back on the Analyze landing — any call in workers.rs; (3) the call
+    /// removed from `export_xmp_beside`; (4) it fed anything but the saved
+    /// develop the delivered file projects.
+    #[test]
+    fn the_render_gap_line_is_wired_only_into_the_handoff() {
+        let export = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/gui/export.rs"));
+        let workers =
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/gui/workers.rs"));
+        let call = "render_gap_line(";
+        assert_eq!(
+            workers.matches(call).count(),
+            0,
+            "RULE (owner, 2026-11-17): the Analyze landing says nothing about Lightroom — \
+             no render-gap line in workers.rs"
+        );
+        assert_eq!(
+            export.matches(call).count(),
+            1,
+            "RULE (owner, 2026-11-17): one render-gap line in export.rs, at the hand-off — \
+             Save says nothing about Lightroom"
+        );
+        let start = export.find("fn export_xmp_beside(").expect("the hand-off exists");
+        // The method ends at the first line holding only its 4-space-indented
+        // closing brace (a deeper one has more leading spaces and cannot
+        // match).
+        let len = export[start..].find("\n    }").expect("the hand-off ends");
+        let handoff = &export[start..start + len];
+        assert!(
+            handoff.contains(call),
+            "the render-gap line is said inside `export_xmp_beside`, the hand-off"
+        );
+        assert!(
+            handoff.contains("global_render_gaps(&self.saved_recipe)"),
+            "…from the SAVED develop the delivered file projects, not the live canvas"
+        );
+    }
+
+    /// The same sentence, said in two different VOICES at the hand-off to
+    /// Lightroom (「Export .xmp beside the photo」).
     ///
     /// `base_curve` is stamped on every RAW open, so the global bucket is
     /// non-empty on essentially every RAW — and an Error toast plus a status ⚠
-    /// on every single Ctrl+S breaks this surface's own rule ("a save that
-    /// lost nothing must not interrupt") in spirit: the loss is real but
+    /// on every hand-off would break this surface's own rule ("a projection
+    /// that lost nothing must not interrupt") in spirit: the loss is real but
     /// universal and unactionable, and alarm that always fires is alarm that
-    /// stops being read. The judgement is the registry's `engine_only` bit —
-    /// the engine's own per-photo measurement vs something the user chose.
+    /// stops being read. The judgement is the registry's — the engine's own
+    /// per-photo measurement vs something the user chose.
     #[test]
-    fn engine_calibration_losses_are_disclosed_without_interrupting_the_save() {
+    fn engine_calibration_losses_are_disclosed_without_interrupting_the_handoff() {
         use autoshade::advisor::catalogue::{Tier, RECIPE_CONTROLS, STAMPED_CALIBRATION};
         use autoshade::xmp::{MaskLoss, MaskLossReason as R};
 
@@ -542,7 +745,7 @@
         // The quiet arm: the real, universal case — a stamped base curve.
         assert!(
             !xmp_loss_interrupts(&[], &["base_curve"]),
-            "a stamped camera base curve must not raise an error toast on every save"
+            "a stamped camera base curve must not raise an error toast on every hand-off"
         );
         assert!(
             !xmp_loss_interrupts(&[], &["base_curve", "lens_profile"]),

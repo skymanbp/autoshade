@@ -270,9 +270,13 @@ fn adopt_pre_rename_prefs() -> &'static str {
     }
 }
 
+/// The AutoShade icon, embedded once: the window's icon and the bars' app
+/// mark (`window_chrome::app_mark`) decode these same bytes.
+pub(crate) const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/icon_256.png");
+
 /// Decode the embedded AutoShade icon for the window title bar / taskbar.
 fn app_icon() -> egui::IconData {
-    let img = image::load_from_memory(include_bytes!("../../../assets/icon_256.png"))
+    let img = image::load_from_memory(APP_ICON_PNG)
         .expect("embedded icon decodes")
         .to_rgba8();
     let (width, height) = img.dimensions();

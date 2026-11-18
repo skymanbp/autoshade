@@ -2879,7 +2879,7 @@ impl AutoShadeApp {
                     });
                 });
                 ui.label(egui::RichText::new(&in_force).small().weak());
-                ui.checkbox(&mut prompt.dont_ask, tr(lang, "Don't ask again after generating"))
+                check(ui, &mut prompt.dont_ask, tr(lang, "Don't ask again after generating"))
                     .on_hover_text(tr(lang, "Turn it back on at the foot of the AI panel's 「Generate whole image」 fold: 「Ask after each AI generation」"));
                 ui.add_space(SPACE_MD);
                 // The safe answer first, the primary tinted and last — the

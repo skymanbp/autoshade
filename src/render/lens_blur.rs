@@ -20,7 +20,7 @@
 //!
 //! Like a pixel layer it runs LAST in the develop, on the finished picture, at
 //! stored (pre-geometry) coordinates, and like one it has no place in a
-//! Lightroom sidecar: the save line names it.
+//! Lightroom sidecar: the sidecar's loss line names it.
 //!
 //! **Protection (v1.14.0, the Portraits mode).** A blur may name a soft mask
 //! raster, [`LensBlur::protect`] — in practice the subject matte — and every
@@ -31,7 +31,7 @@
 //! bleed into the background beside them. Lightroom's own Lens Blur has no
 //! such input, which changes nothing about the sidecar — the blur was never
 //! written there — and the matte itself is an ordinary bitmap mask, skipped by
-//! the writer and named on the save line like any other.
+//! the writer and named on the sidecar's loss line like any other.
 
 use super::layers::{decode_cached, load_budgeted, DecodeSlot, RasterKind};
 use super::mask_raster::{sample_gray_norm, sample_texels_norm};

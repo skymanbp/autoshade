@@ -187,6 +187,18 @@ impl AutoShadeApp {
         self.verdict.is_some() || !self.rationale.is_empty()
     }
 
+    /// How tall the analysis text stands when it is wrapped at `width` — a
+    /// measurement only. The same drawing code runs on a child that paints
+    /// nothing, takes no room in `ui`, and is clipped to nothing, so no
+    /// pointer can land on what it laid out.
+    fn analysis_height_at(&self, ui: &mut egui::Ui, width: f32) -> f32 {
+        let at = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(width, 0.0));
+        let mut probe = ui.new_child(egui::UiBuilder::new().id_salt("analysis_measure").max_rect(at).invisible());
+        probe.set_clip_rect(egui::Rect::NOTHING);
+        self.analysis_output(&mut probe);
+        probe.min_rect().height()
+    }
+
     /// What one Analyze run wrote — the verdict, the rationale sentence and
     /// the deep-thinking working — drawn by both the Analysis fold's bounded
     /// box and the full-text window, so the two can never disagree.
@@ -308,31 +320,56 @@ impl AutoShadeApp {
             // sentence and the deep-thinking working scroll inside
             // ANALYSIS_BOX_MAX_H, and once they overflow it a verb opens the
             // whole text in a window of its own (`analysis_full_window`).
+            //
+            // The box's height, and whether the verb is offered, are decided
+            // by how tall the text stands at the panel's NARROWEST width
+            // (2026-11-17), not at the width it is drawn at. The box used to
+            // shrink to its text and offer the verb on overflow, both read
+            // off the drawn frame: a few lines of analysis took one line
+            // fewer as the panel's edge was dragged wider, the box lost that
+            // line, the verb came and went, and every row below moved. The
+            // text still fills the box's real width — a wider box may end
+            // with a little air under its last line.
             if self.has_analysis_output() {
-                let out = egui::Frame::group(ui.style())
+                let mut need = 0.0;
+                // The box's drawn rect is read by the tests alone, now that
+                // the verb below is decided by `need`.
+                let _box = egui::Frame::group(ui.style())
                     .show(ui, |ui| {
+                        need = self.analysis_height_at(ui, steady_width(ui));
                         egui::ScrollArea::vertical()
                             .id_salt("ai_analysis_box")
-                            .max_height(ANALYSIS_BOX_MAX_H)
-                            .auto_shrink([false, true])
+                            .max_height(need.min(ANALYSIS_BOX_MAX_H))
+                            .auto_shrink([false, false])
                             .show(ui, |ui| self.analysis_output(ui))
                     })
                     .inner;
                 #[cfg(test)]
                 {
-                    self.analysis_box_rect = Some(out.inner_rect);
+                    self.analysis_box_rect = Some(_box.inner_rect);
                 }
-                if out.content_size.y > out.inner_rect.height() + 0.5
-                    && action_row(ui, true, tr(lang, "View full text…")).clicked()
-                {
+                if need > ANALYSIS_BOX_MAX_H + 0.5 && action_row(ui, true, tr(lang, "View full text…")).clicked() {
                     self.show_analysis_full = true;
                 }
             }
             // Library OR direction (user ruling 2026-10-14): the switch heads
             // the controls it chooses between, and greys the other side.
+            //
+            // Each choice's name is a small caption on a line of its own, and
+            // its radios stand on one row under it (2026-11-17). With the
+            // name in front of the radios, the row wrapped where its labels
+            // ran out of room, and on the panel's real width that point came
+            // and went as the edge was dragged — the third radio dropped to a
+            // line of its own and everything below jumped 32 px. Under their
+            // caption the radios fit one row at the panel's narrowest width
+            // in both languages, and the two rows begin on one x.
+            // `steady_wrapped` stays as the container: a longer translation
+            // would wrap at the steady width — one number of lines whatever
+            // the panel's width — where a plain row would push the panel
+            // wider.
             use autoshade::pipeline::Guide;
-            ui.horizontal_wrapped(|ui| {
-                ui.label(tr(lang, "Guided by"));
+            sub_caption(ui, tr(lang, "Guided by"));
+            steady_wrapped(ui, |ui| {
                 ui.radio_value(&mut self.guide, Guide::Library, tr(lang, "Reference library")).on_hover_text(tr(
                     lang,
                     "The AI follows the finished photos in your reference library closest to this one; the Direction text is not sent.",
@@ -346,8 +383,8 @@ impl AutoShadeApp {
             // the image-model key; elsewhere the controls answer runs and the
             // rationale says why.
             use autoshade::pipeline::AnalysisApproach;
-            ui.horizontal_wrapped(|ui| {
-                ui.label(tr(lang, "Analysis method"));
+            sub_caption(ui, tr(lang, "Analysis method"));
+            steady_wrapped(ui, |ui| {
                 ui.radio_value(&mut self.analysis_approach, AnalysisApproach::Auto, tr(lang, "Auto")).on_hover_text(tr(
                     lang,
                     "The AI proposes the slider values first. Only when the visual review scores that develop below 75 of 100 (its own 'clearly improvable' band) does it also state the look, reverse-fit it locally and look at both develops side by side, keeping the stated look only when it wins. COST: the same as Controls when the review scores 75 or more; otherwise two more image calls and one local reverse fit (minutes).",
@@ -508,7 +545,7 @@ impl AutoShadeApp {
             // R23-4 (feedback #13): the THIRD analysis-side control, under the two
             // dials it modifies — the target score and round budget it unlocks are
             // read off the Strength band directly above it.
-            ui.checkbox(&mut self.deep_think, tr(lang, "Deep thinking"))
+            check(ui, &mut self.deep_think, tr(lang, "Deep thinking"))
                 .on_hover_text(tr(lang,
                     "Make the AI show its work and let it iterate. The proposal must first name what it sees, decide EACH tool family (tone / white balance / presence / HSL / colour grading / curves / detail / framing / masks) with a reason, state the look it is going for, and end by critiquing its own answer — those three sentences land in the 「Deep thinking」 box under the rationale. It also asks the image model for one step more reasoning effort (only when a tier other than 「provider default」 is set in Settings), and lets the visual judge keep going until it scores well enough: 2 rounds at a balanced Strength, 3 above 70%. COST: a normal analyze is at worst 11 API calls (6 with images, 9 high-detail frames); with this box ticked OR Strength above 70% — either one alone is enough — it is at worst 17 calls (10 with images, 17 high-detail), plus roughly 10-20% more output tokens per proposal. Batch and the eval harness never do this.",
                 ));
@@ -605,7 +642,7 @@ impl AutoShadeApp {
                     } else {
                         tr(lang, "Style is at 0%: the analysis reads no library")
                     };
-                    ui.label(egui::RichText::new(why).weak().small());
+                    steady_note(ui, why);
                 }
                 ui.add_enabled_ui(reads_a_library, |ui| {
                     #[cfg(test)]
@@ -727,11 +764,11 @@ impl AutoShadeApp {
                 Some(d) => abs_display(d),
                 None => tr(lang, "no RAW folder: references go without settings").to_string(),
             };
-            ui.label(egui::RichText::new(raw_note).small().weak());
+            steady_note(ui, raw_note);
             if pick_raw && let Some(d) = rfd::FileDialog::new().pick_folder() {
                 self.style_raw_dir = Some(d);
             }
-            ui.checkbox(&mut self.style_describe, tr(lang, "Write look phrases (local model)"))
+            check(ui, &mut self.style_describe, tr(lang, "Write look phrases (local model)"))
                 .on_hover_text(tr(lang,
                     "A local model (Qwen3-VL-2B, 4.3 GB, downloaded once; builds get slower) writes a few phrases per photo about its GRADE — \"warm, faded, low contrast\" — which go to the AI beside each reference. Nothing leaves this machine and nothing is billed. Off = the references go without words.",
                 ));
@@ -771,7 +808,7 @@ impl AutoShadeApp {
     fn ai_library_use(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         let built = matches!(self.style_info, Some(autoshade::library::Summary::Built { .. }));
-        ui.checkbox(&mut self.style_embed, tr(lang, "Search the library when analysing"))
+        check(ui, &mut self.style_embed, tr(lang, "Search the library when analysing"))
             .on_hover_text(tr(lang,
                 "Each analysis measures this photo with a local model (SigLIP 2, 1.5 GB, downloaded once) and picks the closest references. Building a library turns this on, since the build has already downloaded the model.",
             ));
@@ -783,7 +820,7 @@ impl AutoShadeApp {
             );
         }
         ui.add_enabled_ui(built && self.style_embed, |ui| {
-            ui.checkbox(&mut self.send_style_ref_image, tr(lang, "Also show the model the reference photos"))
+            check(ui, &mut self.send_style_ref_image, tr(lang, "Also show the model the reference photos"))
                 .on_hover_text(if built {
                     tr(lang,
                         "WILL UPLOAD UP TO 3 MORE IMAGES per analysis call: the closest reference photos, so the model can match their look by eye as well as by words. COST: each is billed as one more image — and a revision round sends them again. They are never stored by the provider (store:false), and the rationale says how many went. Off = the references go as words only.",
@@ -836,9 +873,10 @@ impl AutoShadeApp {
                     // auto-fitting side panel by that surplus EVERY frame
                     // (probed: +8 px/frame runaway when the TextEdit's own
                     // frame margin was left out of the reserve). The margin
-                    // is therefore pinned HERE and handed to the widget, so
-                    // the arithmetic and the widget can never disagree.
-                    const TE_MARGIN: egui::Margin = egui::Margin::symmetric(4.0, 2.0);
+                    // is therefore read ONCE here — the app's one field
+                    // margin, `util::field_margin` — and handed to the widget,
+                    // so the arithmetic and the widget can never disagree.
+                    let te_margin = field_margin(ui);
                     let btn_label = tr(lang, "✨ Generate image");
                     let btn_w = ui
                         .painter()
@@ -867,14 +905,21 @@ impl AutoShadeApp {
                     let field_w = (ui.available_width()
                         - btn_w
                         - ui.spacing().item_spacing.x
-                        - TE_MARGIN.sum().x)
+                        - te_margin.sum().x)
                         .clamp(FIELD_W_MIN, FIELD_W_MAX);
+                    // The hint ends in 「…」 where the field ends, and an empty
+                    // field shows the whole of it on hover (2026-11-17) — it
+                    // used to run on under the frame and stop mid-letter.
+                    let hint = tr(lang, "style to repaint toward — e.g. golden-hour glow, moody film look");
+                    let shown = elided_hint(ui, hint, field_w);
+                    let cut = shown.elided && self.reimagine_prompt.is_empty();
                     let _field = ui.add(
                         egui::TextEdit::singleline(&mut self.reimagine_prompt)
-                            .margin(TE_MARGIN)
+                            .margin(te_margin)
                             .desired_width(field_w)
-                            .hint_text(tr(lang, "style to repaint toward — e.g. golden-hour glow, moody film look")),
+                            .hint_text(shown),
                     );
+                    let _field = if cut { _field.on_hover_text(hint) } else { _field };
                     #[cfg(test)]
                     {
                         self.prompt_rects.push(_field.rect);
@@ -901,7 +946,7 @@ impl AutoShadeApp {
                 });
                 // Its OWN row, deliberately: a fourth item in the wrapped
                 // prompt+button row re-opens the R19 width arithmetic.
-                ui.checkbox(
+                check(ui, 
                     &mut self.reimagine_retry,
                     tr(lang, "auto-retry once if the result diverges"),
                 )
@@ -919,7 +964,7 @@ impl AutoShadeApp {
                 // (v1.17.0). It sat in the reverse-fit fold until the stepped
                 // strength (2026-11-10); it is about what happens AFTER a
                 // generation, so it closes this fold. A preference: no gate.
-                ui.checkbox(&mut self.ask_fit_after_generate, tr(lang, "Ask after each AI generation"))
+                check(ui, &mut self.ask_fit_after_generate, tr(lang, "Ask after each AI generation"))
                     .on_hover_text(tr(lang,
                         "When 「AI generate」 lands a new ✨ card, ask whether to reverse-fit it and from which negative (the ▣ original unless you pick another).",
                     ));
@@ -950,8 +995,13 @@ impl AutoShadeApp {
                 {
                     self.prompt_rects.push(_field.rect);
                 }
+                // One cell of the two-column grid, and it says what it sets
+                // (2026-11-17): the bare 「high ▾」 at its text's own width
+                // named no setting and lined up with nothing. 「Quality · …」
+                // is the Normal panel's own spelling of the same dropdown.
                 egui::ComboBox::from_id_salt("adjust_quality")
-                    .selected_text(tr(lang, ["high", "medium", "low"][self.adjust_quality.min(2)]))
+                    .selected_text(format!("{} · {}", tr(lang, "Quality"), tr(lang, ["high", "medium", "low"][self.adjust_quality.min(2)])))
+                    .width(columns(ui, 2).x)
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.adjust_quality, 0, tr(lang, "high"));
                         ui.selectable_value(&mut self.adjust_quality, 1, tr(lang, "medium"));
@@ -969,7 +1019,7 @@ impl AutoShadeApp {
                 } else {
                     tr(lang, "whole image (paint an area to limit it)")
                 };
-                ui.label(egui::RichText::new(note).weak().small());
+                steady_note(ui, note);
                 let resp = primary_row(ui, self.can_adjust(), tr(lang, "✨ Adjust"))
                     .on_hover_text(tr(lang,
                         "Change the generated picture with the prompt: the whole image, or only the painted area when this section's brush has strokes (blank = remove there). One gpt-image call per adjust — costs per image. The result is a new ✨ AI generated card; this card stays as it is; crop / straighten are not carried (set them on the new card). Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
@@ -1035,7 +1085,7 @@ impl AutoShadeApp {
                     tr(lang,
                         "Pick a reference below, or generate an image and stay on that variant, to reverse-fit a recipe.")
                 };
-                ui.label(egui::RichText::new(note).weak().small());
+                steady_note(ui, note);
             }
             // ── the SOURCE row (2026-09-30, user decision): which negative the
             // fit solves FROM — the ▣ card or any ◈ / ▦ master — named and
@@ -1059,7 +1109,10 @@ impl AutoShadeApp {
                     // `available_width()` alone stretched it across a wide
                     // panel (2026-10-01 user report).
                     let row = columns(ui, 1).x;
-                    let label = ui.label(tr(lang, "From:")).rect.width();
+                    // `row_label`: the one look of a name in front of a
+                    // dropdown; its cell is the text's width rounded up, which
+                    // is what comes off the menu's budget.
+                    let label = row_label(ui, tr(lang, "From:"), &[]).rect.width().ceil();
                     let menu = (row - label - ui.spacing().item_spacing.x).max(FIELD_W_MIN);
                     let _menu = ui.add_enabled_ui(!busy, |ui| {
                         egui::ComboBox::from_id_salt("fit_from")
@@ -1094,7 +1147,7 @@ impl AutoShadeApp {
             // ── the TARGET, named when it is the active card (a picked
             // reference file names itself in the row below).
             if let Some(to) = to {
-                ui.label(egui::RichText::new(to).weak().small());
+                steady_note(ui, to);
             }
             // ── the REFERENCE row (R23-6 B): any finished rendition of this same
             // frame — your own Lightroom export, the camera's JPEG, another RAW

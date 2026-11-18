@@ -2281,7 +2281,24 @@ than the pre-call state; model weights remain outside the repository.
   variants, versions, and deleted-version identity registry.
 - `src/bin/gui/buttons.rs` — the button vocabulary (R38): primary / action /
   glyph square / toggle, every one exactly one row tall, grid cells for rows
-  of equal verbs; the layout pin renders every panel in both languages.
+  of equal verbs; the layout pin renders every panel in both languages. The
+  other inputs take the same grid: a named dropdown runs from one label cell
+  to the row's right edge, a checkbox is a square box, and a text field takes
+  the one field margin (`util::field_margin`) that makes it a row tall.
+- `src/bin/gui/side_panel.rs` — the two side panels' width rules. The drag
+  alone sets either panel's width, never its content: the library from 240 px
+  and the controls from 320 px, each to the cap at which its column is 420 px.
+  And in the controls column a drag changes how wide a row is, never how tall
+  — whatever takes its height from a width (a wrapping row, a note, the colour
+  wheels, the curve editor, the analysis box) measures against the narrowest
+  width. The width pin lays that column out at four widths, in both languages
+  and three modes.
+- `src/bin/gui/panels/gallery.rs` — the library column: the title row with
+  Open folder… at its far end, the folder line, the batch verbs as two rows of
+  two equal cells (Copy | Paste, Render | Deselect) with the paste option
+  under them, and the thumbnail rows. What stands above the thumbnails keeps
+  one height in every state of the clipboard and the pick; its pin lays the
+  column out in seven states at three widths in both languages.
 - `src/bin/gui/headings.rs` — the side panel's three heading levels (panel
   title over a gold rule, gold group head, sub-caption; v1.7.0).
 - `src/serve.rs` and `src/web/` — embedded web UI and loopback defenses.

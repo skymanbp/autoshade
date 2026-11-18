@@ -654,7 +654,7 @@ pub struct EditRecipe {
     /// fill made on this card lands HERE, as a layer, instead of as a new ✨
     /// card — see [`crate::render::PixelLayer`]. Engine-only and, like
     /// `retouch`, rendered but never written to the sidecar: Lightroom has no
-    /// element for a pixel layer, and the save line says so.
+    /// element for a pixel layer, and the sidecar's loss line says so.
     #[serde(default)]
     pub pixel_layers: Vec<crate::render::PixelLayer>,
 

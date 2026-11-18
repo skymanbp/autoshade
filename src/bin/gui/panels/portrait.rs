@@ -694,11 +694,14 @@ impl AutoShadeApp {
             tr(lang, "How strong the look is. Double-click to reset."),
         );
         let line = self.portrait_line_text(lang);
-        ui.horizontal_wrapped(|ui| {
+        // The line wraps at the panel's narrowest width (`steady_label`,
+        // 2026-11-17), so a drag of the panel's edge cannot change how many
+        // lines it takes and move the groups below it.
+        ui.horizontal(|ui| {
             if self.portrait.line == PortraitLine::Finding || (self.portrait.line == PortraitLine::Looking && self.analyze_inflight) {
                 ui.spinner();
             }
-            ui.label(egui::RichText::new(line).small());
+            steady_label(ui, egui::RichText::new(line).small());
         });
         if find {
             self.start_find_people();
@@ -730,8 +733,7 @@ impl AutoShadeApp {
             changed |= Self::slider_hinted(ui, lang, tr(lang, "Skin colour intensity"), &mut m.saturation, -100.0, rich, 0.0, tr(lang, "Paler to the left, richer to the right — on the skin only."));
         });
         let mut on = guarded;
-        let flipped = ui
-            .checkbox(&mut on, tr(lang, "Keep skin natural"))
+        let flipped = check(ui, &mut on, tr(lang, "Keep skin natural"))
             .on_hover_text(tr(
                 lang,
                 "On: skin colour can be made only a little richer, warmer, cooler or shifted in tone, softening stops before the skin looks fake, and skin is never sharpened. This holds for your own changes and for the AI's.",
@@ -751,7 +753,7 @@ impl AutoShadeApp {
             self.start_remove_blemishes();
         }
         if let Some(why) = gate {
-            ui.label(egui::RichText::new(why).weak().small());
+            steady_note(ui, why);
         }
         changed
     }
@@ -775,7 +777,7 @@ impl AutoShadeApp {
             }
         });
         if let Some(why) = gate {
-            ui.label(egui::RichText::new(why).weak().small());
+            steady_note(ui, why);
         }
         changed
     }
@@ -800,8 +802,7 @@ impl AutoShadeApp {
             changed |= Self::slider(ui, lang, tr(lang, "Blur amount"), &mut lb.amount, 0.0, 100.0, 50.0);
             changed |= Self::slider_hinted(ui, lang, tr(lang, "Sharp range"), &mut lb.range, 0.0, 100.0, 10.0, tr(lang, "How deep the sharp part of the picture is, around the face."));
             let mut keep = lb.protect.is_some();
-            let toggled = ui
-                .add_enabled(subject.is_some() || keep, egui::Checkbox::new(&mut keep, tr(lang, "Keep the person sharp")))
+            let toggled = check_if(ui, subject.is_some() || keep, &mut keep, tr(lang, "Keep the person sharp"))
                 .on_hover_text(tr(lang, "The whole person stays sharp, however far the blur reaches."))
                 .on_disabled_hover_text(tr(lang, "Find the people and faces first (the first group)."))
                 .changed();
@@ -825,7 +826,7 @@ impl AutoShadeApp {
             }
         });
         if !has_bg {
-            ui.label(egui::RichText::new(tr(lang, "Find the people and faces first (the first group).")).weak().small());
+            steady_note(ui, tr(lang, "Find the people and faces first (the first group)."));
         }
         changed
     }

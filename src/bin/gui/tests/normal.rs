@@ -79,15 +79,17 @@
                 tr(lang, "Reset"),
                 tr(lang, "⭯ Turn left"),
                 tr(lang, "⭮ Turn right"),
-                tr(lang, "Export"),
+                // The bar shows the catalogue's first language only
+                // (「导出」, not 「导出 · Export」 — `buttons::bar_label`).
+                crate::buttons::bar_label(tr(lang, "Export")),
                 tr(lang, "Save develop"),
                 "⌨",
             ]
             .map(str::to_string);
             let library_hidden = [
                 tr(lang, "Copy recipe").to_string(),
-                trf(lang, "Paste to selected ({n})", &[("n", "1")]),
-                trf(lang, "Render selected ({n})", &[("n", "1")]),
+                trf(lang, "Paste ({n})", &[("n", "1")]),
+                trf(lang, "Render ({n})", &[("n", "1")]),
             ];
             let canvas_hidden = [
                 tr(lang, "Mask brush — paint to select · 「Erase」 removes · 「Apply」 bakes · Esc cancels"),

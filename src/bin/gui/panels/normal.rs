@@ -797,7 +797,7 @@ impl AutoShadeApp {
                 }
             });
         }
-        ui.vertical_centered(|ui| ui.label(egui::RichText::new(tr(lang, "or")).weak().small()));
+        ui.vertical_centered(|ui| steady_note(ui, tr(lang, "or")));
         let pick = action_row(ui, ready, tr(lang, "Match my reference photos…"))
             .on_hover_text(tr(
                 lang,
@@ -806,7 +806,7 @@ impl AutoShadeApp {
             .clicked();
         if let Some(dir) = &self.normal.ref_dir {
             let name = dir.file_name().map_or_else(|| abs_display(dir), |n| n.to_string_lossy().into_owned());
-            ui.label(egui::RichText::new(trf(lang, "Chosen: {name}", &[("name", &name)])).weak().small());
+            steady_note(ui, trf(lang, "Chosen: {name}", &[("name", &name)]));
         }
         Self::slider_pct_hinted(
             ui,
@@ -818,18 +818,17 @@ impl AutoShadeApp {
             tr(lang, "How strong the look is. Double-click to reset."),
         );
         let line = self.normal_line_text(lang);
-        ui.horizontal_wrapped(|ui| {
+        // The line wraps at the panel's narrowest width (`steady_label`,
+        // 2026-11-17), so a drag of the panel's edge cannot change how many
+        // lines it takes and move the groups below it.
+        ui.horizontal(|ui| {
             if self.normal.building || (self.normal.line == NormalLine::Working && self.analyze_inflight) {
                 ui.spinner();
             }
-            ui.label(egui::RichText::new(line).small());
+            steady_label(ui, egui::RichText::new(line).small());
         });
         if self.normal.key_present == Some(false) {
-            ui.label(
-                egui::RichText::new(tr(lang, "To make looks with AI, add a service key in Settings (⚙)."))
-                    .weak()
-                    .small(),
-            );
+            steady_note(ui, tr(lang, "To make looks with AI, add a service key in Settings (⚙)."));
         }
         if let Some(ask) = asked {
             self.start_one_click(ask);
@@ -902,8 +901,7 @@ impl AutoShadeApp {
         }
         let helper = denoise_helper_available();
         let mut on = self.normal_denoise_on();
-        let toggled = ui
-            .add_enabled(helper && !self.busy, egui::Checkbox::new(&mut on, tr(lang, "AI denoise")))
+        let toggled = check_if(ui, helper && !self.busy, &mut on, tr(lang, "AI denoise"))
             .on_hover_text(tr(lang, "Cleans the grain out of the photo, and the preview shows the result — it helps night and dark phone photos most; it uses the graphics card when there is one. Turn it off to see the photo without it."))
             .changed();
         if helper && self.normal.denoise_ready.is_none() {
@@ -915,7 +913,7 @@ impl AutoShadeApp {
             self.set_normal_denoise(on);
         }
         for line in self.noise_lines(lang, helper) {
-            ui.label(egui::RichText::new(line).weak().small());
+            steady_note(ui, line);
         }
     }
 
@@ -974,7 +972,7 @@ impl AutoShadeApp {
             ),
         };
         let full = self.export_dest_dir().map(|d| abs_display(&d)).unwrap_or_default();
-        ui.label(egui::RichText::new(place).weak().small()).on_hover_text(full);
+        steady_note(ui, place).on_hover_text(full);
         let all = action_row(ui, ready && !self.gallery.is_empty(), tr(lang, "Apply this look to every photo in the folder"))
             .on_hover_text(tr(lang, "Gives every photo in the open folder this look and saves each one as a jpg."))
             .on_disabled_hover_text(tr(lang, "Open a folder first — the library on the left."))

@@ -231,7 +231,6 @@ DECLARED_DYNAMIC = [
 # that no longer occurs anywhere is reported as dead so the list cannot rot.
 ALLOWED_BYPASS = {
     "AutoShade",   # product name, never translated
-    "PNG/TIFF",   # file-format jargon, identical in both languages
     "JPEG",       # file-format jargon
     "2560px",     # pixel-size option; its lettered siblings ARE translated
     "Esc",        # keyboard key name (house style, like the shortcut combos)
@@ -549,7 +548,12 @@ def literal_bypasses(src: str) -> list[tuple[int, str]]:
         # R38: the button vocabulary (src/bin/gui/buttons.rs) is a set of free
         # functions, so a label reaches the screen through none of the methods
         # above — scan them too, or a bare label would ship untranslated.
-        r"|\b(?:action|action_in|primary|primary_in|primary_button|toggle_in|glyph|glyph_toggle))\s*\("
+        r"|\b(?:action|action_in|primary|primary_in|primary_button|toggle_in|glyph|glyph_toggle"
+        # 2026-11-17: the row verbs, and the helpers the controls panel's
+        # checkboxes, notes, dropdown names and block captions now go through
+        # — `.checkbox(` and `.label(` above no longer see those call sites.
+        r"|action_row|primary_row|check|check_if|steady_note|steady_label|row_label"
+        r"|sub_caption|group_caption))\s*\("
     )
     skip_callee = re.compile(r"(?:\btrf?|format!)\s*\($")
     out: list[tuple[int, str]] = []

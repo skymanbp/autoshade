@@ -50,14 +50,22 @@ pub(crate) fn panel_heading(
         lead(ui);
         ui.add(egui::Label::new(text).sense(egui::Sense::click()))
     });
-    let title_rect = row.inner.rect;
-    let y = row.response.rect.bottom() + 2.0;
+    title_rule(ui, row.inner.rect.left(), row.response.rect.bottom());
+    row.inner
+}
+
+/// The short gold rule under a first-level panel title, and the air after it:
+/// `left` is the title's left edge, `row_bottom` the bottom of the row the
+/// title stands on. One drawing for [`panel_heading`] and for the library
+/// panel's title, which shares its row with a verb at the far end
+/// (`panels/gallery.rs`) and so lays that row itself.
+pub(crate) fn title_rule(ui: &mut egui::Ui, left: f32, row_bottom: f32) {
+    let y = row_bottom + 2.0;
     ui.painter().line_segment(
-        [egui::pos2(title_rect.left(), y), egui::pos2(title_rect.left() + 28.0, y)],
-        egui::Stroke::new(2.0, accent),
+        [egui::pos2(left, y), egui::pos2(left + 28.0, y)],
+        egui::Stroke::new(2.0, ui.visuals().hyperlink_color),
     );
     ui.add_space(SPACE_SM);
-    row.inner
 }
 
 /// A GROUP head: the line that names one band of sections (#14b) — air

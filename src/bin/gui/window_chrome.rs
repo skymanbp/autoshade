@@ -26,6 +26,32 @@ pub(crate) fn controls_width() -> f32 {
     if CUSTOM_CHROME { 3.0 * BUTTON_W } else { 0.0 }
 }
 
+/// The frame of both bars — the workspace's toolbar and the mode page's
+/// title bar — so their margins cannot drift apart.
+pub(crate) fn bar_frame(style: &egui::Style, fill: egui::Color32) -> egui::Frame {
+    egui::Frame::side_top_panel(style).inner_margin(egui::Margin::symmetric(10.0, 7.0)).fill(fill)
+}
+
+/// The app mark at a bar's left end: the window icon, [`MARK_PT`] square
+/// with small rounded corners, no interaction. Decoded on first use into
+/// `tex` (the app keeps it) from the same embedded bytes as the window icon,
+/// shrunk to 72 px first so it stays crisp drawn this small.
+pub(crate) fn app_mark(ui: &mut egui::Ui, tex: &mut Option<egui::TextureHandle>) {
+    let tex = tex.get_or_insert_with(|| {
+        let img = image::load_from_memory(crate::APP_ICON_PNG)
+            .expect("embedded icon decodes")
+            .resize_exact(72, 72, image::imageops::FilterType::Lanczos3)
+            .to_rgba8();
+        let pixels = egui::ColorImage::from_rgba_unmultiplied([72, 72], img.as_raw());
+        ui.ctx().load_texture("app_mark", pixels, egui::TextureOptions::LINEAR)
+    });
+    ui.add(
+        egui::Image::new(egui::load::SizedTexture::from_handle(tex))
+            .fit_to_exact_size(egui::vec2(MARK_PT, MARK_PT))
+            .rounding(RADIUS_SM),
+    );
+}
+
 /// How close to a window edge the pointer must be to resize from it.
 const EDGE: f32 = 5.0;
 
