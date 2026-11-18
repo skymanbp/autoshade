@@ -13,11 +13,45 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      full:
+        description: 'Run the whole suite, the long reverse-fit tests included, whatever changed'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
+  # Which tests this run needs (owner's ruling 2026-11-18: run what was
+  # touched). v1.18.2 changed the desktop window and the documents and waited
+  # two rounds of a hundred minutes here, and over two hours in the release
+  # run, for the reverse fit's toy fits — whose every input was v1.18.1's.
+  # `scripts/ci_scope.py` sets the long tests aside when nothing they can read
+  # differs from the nearest commit on which this workflow ended green, and
+  # says why in the job summary; on any doubt it runs everything. Every other
+  # library test, the CLI's, the contract and doc tests and the GUI's run on
+  # every push. A manual run with `full` ticked runs everything.
+  scope:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      skip_long: ${{ steps.scope.outputs.skip_long }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # The script answers 0 itself on anything it cannot determine; the `||`
+      # is for a script that does not start at all. Either way the answer is
+      # the whole suite, never a run that stops here.
+      - name: Whether the long tests may be set aside
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_FORCE_FULL: ${{ github.event.inputs.full }}
+        run: python3 scripts/ci_scope.py >> "$GITHUB_OUTPUT" || echo "skip_long=0" >> "$GITHUB_OUTPUT"
   # The doc-drift gate (user ruling 2026-10-02, after a sweep found nine facts
   # the code had moved past): every path, code symbol, link and tier count the
   # living documents name must exist in the tree. Standard library only, so it
@@ -69,8 +103,11 @@ jobs:
   # alone (run 43119864352, cancelled unfinished at 3 h 23 min; v1.17.1's
   # whole job was 31 minutes) and a job is cut off at six. Every library test
   # is in exactly one shard; shard 0 also runs the CLI's tests, the contract
-  # tests and the doc tests, and the GUI bin's. Nothing is skipped.
+  # tests and the doc tests, and the GUI bin's. Since v1.18.2 a shard drops the
+  # long tests from its share when the `scope` job above says nothing they
+  # read has changed (CI_SKIP_LONG); nothing else is ever skipped.
   test:
+    needs: scope
     strategy:
       fail-fast: false
       matrix:
@@ -96,6 +133,8 @@ jobs:
           shared-key: test-release
       - name: cargo test (default features), shard ${{ matrix.shard }} of 8
         shell: bash
+        env:
+          CI_SKIP_LONG: ${{ needs.scope.outputs.skip_long }}
         run: bash scripts/ci_test_shard.sh ${{ matrix.shard }} 8 all --release
       # The gui feature only adds dependencies (Cargo.toml [features]; no
       # cfg(feature = "gui") outside src/bin/gui), so this trip runs the GUI
@@ -110,8 +149,10 @@ jobs:
   # above stay in the profile that ships. Since 2026-09-11 the `test` profile
   # compiles at opt-level 2 (Cargo.toml `[profile.test]`), which keeps
   # debug-assertions and overflow-checks ON — so this trip still fires them,
-  # only faster. Eight shards, as above (the library alone: `lib`).
+  # only faster. Eight shards, as above (the library alone: `lib`), and the
+  # same scope: the long tests are the ones this trip spends its time on.
   debug-asserts:
+    needs: scope
     strategy:
       fail-fast: false
       matrix:
@@ -134,4 +175,6 @@ jobs:
           shared-key: test-debug
       - name: cargo test (lib, debug profile), shard ${{ matrix.shard }} of 8
         shell: bash
+        env:
+          CI_SKIP_LONG: ${{ needs.scope.outputs.skip_long }}
         run: bash scripts/ci_test_shard.sh ${{ matrix.shard }} 8 lib

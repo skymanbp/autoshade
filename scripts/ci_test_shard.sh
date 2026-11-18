@@ -15,7 +15,14 @@
 # magnitude longer; one runner took over three hours on the library alone
 # (run 43119864352, cancelled at 3 h 23 min with the suite unfinished) where
 # v1.17.1 took 31 minutes, and a job is cut off at six hours. Nothing is
-# skipped and nothing is shortened: the same tests, on more runners.
+# shortened: the same tests, on more runners.
+#
+# CI_SKIP_LONG=1 (v1.18.2; the workflow passes on what `scripts/ci_scope.py`
+# decided) sets the long tests aside — the reverse fit's and the colour-grain
+# denoiser's own modules, as that script names them — when nothing they can
+# read differs from a commit on which they passed. Each shard still takes its
+# share of the whole list, then drops the long names from it, so a test's
+# shard does not depend on the scope. Unset, or 0, every test runs.
 #
 # A shard that did not run exactly the tests it selected is an error (a name
 # the test program no longer matches would otherwise run nothing, in green).
@@ -40,15 +47,27 @@ if [ "$total" -eq 0 ]; then
   exit 1
 fi
 awk -v n="$count" -v k="$index" '(NR - 1) % n == k' "$work/all" > "$work/mine"
+if [ "${CI_SKIP_LONG:-0}" = 1 ]; then
+  share=$(wc -l < "$work/mine" | tr -d ' ')
+  python3 "$(dirname "$0")/ci_scope.py" --filter < "$work/mine" > "$work/kept"
+  mv "$work/kept" "$work/mine"
+  echo "shard $index of $count: $((share - $(wc -l < "$work/mine" | tr -d ' '))) long tests of its $share set aside (scripts/ci_scope.py)"
+fi
 names=()
 while IFS= read -r line; do names+=("$line"); done < "$work/mine"
 echo "shard $index of $count: ${#names[@]} of $total library tests"
 
-cargo test --locked "$@" --lib -- --exact "${names[@]}" 2>&1 | tee "$work/run"
-ran=$(sed -n 's/^running \([0-9][0-9]*\) tests\{0,1\}$/\1/p' "$work/run" | head -n 1)
-if [ "${ran:-0}" -ne "${#names[@]}" ]; then
-  echo "::error::shard $index selected ${#names[@]} library tests and the test program ran ${ran:-0}"
-  exit 1
+# No name at all is not `--exact` with nothing after it: that would run the
+# whole library. A shard left empty runs nothing and says so.
+if [ "${#names[@]}" -eq 0 ]; then
+  echo "shard $index of $count: no library test left to run"
+else
+  cargo test --locked "$@" --lib -- --exact "${names[@]}" 2>&1 | tee "$work/run"
+  ran=$(sed -n 's/^running \([0-9][0-9]*\) tests\{0,1\}$/\1/p' "$work/run" | head -n 1)
+  if [ "${ran:-0}" -ne "${#names[@]}" ]; then
+    echo "::error::shard $index selected ${#names[@]} library tests and the test program ran ${ran:-0}"
+    exit 1
+  fi
 fi
 
 if [ "$mode" = all ] && [ "$index" -eq 0 ]; then

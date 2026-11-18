@@ -2251,8 +2251,16 @@ than the pre-call state; model weights remain outside the repository.
 - The build workflow checks default and GUI feature sets on Ubuntu and macOS.
   Since v1.18.0 its test jobs, and the release run's battery, split the library's
   tests over eight runners each (`scripts/ci_test_shard.sh`: every test in exactly
-  one shard, nothing skipped), because the new solver's toy fits take one runner
-  past three hours.
+  one shard), because the new solver's toy fits take one runner past three hours.
+  Since v1.18.2 a run sets those long tests aside — the library tests of the
+  reverse fit's and the colour-grain denoiser's own modules, 446 of 2003 at
+  v1.18.2 — when nothing they can read differs from the nearest commit on which
+  the build workflow ended green (`scripts/ci_scope.py`: the desktop window's
+  sources, the documents, the site, the workflows and the scripts are the paths
+  they cannot read; the one module of the fit whose test reads a GUI source always
+  runs), and runs everything on any doubt. Every other library test, the CLI's,
+  the contract and doc tests and the GUI's run on every push; a manual run of the
+  build workflow with `full` ticked runs the whole suite.
   The published binary artifacts are the Windows builds, two universal macOS
   archives — the app bundle and the command line on its own (the bundle has
   shipped since v1.2.0) — and, since v1.2.4, a Linux x64 command-line archive
@@ -2319,6 +2327,8 @@ than the pre-call state; model weights remain outside the repository.
 - `.github/workflows/build.yml`, `.github/workflows/release.yml`,
   `.github/workflows/installer-upgrade.yml` and `scripts/check_docs.py` —
   CI, the installer scenario chain run against the previous published
-  release, and the document drift gates.
+  release, and the document drift gates; `scripts/ci_test_shard.sh` and
+  `scripts/ci_scope.py` — how an online run splits the library's tests over
+  its runners, and when it may set the long ones aside.
 - `docs/ARCHITECTURE.md` and `docs/ROADMAP.md` — release battery and operational
   boundaries.

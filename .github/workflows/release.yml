@@ -44,6 +44,33 @@ jobs:
             echo "::error::tag '$GITHUB_REF_NAME' does not name version $v"; exit 1
           fi
           echo "releasing v$v from tag $GITHUB_REF_NAME"
+  # Which tests the battery below needs (owner's ruling 2026-11-18: run what
+  # was touched) — the same decision, by the same script, as `build.yml`'s
+  # `scope` job. A tag stands on a commit `build.yml` has already run: when
+  # that run, or the nearest green one behind it, covers everything the long
+  # tests can read, the battery sets them aside instead of repeating them for
+  # two hours on runners the builds are waiting for. On any doubt — no green
+  # run found, the API failing, an empty answer — the battery runs everything.
+  scope:
+    needs: guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      skip_long: ${{ steps.scope.outputs.skip_long }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # The script answers 0 itself on anything it cannot determine; the `||`
+      # is for a script that does not start at all. Either way the answer is
+      # the whole battery, never a release that stops here.
+      - name: Whether the long tests may be set aside
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_scope.py >> "$GITHUB_OUTPUT" || echo "skip_long=0" >> "$GITHUB_OUTPUT"
   windows:
     needs: guard
     runs-on: windows-2022
@@ -355,9 +382,12 @@ jobs:
   # Eight shards since v1.18.0, the same split as `build.yml`'s test job
   # (`scripts/ci_test_shard.sh`: every library test in exactly one shard,
   # shard 0 also the CLI, contract, doc and GUI tests and the Metal
-  # measurement). `publish` needs every shard.
+  # measurement). `publish` needs every shard. Since v1.18.2 a shard drops the
+  # long tests from its share when the `scope` job says nothing they read has
+  # changed since a green `build` run (CI_SKIP_LONG); an empty or absent
+  # answer runs them.
   macos-battery:
-    needs: guard
+    needs: [guard, scope]
     strategy:
       fail-fast: false
       matrix:
@@ -380,6 +410,8 @@ jobs:
           shared-key: battery-release
       - name: Batteries, shard ${{ matrix.shard }} of 8
         shell: bash
+        env:
+          CI_SKIP_LONG: ${{ needs.scope.outputs.skip_long }}
         run: bash scripts/ci_test_shard.sh ${{ matrix.shard }} 8 all --release
       - name: Batteries (gui feature)
         if: matrix.shard == 0
