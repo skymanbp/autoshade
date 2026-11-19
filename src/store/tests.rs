@@ -449,13 +449,11 @@ fn a_pending_clear_completes_on_the_next_touch() {
 }
 
 
-/// L04-4: the precondition tag must name what the answer was BUILT
-/// from — when a Lightroom sidecar out-ranks the store, its content
-/// joins the tag, and a content change re-tags even though the store
-/// file never moved.
+/// The web's precondition tag names what `/api/recipe` serves, which is only
+/// ever what this app saved: an .xmp beside the RAW never answers the GET, so
+/// neither its presence nor a change to it moves the tag.
 #[test]
-fn the_develop_revision_folds_in_a_ranked_sidecar() {
-    use std::time::{Duration, SystemTime};
+fn the_develop_revision_ignores_the_sidecar_beside_the_raw() {
     let dir = std::env::temp_dir().join(format!("autoshade-store-test-revision-fold-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -463,42 +461,22 @@ fn the_develop_revision_folds_in_a_ranked_sidecar() {
     let dev = develop_dir(&raw);
     let _ = std::fs::remove_dir_all(&dev);
 
-    assert_eq!(
-        develop_revision(&raw).as_deref(),
-        Some("none"),
-        "no store file and no sidecar tags exactly like recipe_revision"
-    );
-
+    assert_eq!(recipe_revision(&raw).as_deref(), Some("none"), "absence is a real tag");
     let lr = dir.join("_rev_fold.xmp");
-    let lr_v1 =
-        crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 30.0, ..Default::default() });
-    std::fs::write(&lr, &lr_v1).unwrap();
-    let t1 = develop_revision(&raw).unwrap();
-    assert!(t1.starts_with("none+lr"), "a ranked sidecar joins the tag: {t1}");
+    std::fs::write(&lr, crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 30.0, ..Default::default() }))
+        .unwrap();
+    assert_eq!(recipe_revision(&raw).as_deref(), Some("none"), "a file beside the RAW is not a save");
 
-    let lr_v2 =
-        crate::xmp::recipe_to_xmp(&EditRecipe { contrast: -30.0, ..Default::default() });
-    std::fs::write(&lr, &lr_v2).unwrap();
-    let t2 = develop_revision(&raw).unwrap();
-    assert_ne!(t1, t2, "a sidecar content change re-tags while the store never moved");
-
-    // Store newer than the sidecar → the sidecar no longer answers, and
-    // the tag is the bare store revision again.
     std::fs::create_dir_all(&dev).unwrap();
     std::fs::write(
         recipe_target(&raw),
         serde_json::to_string(&EditRecipe { contrast: 10.0, ..Default::default() }).unwrap(),
     )
     .unwrap();
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&lr)
-        .unwrap()
-        .set_modified(SystemTime::now() - Duration::from_secs(7200))
+    let t1 = recipe_revision(&raw).unwrap();
+    std::fs::write(&lr, crate::xmp::recipe_to_xmp(&EditRecipe { contrast: -30.0, ..Default::default() }))
         .unwrap();
-    let t3 = develop_revision(&raw).unwrap();
-    assert!(t3.starts_with('r') && !t3.contains("+lr"), "store wins: {t3}");
-    assert_eq!(t3, recipe_revision(&raw).unwrap());
+    assert_eq!(recipe_revision(&raw).unwrap(), t1, "a change beside the RAW does not re-tag");
 
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&dev);
@@ -3204,9 +3182,9 @@ fn has_develop_or_sidecar_counts_a_lightroom_sidecar_beside_the_raw() {
     let _ = std::fs::remove_dir_all(&png_dev);
 }
 
-/// L13#1: the one-lock snapshot carries the Lightroom sidecar and the
-/// store's XMP projection with the open path's precedence, so the batch
-/// renderer can answer exactly what opening the photo would show.
+/// The one-lock snapshot carries what this app saved — the recipe, and an
+/// older build's projection for a develop with no recipe — and no external
+/// layer: a newer .xmp beside the RAW, readable or not, is not in it.
 #[test]
 fn a_develop_snapshot_carries_the_xmp_layers_the_open_path_reads() {
     let dir = std::env::temp_dir().join(format!("autoshade-store-test-snap-xmp-{}", std::process::id()));
@@ -3228,7 +3206,7 @@ fn a_develop_snapshot_carries_the_xmp_layers_the_open_path_reads() {
     assert_eq!(text, xmp);
     assert_eq!(kind, "XMP");
 
-    // A NEWER Lightroom sidecar beside the RAW outranks the recipe.
+    // A NEWER Lightroom sidecar beside the RAW is not part of it.
     std::fs::write(recipe_target(&raw), b"{\"exposure_ev\":0.5}").unwrap();
     let lr = raw.with_extension("xmp");
     std::fs::write(
@@ -3243,26 +3221,23 @@ fn a_develop_snapshot_carries_the_xmp_layers_the_open_path_reads() {
         .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
         .unwrap();
     let snap = read_develop_snapshot(&raw).unwrap();
-    assert!(snap.recipe.is_some(), "the recipe still rides along");
-    let (_, kind) = snap.lr_xmp.expect("the newer Lightroom sidecar rides the snapshot");
-    assert!(kind.contains("Lightroom"), "{kind}");
+    assert!(snap.recipe.is_some(), "the recipe answers");
+    assert!(snap.lr_xmp.is_none(), "the newer file beside the RAW is not read");
 
-    // An unreadable sidecar is disclosed, never folded into absence.
+    // Nor is an unreadable one: nothing to disclose about a file never read.
     std::fs::write(&lr, [0xFF, 0xFE, 0x00, 0xDC, 0x00]).unwrap();
     let snap = read_develop_snapshot(&raw).unwrap();
-    assert!(snap.lr_xmp.is_none());
-    assert!(snap.lr_unreadable.is_some(), "unreadable is not absent");
+    assert!(snap.lr_xmp.is_none() && snap.lr_unreadable.is_none());
 
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&dev);
 }
 
-/// L13#3: the backup gate snapshots the Lightroom sidecar when it is
-/// the newest intent — store develop FIRST, sidecar SECOND, so version
-/// numbers encode intent order; repeats dedup; a neutral sidecar is not
-/// a save.
+/// The backup gate preserves what this app saved and never reads the .xmp
+/// beside the RAW: no programmatic write touches that file any more, so a
+/// newer one there is neither snapshotted nor modified.
 #[test]
-fn a_newer_lightroom_sidecar_is_snapshotted_before_a_programmatic_write() {
+fn a_programmatic_write_never_reads_the_sidecar_beside_the_raw() {
     let dir = std::env::temp_dir().join(format!("autoshade-store-test-lr-backup-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -3285,22 +3260,20 @@ fn a_newer_lightroom_sidecar_is_snapshotted_before_a_programmatic_write() {
 
     let incoming = EditRecipe { exposure_ev: 1.5, ..Default::default() };
     let n = backup_saved_develop(&raw, Some(&incoming)).unwrap();
-    assert_eq!(n, Some(2), "two snapshots: the store develop, then the newer sidecar");
-    assert_eq!(list_versions(&raw), vec![1, 2]);
+    assert_eq!(n, Some(1), "one snapshot: the store develop");
+    assert_eq!(list_versions(&raw), vec![1]);
     let v1: EditRecipe =
         serde_json::from_str(&std::fs::read_to_string(version_target(&raw, 1)).unwrap())
             .unwrap();
-    assert_eq!(v1.exposure_ev, 0.5, "v1 is the store develop (older intent)");
+    assert_eq!(v1.exposure_ev, 0.5, "v1 is the store develop");
     let stem = crate::pipeline::stem(&raw);
-    assert_eq!(
-        std::fs::read_to_string(dev.join(format!("v2.{stem}.xmp"))).unwrap(),
-        lr_text,
-        "v2 carries the sidecar's lossless bytes (newer intent)"
+    assert!(
+        !dev.join(format!("v1.{stem}.xmp")).exists(),
+        "no version is made of the file beside the RAW"
     );
 
     // The real caller flow: the gated write lands, then a LATER gated
-    // write with the same content — the sidecar unchanged. Both halves
-    // dedup: no new version.
+    // write with the same content: no new version.
     std::fs::write(recipe_target(&raw), serde_json::to_string(&incoming).unwrap()).unwrap();
     let versions_before = list_versions(&raw);
     let again = backup_saved_develop(&raw, Some(&incoming)).unwrap();
@@ -3314,9 +3287,9 @@ fn a_newer_lightroom_sidecar_is_snapshotted_before_a_programmatic_write() {
     let _ = std::fs::remove_dir_all(&dev);
 }
 
-/// L13#3: a sidecar-ONLY develop (no store files at all) is snapshotted
-/// instead of reported as "nothing to snapshot" — and a NEUTRAL sidecar
-/// still is not a save.
+/// An XMP-only develop IN THE STORE (an older build's save, no recipe.json)
+/// is snapshotted instead of reported as "nothing to snapshot"; a file
+/// beside the RAW with no store develop is not a save and is not read.
 #[test]
 fn a_sidecar_only_develop_is_snapshotted_instead_of_reported_as_nothing() {
     let dir = std::env::temp_dir().join(format!("autoshade-store-test-lr-only-backup-{}", std::process::id()));
@@ -3326,24 +3299,25 @@ fn a_sidecar_only_develop_is_snapshotted_instead_of_reported_as_nothing() {
     std::fs::write(&raw, b"raw").unwrap();
     let dev = develop_dir(&raw);
     let _ = std::fs::remove_dir_all(&dev);
-    let lr = raw.with_extension("xmp");
     let lr_text = crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 12.0, ..Default::default() });
-    std::fs::write(&lr, &lr_text).unwrap();
+    std::fs::create_dir_all(&dev).unwrap();
+    std::fs::write(xmp_target(&raw), &lr_text).unwrap();
 
     let n = backup_saved_develop(&raw, None).unwrap();
-    assert_eq!(n, Some(1), "the sidecar IS the develop and is preserved");
+    assert_eq!(n, Some(1), "the stored XMP IS the develop and is preserved");
     let stem = crate::pipeline::stem(&raw);
     assert_eq!(
         std::fs::read_to_string(dev.join(format!("v1.{stem}.xmp"))).unwrap(),
         lr_text
     );
 
-    // Neutral sidecar: not a save, nothing snapshotted.
+    // An edited file beside the RAW of a photo with no store develop: not a
+    // save, nothing snapshotted.
     let raw2 = dir.join("_store_lr_neutral.arw");
     std::fs::write(&raw2, b"raw").unwrap();
     let dev2 = develop_dir(&raw2);
     let _ = std::fs::remove_dir_all(&dev2);
-    std::fs::write(raw2.with_extension("xmp"), b"<x:xmpmeta/>").unwrap();
+    std::fs::write(raw2.with_extension("xmp"), &lr_text).unwrap();
     assert_eq!(backup_saved_develop(&raw2, None).unwrap(), None);
     assert!(list_versions(&raw2).is_empty());
 

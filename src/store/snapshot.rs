@@ -109,34 +109,6 @@ pub fn recipe_revision(src: &Path) -> Option<String> {
     revision_of(&recipe_target(src))
 }
 
-/// The saved develop's revision tag for HTTP preconditions: the recipe.json
-/// revision, with the Lightroom sidecar's CONTENT identity folded in
-/// whenever that sidecar currently out-ranks the store — because it is then
-/// the very body `/api/recipe` serves. Tagging only the store file let a
-/// stale tab pass If-Match while the sidecar its answer was built from had
-/// changed underneath it (L04-4): the lost update the precondition exists
-/// to refuse. `None` (untaggable) when either side exists but cannot be
-/// read, the same stance as [`recipe_revision`].
-pub fn develop_revision(src: &Path) -> Option<String> {
-    develop_revision_of(src, &lightroom_sidecar(src))
-}
-
-/// The tag for a sidecar ranking the CALLER already holds (review R12-04):
-/// the GET handler's body and its ETag must come from ONE sidecar read —
-/// Lightroom holds none of our locks, so a second read could describe a
-/// file the body was not built from (body A shipped under ETag B, and the
-/// client's later If-Match: B silently overwrote B with stale A).
-pub fn develop_revision_of(src: &Path, ranked: &LrSidecar) -> Option<String> {
-    let base = recipe_revision(src)?;
-    match ranked {
-        LrSidecar::NewerThanStore(text) | LrSidecar::Only(text) => {
-            Some(format!("{base}+lr{:016x}", fnv1a64(text.as_bytes())))
-        }
-        LrSidecar::Unreadable(_) => None,
-        _ => Some(base),
-    }
-}
-
 pub(super) fn revision_of(p: &Path) -> Option<String> {
     match read_bytes_capped(p, MAX_STORE_JSON) {
         Ok(b) => Some(format!("r{:016x}", fnv1a64(&b))),
@@ -155,27 +127,21 @@ pub struct DevelopSnapshot {
     /// an existing save the caller must refuse to render over — falling
     /// back to legacy would resurrect stale edits, so the walk stops.
     pub recipe_err: Option<String>,
-    /// Lightroom's OWN sidecar when it out-ranks the store (newest intent,
-    /// [`lightroom_sidecar`]) — text + the same kind string the GUI open
-    /// path shows, so the two surfaces cannot drift (L13#1: the batch
-    /// renderer read recipe.json only, exporting neutral for LR-only
-    /// photos and preferring an older recipe over a newer LR edit).
+    /// Always `None`: an .xmp beside the RAW is an external source the
+    /// snapshot never reads. Kept until the desktop batch resolver stops
+    /// matching on it.
     pub lr_xmp: Option<(String, &'static str)>,
-    /// The store's XMP projection (central, else legacy ./out) — the
-    /// recipe-ABSENT fallthrough the open path takes. A present recipe.json,
-    /// neutral or not, is never out-answered by it (2026-09-13): the
-    /// projection is derived from the recipe in the same commit generation,
-    /// so one that disagrees can only be stale.
+    /// The store's XMP projection an earlier build wrote (central, else
+    /// legacy ./out) — the recipe-ABSENT fallthrough the open path takes. A
+    /// present recipe.json, neutral or not, is never out-answered by it
+    /// (2026-09-13): the projection was derived from the recipe, so one that
+    /// disagrees can only be stale.
     pub store_xmp: Option<(String, &'static str)>,
-    /// [`LrSidecar::Unreadable`] — a sidecar that EXISTS but cannot answer,
-    /// never folded into absence (the caller discloses it).
+    /// Always `None`, for the same reason as `lr_xmp`.
     pub lr_unreadable: Option<&'static str>,
-    /// The RAW's embedded XMP packet ([`embedded_packet_for_restore`]) —
-    /// the open path's LOWEST-priority source, snapshotted so the batch
-    /// renderer answers like the open path (the L13 rule).
+    /// Always `None`: the packet baked into the RAW is an external source too.
     pub packet_xmp: Option<String>,
-    /// [`embedded_packet_for_restore`]'s `Err`: a packet that exists but
-    /// cannot be read — the caller discloses it.
+    /// Always `None`, for the same reason as `packet_xmp`.
     pub packet_unreadable: Option<String>,
     /// [`read_pixel_source`]'s answer, taken under the same lock.
     pub pixel_source: Option<(PathBuf, bool)>,
@@ -199,24 +165,6 @@ pub fn read_develop_snapshot(src: &Path) -> std::io::Result<DevelopSnapshot> {
         // read_pixel_source contract) — the reads below then degrade
         // exactly as they do for any unreadable sidecar.
         let _ = recover_orphan_baks_unlocked(src);
-        // The Lightroom sidecar, ranked under the SAME lock (L13#1). The
-        // kind strings are byte-identical to the GUI open path's
-        // (persist.rs), so the surfaces cannot drift apart in wording.
-        let mut lr_xmp = None;
-        let mut lr_unreadable = None;
-        match lightroom_sidecar(src) {
-            LrSidecar::NewerThanStore(t) => {
-                lr_xmp = Some((
-                    t,
-                    "XMP (Lightroom sidecar — newer than the saved develop; Ctrl+S adopts it)",
-                ));
-            }
-            LrSidecar::Only(t) => {
-                lr_xmp = Some((t, "XMP (Lightroom sidecar beside the RAW)"));
-            }
-            LrSidecar::Unreadable(why) => lr_unreadable = Some(why),
-            _ => {}
-        }
         let mut recipe = None;
         let mut recipe_err = None;
         for rj in [recipe_target(src), legacy_recipe(src)] {
@@ -256,30 +204,18 @@ pub fn read_develop_snapshot(src: &Path) -> std::io::Result<DevelopSnapshot> {
                 }
             }
         }
-        // The embedded packet, under the SAME lock as the markers that gate
-        // it (a clear completing between two unlocked reads must not let the
-        // packet answer for a develop that is being removed). Filled only
-        // when NO store file exists at all — a NEUTRAL recipe.json or
-        // projection is a store file expressing neutral intent, and letting
-        // the packet answer past it resurrected the baked develop (Codex
-        // L05 EMBED-01; the open path draws the same `!any` line).
-        let (packet_xmp, packet_unreadable) =
-            if recipe.is_none() && recipe_err.is_none() && store_xmp.is_none() {
-                match embedded_packet_for_restore(src) {
-                    Ok(v) => (v, None),
-                    Err(why) => (None, Some(why)),
-                }
-            } else {
-                (None, None)
-            };
+        // An .xmp beside the photo and the packet baked into the RAW are
+        // external sources: the snapshot is what this app SAVED, so neither
+        // is read here. The four fields stay until the desktop app's batch
+        // resolver stops matching on them; they are always empty.
         Ok(DevelopSnapshot {
             recipe,
             recipe_err,
-            lr_xmp,
+            lr_xmp: None,
             store_xmp,
-            lr_unreadable,
-            packet_xmp,
-            packet_unreadable,
+            lr_unreadable: None,
+            packet_xmp: None,
+            packet_unreadable: None,
             pixel_source: read_pixel_source(src),
             pixel_recorded: has_pixel_source(src),
         })

@@ -50,38 +50,10 @@ fn backup_saved_develop_unlocked(
     // beats overwriting it unversioned, the same stance as an unreadable
     // recipe below.
     recover_orphan_baks(src)?;
-    // L13#3: the newest intent may be LIGHTROOM'S OWN sidecar beside the
-    // RAW — the one develop every restore surface prefers when it out-ranks
-    // the store, and the one this gate never snapshotted: the programmatic
-    // write it gates is paired with an XMP write that destroys it. Read the
-    // ranking ONCE; snapshot the store develop FIRST and the sidecar SECOND,
-    // so version numbers encode intent order (higher n = newer intent).
-    let lr_intent = match lightroom_sidecar(src) {
-        LrSidecar::Only(t) | LrSidecar::NewerThanStore(t)
-            if !crate::xmp::xmp_to_recipe_for_photo(&t, src).is_noop() =>
-        {
-            Some(t)
-        }
-        LrSidecar::Unreadable(why) => {
-            // Unreadable is not absent — but a text we cannot read cannot be
-            // snapshotted either. Disclosed; the sidecar file itself stays
-            // untouched beside the RAW (this gate never writes there).
-            eprintln!(
-                "⚠ {}: a Lightroom sidecar sits beside this photo but could not be read ({why}) — it is NOT snapshotted; the file itself stays untouched beside the RAW",
-                crate::pipeline::stem(src)
-            );
-            None
-        }
-        _ => None,
-    };
-    let store_n = backup_store_half_unlocked(src, incoming)?;
-    match lr_intent {
-        // The is_noop-guarded sidecar snapshot: dedup against the latest
-        // version's xmp bytes lives inside snapshot_xmp_text, so repeated
-        // programmatic writes do not spam versions.
-        Some(t) => Ok(snapshot_xmp_text(src, t)?.or(store_n)),
-        None => Ok(store_n),
-    }
+    // What this app SAVED is what a programmatic write can destroy, so that
+    // is what is snapshotted. An .xmp beside the photo is an external source
+    // no write here touches: nothing to preserve on its behalf.
+    backup_store_half_unlocked(src, incoming)
 }
 
 /// The STORE half of [`backup_saved_develop`]: central recipe.json first,
@@ -106,11 +78,10 @@ fn backup_store_half_unlocked(
         }
     }
     let Some((rj, text)) = found else {
-        // No recipe.json anywhere — but an XMP-ONLY develop (a Lightroom-
-        // authored sidecar, or a pre-recipe-era save) is STILL a save every
-        // reader honours (has_develop, the GUI/web restore fallbacks), and
-        // the programmatic write this call gates is paired with an XMP write
-        // that would destroy it. Snapshot it too.
+        // No recipe.json anywhere — but an XMP-ONLY develop in the store (a
+        // pre-recipe-era save) is STILL a save every reader honours
+        // (has_develop, the GUI/web restore fallbacks), and the recipe commit
+        // this call gates retires that file. Snapshot it too.
         return backup_xmp_only(src);
     };
     let parsed = serde_json::from_str::<EditRecipe>(&text).ok();
@@ -295,10 +266,9 @@ fn backup_xmp_only(src: &Path) -> std::io::Result<Option<u32>> {
     snapshot_xmp_text(src, text)
 }
 
-/// The publish half shared by [`backup_xmp_only`] and the Lightroom-sidecar
-/// arm of [`backup_saved_develop`]: dedup against the latest version's xmp
-/// bytes, derive + stamp the recipe content, claim a number, publish both
-/// artifacts (lossless xmp first).
+/// The publish half of [`backup_xmp_only`]: dedup against the latest
+/// version's xmp bytes, derive + stamp the recipe content, claim a number,
+/// publish both artifacts (lossless xmp first).
 fn snapshot_xmp_text(src: &Path, text: String) -> std::io::Result<Option<u32>> {
     let dev = develop_dir(src);
     let stem = crate::pipeline::stem(src);

@@ -941,18 +941,12 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
         crate::store::DevelopLockMode::Wait,
         || {
             // One-time, per-photo migration FIRST (it can rewrite
-            // recipe.json), then ONE sidecar read feeds BOTH the body and
-            // the tag (review R12-04): Lightroom holds none of our locks,
-            // so a second read inside develop_revision could rank a file
-            // the body was not built from — body A under ETag B, and the
-            // client's later If-Match: B overwrote B with stale A.
+            // recipe.json); the tag is the store's own, read under the same
+            // lock as the body.
             crate::store::migrate_legacy(&raw);
             let ranked = crate::store::lightroom_sidecar(&raw);
             let resp = api_recipe_locked(&raw, &ranked)?;
-            Ok(with_revision(
-                resp,
-                crate::store::develop_revision_of(&raw, &ranked).as_deref(),
-            ))
+            Ok(with_revision(resp, crate::store::recipe_revision(&raw).as_deref()))
         },
     );
 
@@ -1964,13 +1958,9 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         crate::store::DevelopLockMode::Wait,
         || match crate::store::backup_saved_develop(&raw, Some(&recipe)) {
         Ok(backed_up) => {
-            // ONE single-generation commit, the save's (2026-10-26): recipe,
-            // strip record and projection together, so a develop over an
-            // AI-generated master retires the projection instead of writing
-            // one beside it. The recipe write ALONE decides the saved state
-            // (the GUI/CLI rule): a failed XMP projection degrades to a
-            // warning — the old `?` answered 500 and hid the committed save.
-            let projection = pipeline::commit_analyzed_develop(&raw, &recipe, crate::diag::stderr())?;
+            // ONE single-generation commit, the save's (2026-10-26): recipe
+            // and strip record together. No .xmp is written.
+            pipeline::commit_analyzed_develop(&raw, &recipe, crate::diag::stderr())?;
             let mut body = json!({ "recipe": recipe, "verdict": verdict, "saved": true });
             // The NEW revision rides the answer: the tab adopts it so its
             // own next Save does not 412 against this very analyze. (The
@@ -1981,28 +1971,7 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             // the reply discloses it — where the explicit Save path had no
             // net at all. A 412 after a paid AI call would protect less
             // than the snapshot already does.
-            body["revision"] = json!(crate::store::develop_revision(&raw));
-            match projection {
-                // Independent disclosures share the one `warning` field (the
-                // existing shape — no new API): the merge note and what the
-                // projection could not carry, masks AND global controls.
-                // Joined, never overwritten: whichever one wrote first used
-                // to be the only one the tab ever saw.
-                pipeline::ProjectionOutcome::Written { note, losses, .. } => {
-                    let mut warns: Vec<String> = Vec::new();
-                    warns.extend(note);
-                    warns.extend(pipeline::xmp_loss_lines(&recipe, &losses));
-                    if !warns.is_empty() {
-                        body["warning"] = json!(warns.join("; "));
-                    }
-                }
-                pipeline::ProjectionOutcome::Cleared => {}
-                pipeline::ProjectionOutcome::Failed(e) => {
-                    body["warning"] = json!(format!(
-                        "saved, but the Lightroom XMP projection failed: {e:#}"
-                    ));
-                }
-            }
+            body["revision"] = json!(crate::store::recipe_revision(&raw));
             if let Some(n) = backed_up {
                 body["backed_up"] = json!(n);
             }
@@ -2657,7 +2626,7 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // develop, which destroys a lost update just as surely as a write.
     if let Some(resp) = precondition_failed(
         if_match.as_deref(),
-        crate::store::develop_revision(&raw).as_deref(),
+        crate::store::recipe_revision(&raw).as_deref(),
     ) {
         return Ok(resp);
     }
@@ -2713,7 +2682,7 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
                 };
                 Ok(with_revision(
                     text_response(&format!("cleared — saved edits removed{note}")),
-                    crate::store::develop_revision(&raw).as_deref(),
+                    crate::store::recipe_revision(&raw).as_deref(),
                 ))
             }
             Err(e) => Ok(status_response(500, &format!("could not clear the saved edits: {e}"))),
@@ -2874,14 +2843,14 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
                 text_response(&format!(
                     "{landed}{save_note}{master_note}{merge_note}{mask_note}"
                 )),
-                crate::store::develop_revision(&raw).as_deref(),
+                crate::store::recipe_revision(&raw).as_deref(),
             ))
         }
         Err(e) => Ok(with_revision(
             text_response(&format!(
                 "saved (recipe.json) — but the Lightroom XMP projection failed: {e:#}{save_note}{master_note}"
             )),
-            crate::store::develop_revision(&raw).as_deref(),
+            crate::store::recipe_revision(&raw).as_deref(),
         )),
     }
         },

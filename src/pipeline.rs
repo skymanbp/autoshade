@@ -2812,30 +2812,10 @@ fn saved_recipe_snapshot(raw: &Path, d: &crate::diag::Diag) -> Option<EditRecipe
     // touch-time rule migrate_legacy follows; a failed recovery is re-decided
     // by the backup gate downstream).
     let _ = crate::store::recover_orphan_baks(raw);
-    // Newest intent decides WHICH develop's calibration carries forward
-    // (L13#4). When Lightroom's own sidecar out-ranks the store, recipe.json
-    // is a superseded generation: both restore surfaces already re-stamp
-    // FRESH calibration for that photo (serve.rs api_recipe, the GUI's
-    // stamp_calibration on an XMP restore), and stamping the superseded
-    // recipe's curve/profile/anchor onto a brand-new AI recipe made Analyze
-    // hand back a canvas that renders unlike the one it replaced. `None` is
-    // the right answer: the fresh arm in every consumer stamps exactly what
-    // the restore surfaces stamp.
-    match crate::store::lightroom_sidecar(raw) {
-        crate::store::LrSidecar::Only(t) | crate::store::LrSidecar::NewerThanStore(t)
-            if !crate::xmp::xmp_to_recipe_for_photo(&t, raw).is_noop() =>
-        {
-            return None;
-        }
-        crate::store::LrSidecar::Unreadable(why) => {
-            // Unreadable is not absent — but it cannot outrank either.
-            // Disclosed, then the stored develop stands.
-            d.warn(format!(
-                "a Lightroom sidecar sits beside this photo but could not be read ({why}) — calibration falls back to the stored develop"
-            ));
-        }
-        _ => {}
-    }
+    // The store alone decides which develop's calibration carries forward:
+    // an .xmp beside the photo is an external source, never a superseding
+    // generation of this app's develop (it is imported only when the user
+    // asks, and that import stamps its own calibration).
     for p in [crate::store::recipe_target(raw), crate::store::legacy_recipe(raw)] {
         if let Ok(text) = crate::store::read_text_capped(&p, crate::store::MAX_STORE_JSON)
             && let Ok(mut r) = serde_json::from_str::<EditRecipe>(&text)
@@ -3918,25 +3898,23 @@ pub fn write_recipe(
     }
     ensure_parent(&out)?;
     let bytes = recipe_bytes_for(recipe, out.parent(), &crate::diag::Diag::about(sink, raw))?;
-    // Publish via tmp+rename rather than truncating the AUTHORITATIVE file in
-    // place: a crash mid-write used to leave a half-written recipe.json (loud
-    // Unreadable, but the develop was gone). The old file is retired to .bak
-    // first for CRASH RECOVERY (fs::rename does replace an existing file on
-    // Windows — verified empirically) — worst case is a briefly missing file
-    // with the intact .tmp beside it, never corrupt JSON.
-    // Per-process AND per-call tmp name from the ONE shared store counter
-    // (see store::next_tmp_seq): a GUI and a web server saving the same
-    // photo used to share one fixed .tmp, the web server threads REQUESTS,
-    // and a same-process migration publish mints into the SAME
-    // `.json.tmp.<pid>.<seq>` namespace — every site must share one counter.
-    // (.bak stays shared — the retire/restore pair below is
-    // last-writer-wins by design; one photo has one interactive writer in
-    // practice.)
+    // Never truncate the AUTHORITATIVE file in place: a crash mid-write used
+    // to leave a half-written recipe.json (loud Unreadable, but the develop
+    // was gone). Both branches publish whole or not at all.
     if out == crate::store::recipe_target(raw) {
-        crate::store::durable_retire_and_write(
-            &out,
-            &out.with_extension("json.bak"),
-            &bytes,
+        // The canonical recipe is a develop generation like any save's: ONE
+        // commit, which retires a projection an earlier build left beside it
+        // (an .xmp is written only by an explicit export, and a stale one
+        // must not outlive the recipe it described). Strip record and pixel
+        // link are untouched — this writer knows nothing about either.
+        crate::store::commit_develop(
+            raw,
+            crate::store::DevelopCommit {
+                recipe: Some(bytes),
+                pixels: crate::store::CommitMember::Keep,
+                variants: crate::store::CommitMember::Keep,
+                xmp: crate::store::CommitMember::Clear,
+            },
         )
         .with_context(|| format!("publish recipe {}", out.display()))?;
         crate::store::note_source(raw); // breadcrumb for the hashed store dir
@@ -4169,35 +4147,22 @@ pub fn resolve_develop_masks(
     DevelopMasks { ai, faces }
 }
 
-/// What became of the Lightroom projection in a [`commit_analyzed_develop`].
-pub enum ProjectionOutcome {
-    /// Published at `path`, with the merge note and the mask verdicts.
-    Written { path: PathBuf, note: Option<String>, losses: Vec<xmp::MaskLoss> },
-    /// Retired: the develop sits on AI-generated pixels, or the photo is not
-    /// a camera RAW — no sidecar reproduces it.
-    Cleared,
-    /// The projection could not be produced; the recipe still landed and any
-    /// earlier projection is kept. Said, never fatal (the cross-surface rule).
-    Failed(anyhow::Error),
-}
-
 /// Publish a PROGRAMMATIC develop (Analyze, web and CLI) the way a save
-/// publishes one: recipe, strip record and Lightroom projection in ONE
-/// single-generation commit ([`crate::store::commit_develop`]).
+/// publishes one: recipe and strip record in ONE single-generation commit
+/// ([`crate::store::commit_develop`]), which also retires any projection an
+/// earlier build kept beside the recipe — an .xmp is written only by an
+/// explicit export.
 ///
-/// Before 2026-10-26 both Analyze surfaces called `write_recipe` and then
-/// `write_xmp`, so over an AI-generated master they still wrote a projection
-/// (which no sidecar can honour — [`xmp_projection_member`]) and left the
-/// strip record calling the edited develop the pristine generated card. The
-/// rule is the web save's: the develop sits on the RECORDED generated master
-/// when there is one (`ActiveWrite::DevelopOnAiPixels`), else on the source
-/// (`ActiveWrite::Unknown`, the record stands); the pixel link is kept.
-/// The caller runs the backup gate first, under its develop lock.
+/// The strip rule is the web save's: the develop sits on the RECORDED
+/// generated master when there is one (`ActiveWrite::DevelopOnAiPixels`),
+/// else on the source (`ActiveWrite::Unknown`, the record stands); the pixel
+/// link is kept. The caller runs the backup gate first, under its develop
+/// lock.
 pub fn commit_analyzed_develop(
     raw: &Path,
     recipe: &EditRecipe,
     sink: &dyn crate::diag::Sink,
-) -> Result<ProjectionOutcome> {
+) -> Result<()> {
     let ai_master = crate::store::recorded_pixel_source(raw).and_then(|(o, g)| g.then_some(o));
     let variants = crate::store::variants_member(
         raw,
@@ -4206,24 +4171,16 @@ pub fn commit_analyzed_develop(
             None => crate::store::ActiveWrite::Unknown,
         },
     )?;
-    let (xmp, outcome) = match xmp_projection_member(raw, recipe, ai_master.is_none(), sink) {
-        Ok((crate::store::CommitMember::Write(b), note, losses)) => (
-            crate::store::CommitMember::Write(b),
-            ProjectionOutcome::Written { path: xmp_target(raw), note, losses },
-        ),
-        Ok((member, _, _)) => (member, ProjectionOutcome::Cleared),
-        Err(e) => (crate::store::CommitMember::Keep, ProjectionOutcome::Failed(e)),
-    };
     crate::store::commit_develop(
         raw,
         crate::store::DevelopCommit {
             recipe: Some(recipe_store_bytes(raw, recipe, sink)?),
             pixels: crate::store::CommitMember::Keep,
             variants,
-            xmp,
+            xmp: crate::store::CommitMember::Clear,
         },
     )?;
-    Ok(outcome)
+    Ok(())
 }
 
 /// The projection's BYTES without publishing them: exactly what
@@ -6104,6 +6061,32 @@ mod guard_tests {
         let _ = std::fs::remove_dir_all(&dev);
     }
 
+    /// The batch's canonical recipe write is a develop generation like any
+    /// save's: it retires a projection an earlier build left beside the
+    /// recipe (which the readers would otherwise keep as a stale fallback),
+    /// and it writes no .xmp of its own — in the store or beside the photo.
+    #[test]
+    fn write_recipe_retires_a_stale_projection() {
+        let dir = std::env::temp_dir().join(format!("autoshade-pipe-recipe-retire-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_pipe_recipe_retire.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = crate::store::develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(xmp_target(&raw), b"<x:xmpmeta/>").unwrap();
+        let r = EditRecipe { exposure_ev: 0.4, ..Default::default() };
+        let out = write_recipe(&raw, &r, None, crate::diag::stderr()).unwrap();
+        assert_eq!(out, crate::store::recipe_target(&raw));
+        let back: EditRecipe = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(back.exposure_ev, 0.4, "the recipe landed");
+        assert!(!xmp_target(&raw).exists(), "the stale projection is retired with it");
+        assert!(!raw.with_extension("xmp").exists(), "nothing lands beside the photo");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
     /// A sidecar the splicer cannot account for is REGENERATED rather than
     /// merged — which drops the user's Lightroom-only properties. The fallback
     /// itself is correct (never fail an export); doing it silently was the
@@ -7491,7 +7474,7 @@ mod tests {
     #[test]
     fn every_worker_reachable_warning_flows_through_the_sink() {
         // (file, fragment, how many times it must be raised through the sink)
-        const SITES: [(&str, &str, usize); 21] = [
+        const SITES: [(&str, &str, usize); 20] = [
             ("src/pipeline.rs", "GPT proposer failed", 1),
             ("src/pipeline.rs", "reference search unavailable", 1),
             // The run-scoped `Once` line — 5c had to leave this one
@@ -7514,7 +7497,6 @@ mod tests {
             // v1.2.4's second sweep. The base-look family took a `&Diag` on an
             // `_in` form, so `produce_recipe` hands these its own sink and a
             // pooled worker's base-look lines land in that worker's block.
-            ("src/pipeline.rs", "a Lightroom sidecar sits beside this photo", 1),
             ("src/pipeline.rs", "warn(note)", 1),
             ("src/pipeline.rs", "base look skipped: the embedded preview", 1),
             ("src/pipeline.rs", "base look skipped: too few pixels", 1),
@@ -7554,7 +7536,7 @@ mod tests {
             checked += hits.len();
         }
         // PREMISE: a scanner that matched nothing would pass vacuously.
-        assert_eq!(checked, 23, "every registered site must have been inspected");
+        assert_eq!(checked, 22, "every registered site must have been inspected");
         assert!(scanned > 40, "the statement scanner found almost nothing: {scanned}");
 
         // THE CENSUS. What is left of `eprintln!` in the develop chain's own
@@ -7574,16 +7556,18 @@ mod tests {
         //   disclosure is bound to its photograph. The last two are routed but
         //   not injectable, which `crate::diag`'s module doc states as the
         //   decision and the reason.
-        // * `src/main.rs` = 10: the SERIAL single-photo commands (`analyze`,
-        //   `apply`, `auto`, `fit`) and their import-note siblings, plus the
-        //   line `library-build` ends its one-line progress meter with. One
-        //   job, one thread, a printed header directly above — nothing to
-        //   order and nobody to route to. The pooled `batch` worker has none.
+        // * `src/main.rs` = 6: the SERIAL single-photo commands (`apply`'s
+        //   clamp line; `match`'s two review lines, its XMP-failure line and
+        //   its import note), plus the line `library-build` ends its one-line
+        //   progress meter with. One job, one thread, a printed header
+        //   directly above — nothing to order and nobody to route to. The
+        //   pooled `batch` worker has none. (`analyze` and `auto` write no
+        //   .xmp and import none, so their lines went with the projection.)
         const CENSUS: [(&str, usize); 5] = [
             ("src/diag.rs", 1),
             ("src/pipeline.rs", 0),
             ("src/render.rs", 0),
-            ("src/main.rs", 10),
+            ("src/main.rs", 6),
             ("src/recipe.rs", 0),
         ];
         for (rel, want) in CENSUS {
@@ -7598,12 +7582,12 @@ mod tests {
         }
     }
 
-    /// L13#4: calibration comes from the NEWEST intent. A Lightroom sidecar
-    /// that out-ranks the store vetoes the stored recipe's calibration
-    /// (fresh stamp, like both restore surfaces); an older or neutral one
-    /// leaves the stored develop in charge.
+    /// The calibration a programmatic writer carries forward comes from the
+    /// store alone: an .xmp beside the photo is an external source, so not
+    /// even a NEWER one with a real edit vetoes the stored develop (it used
+    /// to, while every open adopted such a file).
     #[test]
-    fn saved_calibration_resolves_by_newest_intent() {
+    fn saved_calibration_comes_from_the_store_alone() {
         let dir = std::env::temp_dir().join(format!("autoshade-pipeline-test-lr-calib-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -7619,7 +7603,7 @@ mod tests {
         // No sidecar: the stored develop answers (the common case).
         assert!(saved_recipe_snapshot(&raw, &crate::diag::photo(&raw)).is_some());
 
-        // A NEWER Lightroom sidecar with a real edit vetoes it.
+        // A NEWER Lightroom sidecar with a real edit does not veto it.
         let lr = raw.with_extension("xmp");
         std::fs::write(
             &lr,
@@ -7632,30 +7616,17 @@ mod tests {
             .unwrap()
             .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
             .unwrap();
-        assert!(
-            saved_recipe_snapshot(&raw, &crate::diag::photo(&raw)).is_none(),
-            "a newer Lightroom edit supersedes the stored calibration"
-        );
-
-        // An OLDER sidecar leaves the store in charge.
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&lr)
-            .unwrap()
-            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
-            .unwrap();
-        let kept = saved_recipe_snapshot(&raw, &crate::diag::photo(&raw)).expect("the older sidecar does not veto");
+        let kept = saved_recipe_snapshot(&raw, &crate::diag::photo(&raw))
+            .expect("a newer file beside the photo does not supersede the stored develop");
         assert_eq!(kept.exposure_ev, 0.5);
 
-        // A NEUTRAL newer sidecar is not a save and does not veto either.
-        std::fs::write(&lr, b"<x:xmpmeta/>").unwrap();
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&lr)
-            .unwrap()
-            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
-            .unwrap();
-        assert!(saved_recipe_snapshot(&raw, &crate::diag::photo(&raw)).is_some(), "a neutral sidecar is not intent");
+        // An unreadable one is not even looked at, so it says nothing either.
+        std::fs::write(&lr, [0xFFu8, 0xFE, 0xC0, 0x00]).unwrap();
+        let collector = crate::diag::Collector::new();
+        let kept = saved_recipe_snapshot(&raw, &crate::diag::Diag::about(&collector, &raw))
+            .expect("the store still answers");
+        assert_eq!(kept.exposure_ev, 0.5);
+        assert!(collector.take().is_empty(), "nothing to say about a file the store never reads");
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
@@ -10003,13 +9974,12 @@ mod develop_surface_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// GROUP J (2026-10-26): Analyze (web and CLI) publishes through the same
-    /// single-generation commit as a save, so a develop that sits on an
-    /// AI-GENERATED master clears the projection instead of writing one
-    /// beside it (`xmp_projection_member`'s rule), and a develop over the
-    /// source writes it.
+    /// Analyze (web and CLI) publishes through the same single-generation
+    /// commit as a save, and writes no .xmp: a projection an earlier build
+    /// left beside the recipe is retired in that generation, whether the
+    /// develop sits on an AI-generated master or on the source.
     #[test]
-    fn an_analyzed_develop_over_a_generated_master_clears_the_projection() {
+    fn an_analyzed_develop_writes_no_xmp_and_retires_a_stale_one() {
         let (dir, raw) = scratch_photo("analyze-gen");
         let dev = crate::store::develop_dir(&raw);
         std::fs::create_dir_all(&dev).unwrap();
@@ -10019,15 +9989,17 @@ mod develop_surface_tests {
         let target = xmp_target(&raw);
         std::fs::write(&target, b"<x:xmpmeta/>").unwrap();
         let r = EditRecipe { exposure_ev: 0.4, ..Default::default() };
-        let outcome = commit_analyzed_develop(&raw, &r, crate::diag::stderr()).unwrap();
-        assert!(matches!(outcome, ProjectionOutcome::Cleared), "AI pixels: no sidecar");
-        assert!(!target.exists(), "the stale projection is retired in the same generation");
+        commit_analyzed_develop(&raw, &r, crate::diag::stderr()).unwrap();
+        assert!(!target.exists(), "AI pixels: the stale projection is retired in the same generation");
         assert!(crate::store::recipe_target(&raw).exists(), "the recipe landed");
 
         let (dir2, raw2) = scratch_photo("analyze-src");
-        let outcome = commit_analyzed_develop(&raw2, &r, crate::diag::stderr()).unwrap();
-        assert!(matches!(outcome, ProjectionOutcome::Written { .. }), "a source develop projects");
-        assert!(xmp_target(&raw2).exists());
+        std::fs::create_dir_all(crate::store::develop_dir(&raw2)).unwrap();
+        std::fs::write(xmp_target(&raw2), b"<x:xmpmeta/>").unwrap();
+        commit_analyzed_develop(&raw2, &r, crate::diag::stderr()).unwrap();
+        assert!(!xmp_target(&raw2).exists(), "a source develop retires it too and writes none");
+        assert!(!raw2.with_extension("xmp").exists(), "and nothing lands beside the photo");
+        assert!(crate::store::recipe_target(&raw2).exists());
         for d in [&dev, &crate::store::develop_dir(&raw2), &dir, &dir2] {
             let _ = std::fs::remove_dir_all(d);
         }

@@ -23,13 +23,13 @@
         assert_eq!(r.exposure_ev, 0.8);
         assert!(restored.packet_unreadable.is_none());
 
-        // The batch snapshot answers the same develop (anti-drift).
+        // The batch renders what this app saved, and the packet is another
+        // program's develop baked into the file: the batch never adopts it.
         let snap = autoshade::store::read_develop_snapshot(&src).unwrap();
-        let (batch, batch_kind) = crate::export::resolve_snapshot_develop(&src, &snap, &mut Vec::new())
-            .unwrap()
-            .expect("the batch resolves the packet too");
-        assert_eq!(batch_kind, kind);
-        assert_eq!(batch.exposure_ev, 0.8);
+        assert!(
+            crate::export::resolve_snapshot_develop(&src, &snap, &mut Vec::new()).unwrap().is_none(),
+            "the batch renders neutral over an unsaved photo's packet"
+        );
     }
 
     /// The packet never outranks anything, and an explicit clear sticks

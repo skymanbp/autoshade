@@ -135,7 +135,7 @@ use sidecar::{
     LEGACY_TOMBSTONE, legacy_recipe_in, rank_lightroom_sidecar, suppressed_legacy_path_in,
 };
 pub use snapshot::{
-    DevelopSnapshot, develop_revision, develop_revision_of, has_pixel_source, read_develop_snapshot,
+    DevelopSnapshot, has_pixel_source, read_develop_snapshot,
     read_pixel_source, recipe_revision, recorded_pixel_source, recover_orphan_baks,
     render_source_checked,
 };

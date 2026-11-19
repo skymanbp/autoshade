@@ -1109,89 +1109,31 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, req: 
         anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
     }
     // The canonical develop publishes as ONE single-generation commit, the
-    // save's (2026-10-26): recipe, strip record and projection together, so a
-    // develop over an AI-generated master retires the projection instead of
-    // writing one beside it. A redirected -o never touches the develop.
-    let (recipe_path, mut canonical) = if redirected {
-        (write_recipe(raw, &recipe, out, autoshade::diag::stderr())?, None)
+    // save's (2026-10-26): recipe and strip record together, retiring any
+    // projection an earlier build kept. No .xmp is written — that is the
+    // explicit `export-xmp`. A redirected -o never touches the develop.
+    let recipe_path = if redirected {
+        write_recipe(raw, &recipe, out, autoshade::diag::stderr())?
     } else {
-        let outcome = pipeline::commit_analyzed_develop(raw, &recipe, autoshade::diag::stderr())?;
-        (autoshade::store::recipe_target(raw), Some(outcome))
+        pipeline::commit_analyzed_develop(raw, &recipe, autoshade::diag::stderr())?;
+        autoshade::store::recipe_target(raw)
     };
     println!("\nrecipe -> {}", recipe_path.display());
-    // XMP only for a RAW; a baked source (PNG/TIFF) gets the recipe JSON only.
+    if redirected {
+        // Post-store, ./out is only a legacy read fallback — the place the
+        // GUI/web actually restore from is the photo's develop dir, so the
+        // hint must name THAT path or following it does nothing.
+        println!(
+            "  (the GUI/web restore from {} — copy the recipe there to make them see it)",
+            autoshade::store::develop_dir(raw).display()
+        );
+    }
     if decode::is_raw(raw) {
-        // With -o the XMP goes BESIDE the redirected recipe (same dir + stem),
-        // not to ./out: a lone out/<stem>.xmp is what the GUI/web would restore
-        // instead of this recipe, silently dropping everything classic sidecars
-        // cannot carry (spatial-tile and field bitmap masks, recolour gains).
-        // The recipe write ALONE decides the saved state (the cross-surface
-        // rule): failing the command here reported "analyze failed" for a
-        // develop every reader already restores, and scripts then re-ran a
-        // paid analysis that had in fact succeeded.
-        let projected = if redirected {
-            // `-o edit.xmp` makes the derived XMP path the RECIPE's own path:
-            // the projection then overwrote the recipe JSON written moments
-            // ago while both were reported as separate successful outputs.
-            let side = recipe_path.with_extension("xmp");
-            if same_path(&side, &recipe_path) {
-                Err(anyhow::anyhow!(
-                    "-o names {} — the XMP projection would overwrite the recipe; \
-                     pass a .json path (the XMP is written beside it)",
-                    recipe_path.display()
-                ))
-            } else {
-                pipeline::write_xmp_at(side, &recipe, &autoshade::diag::photo(raw))
-            }
-            .map_or_else(pipeline::ProjectionOutcome::Failed, |(path, note, losses)| {
-                pipeline::ProjectionOutcome::Written { path, note, losses }
-            })
-        } else {
-            canonical.take().expect("the canonical branch committed above")
-        };
-        match projected {
-            // The merge note AND the loss lines (masks and global controls)
-            // already went to stderr in build_xmp_doc — one place, so no CLI
-            // command can print a different (or no) version of them.
-            pipeline::ProjectionOutcome::Written { path, .. } => println!("xmp    -> {}", path.display()),
-            pipeline::ProjectionOutcome::Cleared => println!(
-                "xmp    -> none (this develop sits on AI-generated pixels, which no Lightroom sidecar reproduces)"
-            ),
-            pipeline::ProjectionOutcome::Failed(e) => {
-                eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}")
-            }
-        }
-        // …and the IMPORT half of the same disclosure (R27 L-07): what this
-        // photo's own Lightroom sidecar would cost on the way in.
-        if let Some(m) = lightroom_import_note(raw) {
-            eprintln!("⚠ {m}");
-        }
-        if redirected {
-            // Post-store, ./out is only a legacy read fallback — the place the
-            // GUI/web actually restore from is the photo's develop dir, so the
-            // hint must name THAT path or following it does nothing.
-            println!("  (written beside the -o recipe so the pair stays together; the GUI/web restore from");
-            println!(
-                "   {} — copy both files there to make them see it)",
-                autoshade::store::develop_dir(raw).display()
-            );
-        }
-        // R27 A3: this line used to end in a literal ".ARW", so
-        // `autoshade analyze shot.CR3` told the photographer to put the sidecar
-        // next to a "shot.ARW" that does not exist. The source's OWN file name
-        // is the only correct answer — and a sidecar's name must match the
-        // photo it belongs to for Lightroom to find it at all.
-        let s = stem(raw);
-        let photo = raw
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| s.to_string());
-        println!("  (the library is read-only — copy {s}.xmp next to {photo} to open it in Lightroom)");
-    } else {
-        println!("  (baked source — recipe JSON only; XMP applies to RAW in Lightroom)");
+        println!("  (for Lightroom: autoshade export-xmp {} --beside)", raw.display());
     }
     Ok(())
     };
+
     if redirected {
         save()
     } else {
@@ -1455,17 +1397,15 @@ fn auto_cmd(
     // untouched RAW silently dropped every baked pixel edit and produced a
     // file that disagreed with what reopening the photo shows.
     let mut render_recipe = recipe.clone();
-    // ONE lock across the persistence compound — the gate, recipe.json, the
-    // XMP projection AND the render-source capture. Each store call locks
-    // internally, but separately: another process's save could land between
-    // the gate and the write (overwritten unversioned), or between the write
-    // and the XMP (their newer sidecar stomped by ours), and the source could
-    // change under the multi-minute render. The render itself runs OUTSIDE,
-    // on the source captured here; its result is printed below in the same
-    // order as before.
+    // ONE lock across the persistence compound — the gate, the recipe commit
+    // AND the render-source capture. Each store call locks internally, but
+    // separately: another process's save could land between the gate and the
+    // write (overwritten unversioned), and the source could change under the
+    // multi-minute render. The render itself runs OUTSIDE, on the source
+    // captured here.
     // DELIVERABLE: a recorded master that cannot be honoured refuses with the
     // remedy instead of silently rendering the un-retouched RAW (A6).
-    let (src, relook, xmp_result) = autoshade::store::with_develop_lock(
+    let (src, relook) = autoshade::store::with_develop_lock(
         raw,
         autoshade::store::DevelopLockMode::Wait,
         || -> Result<_> {
@@ -1478,17 +1418,14 @@ fn auto_cmd(
                     );
                 }
             }
-            // Recipe, strip record and projection in ONE generation — the
-            // save's commit, shared with `analyze` (2026-10-26): over an
-            // AI-generated master the projection is retired, not written.
-            let xmp_result = if accepted {
-                Some(pipeline::commit_analyzed_develop(raw, &recipe, autoshade::diag::stderr())?)
-            } else {
-                None
-            };
+            // Recipe and strip record in ONE generation — the save's commit,
+            // shared with `analyze` (2026-10-26). No .xmp is written.
+            if accepted {
+                pipeline::commit_analyzed_develop(raw, &recipe, autoshade::diag::stderr())?;
+            }
             let (src, relook) = autoshade::store::render_source_checked(raw, &mut render_recipe)
                 .map_err(|m| anyhow::anyhow!(m))?;
-            Ok((src, relook, xmp_result))
+            Ok((src, relook))
         },
     )?;
     if let Some(note) = relook {
@@ -1529,33 +1466,15 @@ fn auto_cmd(
         autoshade::diag::stderr(),
     )?;
     println!("render -> {} ({} x {})", out.display(), w, h);
-    // XMP only for a RAW (Lightroom reads it beside the RAW); a baked source
-    // (PNG/TIFF) gets the recipe JSON only. A projection failure is a WARNING:
-    // recipe.json (and the rendered file) already committed.
     if !accepted {
         // A non-Accept verdict may not auto-save (user decision): the render
-        // above is this command's explicit deliverable, but the develop and
-        // its XMP stay untouched. Print the recipe so nothing is lost.
+        // above is this command's explicit deliverable, but the develop stays
+        // untouched. Print the recipe so nothing is lost.
         println!("develop NOT saved: verdict {:?} — a non-Accept verdict never auto-saves.", verdict.decision);
         println!("--- proposed recipe (render it again via  autoshade apply) ---");
         println!("{}", serde_json::to_string_pretty(&recipe)?);
     } else {
-        // Written under the lock above; only SAID here, in the old order.
-        match xmp_result {
-            // Notes + loss lines: stderr, from build_xmp_doc (as above).
-            Some(pipeline::ProjectionOutcome::Written { path, .. }) => println!("xmp    -> {}", path.display()),
-            Some(pipeline::ProjectionOutcome::Failed(e)) => {
-                eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}")
-            }
-            _ if !decode::is_raw(raw) => println!("(baked source — recipe.json only, no XMP)"),
-            _ => println!(
-                "xmp    -> none (this develop sits on AI-generated pixels, which no Lightroom sidecar reproduces)"
-            ),
-        }
-        // The import half (R27 L-07), same producer as `analyze`.
-        if let Some(m) = lightroom_import_note(raw) {
-            eprintln!("⚠ {m}");
-        }
+        println!("recipe -> {}", autoshade::store::recipe_target(raw).display());
     }
     Ok(())
 }

@@ -578,10 +578,11 @@
     }
 
     /// L13#1 anti-drift gate: the batch renderer's snapshot resolution must
-    /// answer EXACTLY what opening the photo restores — XMP-only develops
-    /// included, and a newer Lightroom sidecar out-ranking the recipe
-    /// included. The open result is stamped the way the open caller stamps
-    /// it (stamp_calibration) before comparing.
+    /// answer EXACTLY what opening the photo restores for a develop this app
+    /// saved — XMP-only develops included. The open result is stamped the
+    /// way the open caller stamps it (stamp_calibration) before comparing.
+    /// A newer .xmp beside the RAW is an external source: the batch renders
+    /// the saved recipe and never adopts it.
     #[test]
     fn batch_export_resolves_the_same_develop_the_open_path_restores() {
         let dir = std::env::temp_dir().join(format!("autoshade-gui-batch-antidrift-{}", std::process::id()));
@@ -622,7 +623,8 @@
         open.clamp();
         assert_eq!(batch, open, "batch and open answer the same develop (XMP-only)");
 
-        // Phase 2: recipe.json exists but a NEWER Lightroom sidecar wins.
+        // Phase 2: recipe.json exists and a NEWER Lightroom sidecar sits
+        // beside the RAW — the batch still renders the saved recipe.
         std::fs::write(
             autoshade::store::recipe_target(&src),
             serde_json::to_string(&EditRecipe { exposure_ev: 0.5, ..Default::default() })
@@ -644,16 +646,10 @@
         let snap = autoshade::store::read_develop_snapshot(&src).unwrap();
         let (batch, batch_kind) = crate::export::resolve_snapshot_develop(&src, &snap, &mut Vec::new())
             .unwrap()
-            .expect("the Lightroom develop must resolve for the batch");
-        assert!(batch_kind.contains("Lightroom"), "{batch_kind}");
-        let SavedDevelop::Restored(open, open_kind) = read_saved_develop(&src).saved else {
-            panic!("the open path restores the Lightroom develop");
-        };
-        assert_eq!(batch_kind, open_kind);
-        let mut open = stamp_like_open(open);
-        open.clamp();
-        assert_eq!(batch, open, "batch and open answer the same develop (LR newer)");
-        assert_eq!(batch.contrast, 33.0, "and it is the Lightroom edit");
+            .expect("the saved develop must resolve for the batch");
+        assert_eq!(batch_kind, "recipe.json", "the batch renders what was saved");
+        assert_eq!(batch.exposure_ev, 0.5, "the saved recipe");
+        assert_eq!(batch.contrast, 0.0, "not the Lightroom edit beside the RAW");
     }
 
     /// A minimal little-endian TIFF whose root IFD carries one XMP entry
