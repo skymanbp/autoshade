@@ -1,6 +1,9 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.18.2 — the desktop window: Settings in five pages, a language
+> Status: **implemented** (v1.18.3 — an .xmp is an external source: read only on an import
+> the user asks for and written only on an export the user asks for, on every surface;
+> a save writes the develop alone; a variant keeps the kind it was saved with;
+> v1.18.2 — the desktop window: Settings in five pages, a language
 > switch on the mode page, one toolbar in two zones, side columns whose width only the
 > drag sets, and the Lightroom loss line said at the export hand-off only;
 > v1.18.1 — the reverse fit takes the readings of its solve that

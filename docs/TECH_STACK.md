@@ -2235,7 +2235,7 @@ than the pre-call state; model weights remain outside the repository.
   This excludes the Python/model process. Batch rendering does not request
   AI denoise, so its ordinary 1800 MB planning constant is unchanged.
 - The current battery is **2013 library (1991 pass + 22 `#[ignore]`d forensic
-  probes) / 29 CLI / 356 GUI / 2+2 contract** tests — the v1.18.2 battery; v1.6.0
+  probes) / 29 CLI / 356 GUI / 2+2 contract** tests — the v1.18.3 battery; v1.6.0
   shipped with 1683 library and 215 GUI, and the names added and retired since
   (the style index's retired with it in v1.9.0) are listed in ARCHITECTURE. Environment-gated
   Lightroom-payload, brush-table, and RAW-zoo suites are additional and are not
