@@ -105,7 +105,7 @@
 //! The DEVELOP CHAIN's own disclosures are inside this ordering. They used to
 //! be bare `eprintln!`s that went straight to the process stderr in COMPLETION
 //! order — the GPT-proposer fallback warn, the clamp disclosure, the XMP merge
-//! notes. `produce_recipe`, `render_to_file` and `write_xmp` now take a
+//! notes. `produce_recipe`, `render_to_file` and the XMP writers now take a
 //! caller-supplied [`crate::diag::Sink`], `batch` gives each worker a
 //! `diag::Collector` and drains it into THAT photo's block, and v1.2.4
 //! finished the sweep: `pipeline.rs`, `render.rs` and `recipe.rs` hold zero

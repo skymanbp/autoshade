@@ -144,19 +144,15 @@
         let snap = autoshade::store::DevelopSnapshot {
             recipe: None,
             recipe_err: None,
-            lr_xmp: Some((xmp.to_string(), "Lightroom sidecar")),
-            store_xmp: None,
-            lr_unreadable: None,
-            packet_xmp: None,
-            packet_unreadable: None,
+            store_xmp: Some((xmp.to_string(), "XMP")),
             pixel_source: None,
             pixel_recorded: false,
         };
         let mut warns = Vec::new();
         let (r, kind) = crate::export::resolve_snapshot_develop(&src, &snap, &mut warns)
             .unwrap()
-            .expect("a non-noop sidecar resolves");
-        assert_eq!(kind, "Lightroom sidecar");
+            .expect("an earlier build's stored XMP resolves");
+        assert_eq!(kind, "XMP");
         assert!((r.exposure_ev - 1.0).abs() < 1e-3);
         assert!(
             warns.iter().any(|w| w.contains("unreadable") && w.contains("Contrast2012")),

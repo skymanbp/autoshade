@@ -2672,7 +2672,6 @@ fn api_save(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             recipe: Some(pipeline::recipe_store_bytes(&raw, &req.recipe, crate::diag::stderr())?),
             pixels,
             variants,
-            xmp: crate::store::CommitMember::Clear,
         },
     )?;
     let mut master_note = String::new();

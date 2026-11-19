@@ -21,8 +21,9 @@
 //! ```
 //!
 //! The root resolves at runtime (never hardcoded): `AUTOSHADE_DATA_DIR` env
-//! override → `%LOCALAPPDATA%/autoshade` (the thumb cache already lives there)
-//! → the system temp dir. EXPORTS (developed/retouch/heal/… images) are user
+//! override → a TEST executable's own `<target>/<profile>/test-store` →
+//! `%LOCALAPPDATA%/autoshade` (the thumb cache already lives there) → the
+//! system temp dir. EXPORTS (developed/retouch/heal/… images) are user
 //! deliverables and deliberately STAY in ./out.
 //!
 //! Rasters (masks, the lens blur's depth map and protect matte, pixel
@@ -105,7 +106,6 @@ pub use migrate::{migrate_legacy, migrate_legacy_from_many};
 use migrate::{migrate_legacy_in};
 pub use paths::{
     OwnedRaster, claim_raster, clear_pixel_source, deliver_xmp_beside, detach_rasters, develop_dir,
-    export_xmp_beside,
     masters_dir, own_areas_in, pixel_source_path, pixel_source_record_bytes, raster_target, recipe_target, saved_quarter_turns,
     variants_path, version_target, write_pixel_source, xmp_beside_target, xmp_target,
 };
@@ -122,8 +122,7 @@ pub(crate) use root::{LEGACY_STORE_DIR_NAME, STORE_DIR_NAME, adopt_pre_rename_ro
 #[cfg(test)]
 use root::{ADOPT_PRE_RENAME};
 pub use sidecar::{
-    LrSidecar, MAX_STORE_JSON, SidecarRead, SidecarStamp, embedded_packet_for_restore, has_develop,
-    has_develop_or_sidecar, legacy_recipe, legacy_xmp, lightroom_sidecar, read_bytes_capped,
+    MAX_STORE_JSON, SidecarRead, SidecarStamp, has_develop, legacy_recipe, legacy_xmp, read_bytes_capped,
     read_sidecar, read_sidecar_checked, read_sidecar_stamped, read_text_capped, settings_path,
 };
 use sidecar::{
@@ -132,7 +131,7 @@ use sidecar::{
 };
 #[cfg(test)]
 use sidecar::{
-    LEGACY_TOMBSTONE, legacy_recipe_in, rank_lightroom_sidecar, suppressed_legacy_path_in,
+    LEGACY_TOMBSTONE, legacy_recipe_in, suppressed_legacy_path_in,
 };
 pub use snapshot::{
     DevelopSnapshot, has_pixel_source, read_develop_snapshot,

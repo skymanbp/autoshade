@@ -589,9 +589,8 @@ pub fn approximate_focus_distance(xmp: &str) -> Option<f32> {
 /// refused" has to stay the size of the user's local work — not a missing
 /// channel, so it is a difference to know about, not a gap to close.
 ///
-/// `batch` prints nothing here on purpose: its work list is
-/// `store::has_develop_or_sidecar`-filtered, so a photo that HAS a Lightroom
-/// sidecar is never in it.
+/// `batch` prints nothing here on purpose: it never reads an .xmp — one
+/// beside a photo is an external source, read only by an explicit import.
 pub fn describe_import_losses(imported: usize, losses: &[MaskImportLoss]) -> Option<String> {
     if losses.is_empty() {
         return None;
@@ -628,7 +627,7 @@ pub fn describe_import_losses(imported: usize, losses: &[MaskImportLoss]) -> Opt
 /// For a caller that is also WRITING the document, this is the wrong door: it
 /// builds the whole mask block to return the verdict list. Take the pair from
 /// [`recipe_to_xmp_with_losses`] / [`MergeOutcome::losses`] instead (R22 NIT-1)
-/// — `pipeline::write_xmp` did exactly this and ran the projection twice per
+/// — the pipeline's XMP writer once did exactly this and ran the projection twice per
 /// save. What is left here is the standalone question ("what would this recipe
 /// lose?") with no document wanted; the crate's own tests are its only callers
 /// today.

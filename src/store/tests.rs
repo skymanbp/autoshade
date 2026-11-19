@@ -825,7 +825,6 @@ fn a_staged_member_above_the_recovery_cap_refuses_the_save_whole() {
             recipe: Some(big),
             pixels: CommitMember::Keep,
             variants: CommitMember::Keep,
-            xmp: CommitMember::Keep,
         },
     )
     .expect_err("a member the recovery reader cannot read back must not commit");
@@ -939,7 +938,6 @@ fn a_foreign_develop_write_restates_the_strips_active_card() {
             recipe: Some(b"{}".to_vec()),
             pixels: CommitMember::Clear,
             variants: variants_member(&raw, ActiveWrite::Kind("fitted")).unwrap(),
-            xmp: CommitMember::Keep,
         },
     )
     .unwrap();
@@ -1194,7 +1192,8 @@ fn a_committed_generation_replays_over_a_stale_triple() {
     let _ = std::fs::remove_dir_all(&dev);
 }
 
-/// The projection member replays like the other three: a marked stage
+/// A stage an EARLIER build crashed in replays as it was staged (this
+/// build stages no .xmp and writes only `clear` / `keep`): a marked stage
 /// with `xmp: write` lands the staged sidecar beside its recipe, a
 /// marked `clear` removes the standing one, and a marker written before
 /// the member existed (no `xmp` field — an older build's crash) reads as
@@ -1540,18 +1539,22 @@ fn a_cleared_develop_takes_its_pending_commit_with_it() {
     let _ = std::fs::remove_dir_all(&dev);
 }
 
-/// The public saver end to end: all four files land as one generation
-/// with no staging residue, a second generation writes + clears + keeps
-/// per member (the projection cleared WITH the recipe that has no
-/// sidecar to project — the 2026-09-13 stale-projection fix), and an
-/// unresolved strip refuses the WHOLE save before anything stages (the
-/// all-or-nothing face).
+/// The public saver end to end: the three files land as one generation
+/// with no staging residue; a commit that writes the recipe retires the
+/// `<stem>.xmp` an earlier build kept beside it, and one that writes no
+/// recipe leaves that file alone; and an unresolved strip refuses the
+/// WHOLE save before anything stages (the all-or-nothing face).
+///
+/// MUTATION: the retire rule removed from `commit_develop_unlocked` (the
+/// store's .xmp kept whatever the commit writes).
 #[test]
-fn a_develop_commit_lands_all_four_or_nothing() {
+fn a_develop_commit_lands_whole_or_not_at_all() {
     let (dir, raw, dev) = commit_fixture("commit-public");
     let m1 = dev.join("m1.png");
     std::fs::write(&m1, b"px-one").unwrap();
+    let plant = || std::fs::write(xmp_target(&raw), b"<x:xmpmeta>older build</x:xmpmeta>").unwrap();
 
+    plant();
     commit_develop(
         &raw,
         DevelopCommit {
@@ -1560,7 +1563,6 @@ fn a_develop_commit_lands_all_four_or_nothing() {
             variants: CommitMember::Write(
                 variants_record_bytes(&raw, &strip_record("fitted")).unwrap(),
             ),
-            xmp: CommitMember::Write(b"<x:xmpmeta>gen1</x:xmpmeta>".to_vec()),
         },
     )
     .unwrap();
@@ -1569,27 +1571,32 @@ fn a_develop_commit_lands_all_four_or_nothing() {
     assert_eq!(master.file_name().unwrap().to_str().unwrap(), "m1.png");
     assert!(generated);
     assert!(matches!(read_variants_checked(&raw), VariantsRead::Strip(_)));
-    assert_eq!(
-        std::fs::read(xmp_target(&raw)).unwrap(),
-        b"<x:xmpmeta>gen1</x:xmpmeta>",
-        "the projection landed in the recipe's generation"
-    );
+    assert!(!xmp_target(&raw).exists(), "the older build's .xmp retired in the recipe's generation");
     assert!(!dev.join(".commit").exists(), "the stage is consumed");
+
+    // A commit that writes no recipe is not a new develop: the file stays.
+    plant();
+    commit_develop(
+        &raw,
+        DevelopCommit { recipe: None, pixels: CommitMember::Clear, variants: CommitMember::Keep },
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(recipe_target(&raw)).unwrap(), b"gen1-recipe", "the recipe was kept");
+    assert!(!has_pixel_source(&raw), "cleared, retired .bak included");
+    assert!(matches!(read_variants_checked(&raw), VariantsRead::Strip(_)), "Keep kept it");
+    assert!(xmp_target(&raw).exists(), "no recipe written, so the older file is left alone");
 
     commit_develop(
         &raw,
         DevelopCommit {
             recipe: Some(b"gen2-recipe".to_vec()),
-            pixels: CommitMember::Clear,
+            pixels: CommitMember::Keep,
             variants: CommitMember::Keep,
-            xmp: CommitMember::Clear,
         },
     )
     .unwrap();
     assert_eq!(std::fs::read(recipe_target(&raw)).unwrap(), b"gen2-recipe");
-    assert!(!has_pixel_source(&raw), "cleared, retired .bak included");
-    assert!(matches!(read_variants_checked(&raw), VariantsRead::Strip(_)), "Keep kept it");
-    assert!(!xmp_target(&raw).exists(), "the projection cleared with its generation");
+    assert!(!xmp_target(&raw).exists(), "…and the next recipe retires it");
 
     // No `.tmp.` staging litter anywhere in the develop dir.
     for e in std::fs::read_dir(&dev).unwrap().flatten() {
@@ -1601,7 +1608,9 @@ fn a_develop_commit_lands_all_four_or_nothing() {
     }
 
     // The all-or-nothing face: an unresolved strip refuses the save
-    // BEFORE anything stages — the recipe member does not land either.
+    // BEFORE anything stages — the recipe member does not land, and the
+    // older file is not retired either.
+    plant();
     std::fs::write(variants_path(&raw), b"not json at all").unwrap();
     let err = commit_develop(
         &raw,
@@ -1609,11 +1618,10 @@ fn a_develop_commit_lands_all_four_or_nothing() {
             recipe: Some(b"gen3-recipe".to_vec()),
             pixels: CommitMember::Keep,
             variants: CommitMember::Clear,
-            xmp: CommitMember::Write(b"<x:xmpmeta>gen3</x:xmpmeta>".to_vec()),
         },
     )
     .expect_err("an unresolved strip refuses the whole save");
-    assert!(!xmp_target(&raw).exists(), "all-or-nothing: the projection did not land either");
+    assert!(xmp_target(&raw).exists(), "all-or-nothing: the refused save retired nothing");
     assert!(err.to_string().contains("cannot be honoured"), "{err}");
     assert_eq!(
         std::fs::read(recipe_target(&raw)).unwrap(),
@@ -1622,42 +1630,6 @@ fn a_develop_commit_lands_all_four_or_nothing() {
     );
     assert!(!dev.join(".commit").exists(), "nothing staged");
 
-    let _ = std::fs::remove_dir_all(&dir);
-    let _ = std::fs::remove_dir_all(&dev);
-}
-
-/// L03: between the marker and the completed sweep, a projection copied
-/// beside the RAW must not out-rank the clear and resurrect what is
-/// being removed — the pending marker ranks like the cleared stamp.
-#[test]
-fn a_pending_clear_outranks_the_sidecar_beside_the_photo() {
-    use std::time::{Duration, SystemTime};
-    let dir = std::env::temp_dir().join(format!("autoshade-store-test-pending-rank-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let raw = dir.join("_store_pending_rank.arw");
-    std::fs::write(&raw, b"raw").unwrap();
-    let dev = develop_dir(&raw);
-    let _ = std::fs::remove_dir_all(&dev);
-    std::fs::create_dir_all(&dev).unwrap();
-    let lr = raw.with_extension("xmp");
-    std::fs::write(
-        &lr,
-        crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 30.0, ..Default::default() }),
-    )
-    .unwrap();
-    std::fs::write(dev.join("clear.pending"), b"develop clear in progress\n").unwrap();
-    // The sidecar is OLDER than the pending clear → the clear wins.
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&lr)
-        .unwrap()
-        .set_modified(SystemTime::now() - Duration::from_secs(7200))
-        .unwrap();
-    assert!(
-        matches!(lightroom_sidecar(&raw), LrSidecar::None),
-        "a pending clear must outrank the older sidecar"
-    );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&dev);
 }
@@ -1749,129 +1721,11 @@ fn a_develop_snapshot_recovers_the_bak_before_choosing_a_recipe() {
     let _ = std::fs::remove_dir_all(&dev);
 }
 
-#[test]
-fn lightroom_sidecar_newest_intent_wins() {
-    use std::time::{Duration, SystemTime};
-    let dir = std::env::temp_dir().join(format!("autoshade-store-test-lr-sidecar-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let raw = dir.join("_store_lr_probe.arw"); // never read — only its neighbours are
-    let dev = develop_dir(&raw);
-    let _ = std::fs::remove_dir_all(&dev);
-
-    // No sidecar at all → None.
-    assert!(matches!(lightroom_sidecar(&raw), LrSidecar::None), "no file");
-
-    // A sidecar and NO stored develop → the sidecar IS the develop.
-    let lr = dir.join("_store_lr_probe.xmp");
-    let lr_v1 =
-        crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 30.0, ..Default::default() });
-    std::fs::write(&lr, &lr_v1).unwrap();
-    assert!(matches!(lightroom_sidecar(&raw), LrSidecar::Only(_)), "only");
-
-    // Our own projection copied beside the RAW is NOT a Lightroom edit.
-    std::fs::create_dir_all(&dev).unwrap();
-    std::fs::write(xmp_target(&raw), &lr_v1).unwrap();
-    assert!(matches!(lightroom_sidecar(&raw), LrSidecar::None), "our own copy");
-
-    // A DIFFERENT sidecar, OLDER than the store → the store wins. Times
-    // are SET, not slept for — deterministic on any filesystem.
-    std::fs::write(
-        recipe_target(&raw),
-        serde_json::to_string(&EditRecipe::default()).unwrap(),
-    )
-    .unwrap();
-    let lr_v2 =
-        crate::xmp::recipe_to_xmp(&EditRecipe { contrast: -30.0, ..Default::default() });
-    std::fs::write(&lr, &lr_v2).unwrap();
-    let set = |p: &Path, t: SystemTime| {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(p)
-            .unwrap()
-            .set_modified(t)
-            .unwrap();
-    };
-    let now = SystemTime::now();
-    set(&lr, now - Duration::from_secs(7200));
-    assert!(
-        matches!(lightroom_sidecar(&raw), LrSidecar::OlderThanStore),
-        "the store is newer — AutoShade work outranks the older Lightroom pass"
-    );
-
-    // …and NEWER than the store → Lightroom's edit is the newest intent.
-    set(&lr, now + Duration::from_secs(7200));
-    let LrSidecar::NewerThanStore(text) = lightroom_sidecar(&raw) else {
-        panic!("a newer Lightroom sidecar must win the restore");
-    };
-    assert_eq!(text, lr_v2);
-
-    let _ = std::fs::remove_dir_all(&dir);
-    let _ = std::fs::remove_dir_all(&dev);
-}
-
-/// L08: an unreadable sidecar beside the RAW is DISCLOSED, not folded
-/// into "no sidecar" — the old fold opened the photo neutral in silence.
-#[test]
-fn a_sidecar_swapped_after_the_read_is_disclosed_not_ranked() {
-    // L01: the newest-intent contest may only rank the text it actually
-    // read. An identity that cannot match what is on disk models a
-    // sidecar swapped right after the read.
-    let dir = std::env::temp_dir().join(format!(
-        "autoshade-sidecar-swap-{}-{}",
-        std::process::id(),
-        next_tmp_seq()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let raw = dir.join("SWAP.ARW");
-    std::fs::write(&raw, b"raw").unwrap();
-    let lr = raw.with_extension("xmp");
-    std::fs::write(&lr, b"<x:xmpmeta/>").unwrap();
-
-    let swapped = rank_lightroom_sidecar(
-        &raw,
-        &lr,
-        "<x:xmpmeta/>".to_string(),
-        // No real file carries the epoch mtime with a u64::MAX length.
-        Some((std::time::SystemTime::UNIX_EPOCH, u64::MAX)),
-    );
-    assert!(
-        matches!(swapped, LrSidecar::Unreadable(why) if why.contains("replaced")),
-        "an impossible identity must disclose the swap"
-    );
-
-    let real = std::fs::File::open(&lr)
-        .ok()
-        .and_then(|f| f.metadata().ok())
-        .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
-    assert!(real.is_some(), "the fixture filesystem must report mtimes");
-    let ranked = rank_lightroom_sidecar(&raw, &lr, "<x:xmpmeta/>".to_string(), real);
-    assert!(
-        matches!(ranked, LrSidecar::Only(_)),
-        "the true identity must rank exactly as before this guard"
-    );
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn lightroom_sidecar_unreadable_is_disclosed_not_absent() {
-    let dir = std::env::temp_dir().join(format!("autoshade-store-test-lr-unreadable-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let raw = dir.join("_probe.arw"); // never read — only its neighbour is
-    std::fs::write(dir.join("_probe.xmp"), [0xFFu8, 0xFE, 0xC0, 0x00]).unwrap();
-    let LrSidecar::Unreadable(why) = lightroom_sidecar(&raw) else {
-        panic!("an unreadable sidecar must be disclosed, not treated as absent");
-    };
-    assert!(why.contains("UTF-8"), "the reason names the cause: {why}");
-}
-
-/// R22-8 / SF8-A: the hand-off to Lightroom. The projection lands beside the
-/// photo with its bytes intact; a sidecar ALREADY there (Lightroom's own) is
-/// refused rather than silently replaced; and the explicit second attempt
-/// replaces it. Every arm is a separate failure mode — the middle one is the
-/// whole point of the feature having a confirmation at all.
+/// R22-8 / SF8-A: the delivery beside the photo. The bytes land there
+/// intact; a file ALREADY there (Lightroom's own) is refused rather than
+/// silently replaced; and the explicit second attempt replaces it. Every
+/// arm is a separate failure mode — the middle one is the whole point of
+/// the export having a confirmation at all.
 #[test]
 fn the_lightroom_hand_off_lands_beside_the_photo_and_never_clobbers_in_silence() {
     let dir = std::env::temp_dir()
@@ -1882,40 +1736,27 @@ fn the_lightroom_hand_off_lands_beside_the_photo_and_never_clobbers_in_silence()
     std::fs::write(&raw, b"raw").unwrap();
     let dev = develop_dir(&raw);
     let _ = std::fs::remove_dir_all(&dev);
+    let ours: &[u8] = b"<x:xmpmeta>ours</x:xmpmeta>";
 
-    // Nothing saved yet: the refusal is NotFound and says what to do.
-    let err = export_xmp_beside(&raw, false).unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
-    assert!(
-        err.to_string().contains("save the develop first"),
-        "the workflow remedy travels with the refusal: {err}"
-    );
-    assert!(
-        !raw.with_extension("xmp").exists(),
-        "a refusal writes NOTHING beside the photo"
-    );
-
-    // A stored projection → it lands beside the photo, byte for byte.
-    std::fs::create_dir_all(&dev).unwrap();
-    std::fs::write(xmp_target(&raw), b"<x:xmpmeta>ours</x:xmpmeta>").unwrap();
-    let to = export_xmp_beside(&raw, false).unwrap();
+    // Nothing in the way → it lands beside the photo, byte for byte.
+    let to = deliver_xmp_beside(&raw, ours, false).unwrap();
     assert_eq!(to, raw.with_extension("xmp"), "the name Lightroom looks for");
-    assert_eq!(std::fs::read(&to).unwrap(), b"<x:xmpmeta>ours</x:xmpmeta>");
+    assert_eq!(std::fs::read(&to).unwrap(), ours);
 
-    // Someone else's sidecar is now in the way (this is also what a SECOND
+    // Someone else's file is now in the way (this is also what a SECOND
     // click sees). Refused, and their bytes survive untouched.
     std::fs::write(&to, b"<x:xmpmeta>LIGHTROOM</x:xmpmeta>").unwrap();
-    let err = export_xmp_beside(&raw, false).unwrap_err();
+    let err = deliver_xmp_beside(&raw, ours, false).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
     assert_eq!(
         std::fs::read(&to).unwrap(),
         b"<x:xmpmeta>LIGHTROOM</x:xmpmeta>",
-        "a refused hand-off leaves the existing sidecar EXACTLY as it was"
+        "a refused delivery leaves the existing file EXACTLY as it was"
     );
 
     // …and the explicit overwrite does replace it.
-    export_xmp_beside(&raw, true).unwrap();
-    assert_eq!(std::fs::read(&to).unwrap(), b"<x:xmpmeta>ours</x:xmpmeta>");
+    deliver_xmp_beside(&raw, ours, true).unwrap();
+    assert_eq!(std::fs::read(&to).unwrap(), ours);
 
     let _ = std::fs::remove_dir_all(&dev);
     let _ = std::fs::remove_dir_all(&dir);
@@ -2122,17 +1963,18 @@ fn orphan_bak_is_restored_on_read() {
 }
 
 #[test]
-fn a_cleared_develop_outranks_the_stale_copied_projection() {
+fn a_clear_outranks_an_older_xmp_beside_the_photo_and_not_a_newer_one() {
     use std::time::{Duration, SystemTime};
     let dir = std::env::temp_dir().join(format!("autoshade-store-test-cleared-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let raw = dir.join("_store_cleared_probe.arw");
+    std::fs::write(&raw, b"raw").unwrap();
     let dev = develop_dir(&raw);
     let _ = std::fs::remove_dir_all(&dev);
-    // The user's stale copied projection beside the RAW; the store holds
-    // NOTHING (the clear deleted it) — this used to read as a foreign
-    // Lightroom edit and resurrect the cleared develop.
+    // An .xmp beside the RAW that predates the clear; the store holds
+    // NOTHING (the clear deleted it). The clear is this app's newest word
+    // about the photo, so that file is not news.
     let lr = dir.join("_store_cleared_probe.xmp");
     std::fs::write(
         &lr,
@@ -2146,14 +1988,14 @@ fn a_cleared_develop_outranks_the_stale_copied_projection() {
     let now = SystemTime::now();
     set(&lr, now - Duration::from_secs(3600)); // sidecar predates the clear
     assert!(
-        matches!(lightroom_sidecar(&raw), LrSidecar::None),
-        "a sidecar older than the clear must NOT resurrect the develop"
+        matches!(external_xmp(&raw), ExternalXmp::None),
+        "a file older than the clear is not asked about"
     );
-    // A Lightroom edit made AFTER the clear is newest intent — it wins.
+    // A Lightroom edit made AFTER the clear is news.
     set(&lr, now + Duration::from_secs(3600));
     assert!(
-        matches!(lightroom_sidecar(&raw), LrSidecar::Only(_)),
-        "a post-clear Lightroom edit still restores"
+        matches!(external_xmp(&raw), ExternalXmp::Beside { .. }),
+        "a Lightroom edit made after the clear is asked about"
     );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&dev);
@@ -3137,51 +2979,6 @@ fn a_pending_transaction_defers_adoption() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// L13#2: the badge/resume predicate counts the sidecar Lightroom
-/// itself writes beside the RAW — a photo edited only in Lightroom
-/// showed no ● yet opened with its LR develop, and CLI batch spent a
-/// paid analyze on it.
-#[test]
-fn has_develop_or_sidecar_counts_a_lightroom_sidecar_beside_the_raw() {
-    let dir = std::env::temp_dir().join(format!("autoshade-store-test-lr-badge-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let raw = dir.join("_store_lr_badge.arw");
-    std::fs::write(&raw, b"raw").unwrap();
-    let dev = develop_dir(&raw);
-    let _ = std::fs::remove_dir_all(&dev);
-    std::fs::write(raw.with_extension("xmp"), b"<x:xmpmeta/>").unwrap();
-
-    assert!(!has_develop(&raw), "no store develop");
-    assert!(has_develop_or_sidecar(&raw), "the LR sidecar counts");
-
-    // The is_raw guard: a baked photo's neighbouring .xmp is not ours.
-    let png = dir.join("_store_lr_badge.png");
-    std::fs::write(&png, b"png").unwrap();
-    std::fs::write(png.with_extension("xmp"), b"<x:xmpmeta/>").unwrap();
-    let png_dev = develop_dir(&png);
-    let _ = std::fs::remove_dir_all(&png_dev);
-    assert!(!has_develop_or_sidecar(&png), "a baked photo's sidecar does not count");
-
-    // A pending clear still outranks the sidecar probe (L03).
-    std::fs::create_dir_all(&dev).unwrap();
-    std::fs::write(dev.join("clear.pending"), b"develop clear in progress\n").unwrap();
-    assert!(!has_develop_or_sidecar(&raw), "a pending clear masks the badge");
-
-    // Regression guard: the SIBLING did not leak into has_develop —
-    // rank_lightroom_sidecar still classifies a sidecar-only photo as
-    // LrSidecar::Only (has_develop false), not a store contest.
-    let _ = std::fs::remove_dir_all(&dev);
-    match lightroom_sidecar(&raw) {
-        LrSidecar::Only(_) => {}
-        _ => panic!("a sidecar-only photo must rank as LrSidecar::Only"),
-    }
-
-    let _ = std::fs::remove_dir_all(&dir);
-    let _ = std::fs::remove_dir_all(&dev);
-    let _ = std::fs::remove_dir_all(&png_dev);
-}
-
 /// The one-lock snapshot carries what this app saved — the recipe, and an
 /// older build's projection for a develop with no recipe — and no external
 /// layer: a newer .xmp beside the RAW, readable or not, is not in it.
@@ -3201,7 +2998,6 @@ fn a_develop_snapshot_carries_the_xmp_layers_the_open_path_reads() {
     std::fs::write(xmp_target(&raw), &xmp).unwrap();
     let snap = read_develop_snapshot(&raw).unwrap();
     assert!(snap.recipe.is_none());
-    assert!(snap.lr_xmp.is_none());
     let (text, kind) = snap.store_xmp.expect("the projection rides the snapshot");
     assert_eq!(text, xmp);
     assert_eq!(kind, "XMP");
@@ -3222,12 +3018,12 @@ fn a_develop_snapshot_carries_the_xmp_layers_the_open_path_reads() {
         .unwrap();
     let snap = read_develop_snapshot(&raw).unwrap();
     assert!(snap.recipe.is_some(), "the recipe answers");
-    assert!(snap.lr_xmp.is_none(), "the newer file beside the RAW is not read");
+    assert_eq!(snap.store_xmp.map(|(t, _)| t), Some(xmp.clone()), "the newer file beside the RAW is not read");
 
     // Nor is an unreadable one: nothing to disclose about a file never read.
     std::fs::write(&lr, [0xFF, 0xFE, 0x00, 0xDC, 0x00]).unwrap();
     let snap = read_develop_snapshot(&raw).unwrap();
-    assert!(snap.lr_xmp.is_none() && snap.lr_unreadable.is_none());
+    assert!(snap.recipe.is_some() && snap.recipe_err.is_none(), "an unreadable file there is no error of the save");
 
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&dev);
@@ -3575,7 +3371,7 @@ fn backup_snapshot_is_a_copy_and_freezes_rasters() {
     }
 
     /// R22 L2②: `durable_write_tracked` reports whether the bytes reached
-    /// the live name, which is what lets `export_xmp_beside` keep a
+    /// the live name, which is what lets `deliver_xmp_beside` keep a
     /// delivered sidecar instead of deleting it when only the durability
     /// tail failed.
     ///
@@ -4219,7 +4015,6 @@ fn the_answered_stamp_is_not_a_develop_and_survives_a_clear() {
     names.sort();
     assert_eq!(names, ["external-xmp.answered"], "only the stamp");
     assert!(!has_develop(&raw), "a stamp alone does not badge the photo");
-    assert!(!has_develop_or_sidecar(&raw), "nor does the gallery/web predicate");
 
     std::fs::write(recipe_target(&raw), serde_json::to_string(&EditRecipe::default()).unwrap())
         .unwrap();

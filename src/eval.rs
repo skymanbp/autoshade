@@ -915,7 +915,7 @@ pub fn run(
     // R27 P1, deliberate NON-action: this stays RAW-only, and not for want of
     // a flag. `eval` scores the AI against the user's OWN edit, which it reads
     // from the sibling `.xmp`. For a baked photo that sidecar is off limits by
-    // a settled, thrice-cited policy — `store::lightroom_sidecar` returns None
+    // a settled, thrice-cited policy — `store::external_xmp` reports nothing
     // for non-RAW ("a baked PNG/TIFF's neighbouring `.xmp` is not ours to
     // interpret"), `pipeline`'s merge base skips it, and the GUI disables
     // "Export XMP beside photo". Including baked sources here would reopen

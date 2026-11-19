@@ -71,6 +71,7 @@ HISTORY = {
     "read_wb_step": "ARCHITECTURE: the cast→WB hand-off passage stands as the record of the step reader v1.18.0 retired",
     "field_stop_rule_skips_the_tile_producer_and_names_it": "ARCHITECTURE: a count clause records its v1.18.0 rename",
     "the_fan_gate_costs_a_real_two_temperature_pair_nothing": "ARCHITECTURE: a dated measurement records its v1.18.0 rename",
+    "a_develop_commit_lands_all_four_or_nothing": "ARCHITECTURE: a v1.3.3 count clause records it; the commit lost its XMP member (2026-11-18) and the pin became a_develop_commit_lands_whole_or_not_at_all",
     "the_projection_member_stages_what_write_xmp_publishes": "ARCHITECTURE: a v1.3.3 count clause records it; the XMP became an external source and the pin was re-pointed to the export",
 }
 

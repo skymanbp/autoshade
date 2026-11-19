@@ -50,9 +50,9 @@
 //! One `read_dir` per FOLDER, memoised, answers exactly and once.
 //!
 //! **What this module deliberately does NOT own.** The develop chain's own
-//! sidecar sites — [`crate::store::lightroom_sidecar`],
-//! `store::has_develop_or_sidecar` and `pipeline::write_xmp`'s merge base —
-//! read a path that is also the path AutoShade WRITES back to
+//! sidecar sites — [`crate::store::external_xmp`] and the export's merge
+//! base (`pipeline::xmp_export_bytes`) — read a path that is also the path
+//! AutoShade WRITES back to
 //! ([`crate::store::xmp_beside_target`]). Resolving those reads
 //! case-insensitively without moving the write would split one photograph's
 //! sidecar into two files (`SHOT.XMP` read, `shot.xmp` written), so that pair

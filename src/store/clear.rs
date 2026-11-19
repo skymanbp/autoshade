@@ -2,11 +2,10 @@
 
 use super::*;
 
-/// Stamp "this develop was explicitly CLEARED now": the newest-intent rule
-/// ranks the marker's mtime against the Lightroom sidecar beside the RAW
-/// (see [`lightroom_sidecar`]), so a projection the user once copied there
-/// cannot resurrect edits that were just cleared. Never counted by
-/// [`has_develop`]; rewritten in place — only the mtime matters.
+/// Stamp "this develop was explicitly CLEARED now": [`external_xmp`] ranks
+/// the stamp's mtime against an .xmp beside the RAW, so a file that was
+/// already there when the user cleared is not news afterwards. Never counted
+/// by [`has_develop`]; rewritten in place — only the mtime matters.
 pub fn mark_develop_cleared(src: &Path) -> std::io::Result<()> {
     mark_develop_cleared_in(&store_root(), src)
 }
@@ -20,17 +19,17 @@ fn mark_develop_cleared_in(root: &Path, src: &Path) -> std::io::Result<()> {
     )
 }
 
-/// What an explicit clear actually achieved. The marker is best-effort by
-/// nature (it only decides anything when a projection sits beside the RAW),
-/// but a clear that reports plain success while that resurrection route stays
-/// open is the same lie the deliverable paths already outlawed — so the
+/// What an explicit clear actually achieved. The stamp is best-effort by
+/// nature (it only decides anything when an .xmp sits beside the RAW), but a
+/// clear that reports plain success while the question about that file may
+/// come back is the same lie the deliverable paths already outlawed — so the
 /// failure rides back to the surface, which shows it.
 pub struct ClearOutcome {
     /// Did any saved file actually go away (else: "nothing to save" — and
     /// then nothing was written either, no marker and no stamp).
     pub removed: bool,
-    /// The develop IS cleared, but [`mark_develop_cleared`] failed: a sidecar
-    /// beside the RAW can still out-rank the clear and restore the edits.
+    /// The develop IS cleared, but [`mark_develop_cleared`] failed: an .xmp
+    /// beside the RAW that predates the clear may be asked about again.
     pub marker_warning: Option<String>,
 }
 

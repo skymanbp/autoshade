@@ -30,7 +30,7 @@
 //! knows:
 //!
 //! * An entry point that ALREADY carries the photograph (`render_to_file`,
-//!   `produce_recipe`, `write_xmp`, …) takes `sink: &dyn Sink` and binds the
+//!   `produce_recipe`, `export_xmp_beside`, …) takes `sink: &dyn Sink` and binds the
 //!   subject itself. A caller cannot then hand it a subject that disagrees
 //!   with the file it was asked to work on.
 //! * A helper that does NOT carry it (`tag_icc`, the mask-raster loader,

@@ -99,8 +99,10 @@ pub fn saved_quarter_turns(src: &Path) -> u8 {
         .map_or(0, |v| v.quarter_turns % 4)
 }
 
-/// The Lightroom XMP projection. Keeps the `<stem>.xmp` name so copying it
-/// beside the RAW for Lightroom needs no rename.
+/// Where builds before 2026-11-18 kept a Lightroom XMP of the develop
+/// (`<stem>.xmp`). Nothing writes it now: it is read only as an old save that
+/// has no recipe.json, retired by the next commit that writes a recipe, and
+/// removed by a clear.
 pub fn xmp_target(src: &Path) -> PathBuf {
     xmp_target_in(&store_root(), src)
 }
@@ -109,10 +111,10 @@ pub(super) fn xmp_target_in(root: &Path, src: &Path) -> PathBuf {
     develop_dir_in(root, src).join(format!("{}.xmp", crate::pipeline::stem(src)))
 }
 
-/// Where [`export_xmp_beside`] delivers: `<photo folder>/<name>.xmp`, spelled
-/// EXACTLY as [`lightroom_sidecar`] and `pipeline::write_xmp` read it
-/// (`with_extension`), so the file this produces is the file those two
-/// recognise. `None` only for a pathless photo.
+/// Where [`deliver_xmp_beside`] delivers: `<photo folder>/<name>.xmp`, spelled
+/// EXACTLY as [`external_xmp`] looks for it (`with_extension`), so the file an
+/// export produces is the file the question recognises as this app's own.
+/// `None` only for a pathless photo.
 pub fn xmp_beside_target(src: &Path) -> Option<PathBuf> {
     src.parent().is_some().then(|| src.with_extension("xmp"))
 }
@@ -171,64 +173,17 @@ pub(super) fn sweep_stale_sidecar_stages(to: &Path, grace: std::time::Duration) 
     }
 }
 
-/// Hand this photo's stored Lightroom XMP projection over to Lightroom: copy
-/// `<develop dir>/<stem>.xmp` to the photo's OWN folder as `<name>.xmp`, which
-/// is the only place Lightroom / Camera Raw look for a sidecar.
+/// Deliver an XMP this app built, at the user's explicit request, to the
+/// photo's own folder as `<name>.xmp` — the only place Lightroom / Camera Raw
+/// look for one.
 ///
 /// **This is the one deliberate write into the photo's folder.** Everything
 /// else refuses (`pipeline::guard_readonly`, "the photo library is read-only")
 /// and that guard is intentionally NOT consulted here — it exists to stop
 /// RENDERED deliverables and `-o` mistakes from landing in a library, whereas
-/// an XMP sidecar is metadata that Lightroom itself writes there by convention,
-/// the destination is fixed (never user-typed), and the caller is one explicit
-/// per-photo click. It is never reachable from a batch, a paste or the CLI.
-///
-/// `overwrite = false` refuses an existing sidecar with
-/// [`std::io::ErrorKind::AlreadyExists`] — Lightroom's own file may be sitting
-/// there, and the caller turns that refusal into a confirmation. The refusal is
-/// an ATOMIC `create_new` claim, not an `exists()` probe, so a file that appears
-/// between the check and the write cannot be clobbered unseen.
-///
-/// No develop lock, and the READ half is what makes that safe, not just the
-/// write half: the projection is published with [`durable_write`] (stage +
-/// atomic rename — `pipeline::write_xmp_doc`), never retire-then-write, so a
-/// concurrent save leaves no window in which `xmp_target` is missing or half
-/// written. A reader sees the previous complete sidecar or the next one. The
-/// write half touches nothing inside the develop directory at all. Taking the
-/// lock would therefore only add a way for the hand-off to fail while another
-/// AutoShade happens to be saving.
-///
-/// Kept only for the desktop app's button until it builds its file at click
-/// time ([`deliver_xmp_beside`] is the delivery both share).
-pub fn export_xmp_beside(src: &Path, overwrite: bool) -> std::io::Result<PathBuf> {
-    let stored = xmp_target(src);
-    // Bounded like every other read in this module (R28 2a): the projection
-    // lives in the develop dir, which under the `<temp>/autoshade` fallback
-    // root is world-writable. `NotFound` passes through `read_bytes_capped`
-    // untouched, so the workflow-state message below keeps its trigger.
-    let bytes = read_bytes_capped(&stored, MAX_STORE_JSON).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            // "Nothing there" is a WORKFLOW state, not a missing file: the
-            // develop has not been saved (or this photo is not a RAW), and the
-            // remedy belongs in the message.
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!(
-                    "no stored Lightroom XMP for this photo yet ({}) — save the develop first",
-                    stored.display()
-                ),
-            )
-        } else {
-            e
-        }
-    })?;
-    deliver_xmp_beside(src, &bytes, overwrite)
-}
-
-/// Deliver an XMP this app built, at the user's explicit request, to the
-/// photo's own folder as `<name>.xmp` — the only place Lightroom / Camera Raw
-/// look for one. **This is the one deliberate write into the photo's folder**
-/// (see the export notes above: never from a save, a batch or a paste).
+/// an .xmp is metadata that Lightroom itself writes there by convention, the
+/// destination is fixed (never user-typed), and the caller is one explicit
+/// per-photo request. It is never reachable from a save, a batch or a paste.
 ///
 /// `overwrite = false` refuses an existing file with
 /// [`std::io::ErrorKind::AlreadyExists`] through an atomic `create_new` claim,

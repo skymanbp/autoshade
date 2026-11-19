@@ -2,30 +2,21 @@
 
 use super::*;
 
-/// A single-generation write of the develop's four files. `recipe` bytes
+/// A single-generation write of the develop's three files. `recipe` bytes
 /// come from [`crate::pipeline::recipe_store_bytes`] (clamped +
 /// mask-relativized there), `pixels` from [`pixel_source_record_bytes`],
-/// `variants` from [`variants_member`], `xmp` from
-/// [`crate::pipeline::xmp_projection_member`] — the commit publishes, it
-/// does not interpret.
+/// `variants` from [`variants_member`] — the commit publishes, it does not
+/// interpret.
+///
+/// No commit carries an .xmp (2026-11-18: an .xmp is made only by an explicit
+/// export). A commit that writes the recipe RETIRES the `<stem>.xmp`
+/// ([`xmp_target`]) an earlier build kept beside it, in the same generation:
+/// that file was derived from the recipe it stood beside, so under a new
+/// recipe it can only be stale. A commit that writes no recipe leaves it.
 pub struct DevelopCommit {
     pub recipe: Option<Vec<u8>>,
     pub pixels: CommitMember,
     pub variants: CommitMember,
-    /// The Lightroom XMP projection (`<stem>.xmp`, [`xmp_target`]) — a
-    /// DERIVED file that lands or clears in the same generation as the
-    /// recipe it projects: `Write` for a develop that describes the RAW
-    /// itself, `Clear` for one that sits on AI-generated pixels (no sidecar
-    /// reproduces those) or on a baked source, `Keep` only when the recipe
-    /// is not written either. It publishes with the sidecar's own
-    /// discipline — stage + rename, no retired `.bak`: regenerable from
-    /// recipe.json, so there is nothing to recover. Until 2026-09-13 every
-    /// writer published it by a separate call AFTER the commit, and the
-    /// quit-time Save-all skipped that call for a generated card without
-    /// retiring what stood there: a projection written for a reverse-fit
-    /// card outlived the card and the recipe, and the open path restored it
-    /// over the pristine AI-generated pixels.
-    pub xmp: CommitMember,
 }
 
 fn commit_dir(src: &Path) -> PathBuf {
@@ -46,11 +37,13 @@ struct CommitManifest {
     recipe: String,
     pixels: String,
     variants: String,
-    /// The projection member's word. ADDITIVE at v=1: a marker written
-    /// before the member existed (a crash under an older build) reads as
+    /// What happens to the store's `<stem>.xmp`: `clear` when this generation
+    /// writes the recipe, else `keep`. `write` is only ever READ BACK — from
+    /// a stage an earlier build crashed in, which replays as it was staged.
+    /// ADDITIVE at v=1: a marker written before the word existed reads as
     /// `keep`, and an older build resolving a newer stage ignores the field
-    /// — the projection then stays as it was, which the readers tolerate
-    /// (a present recipe.json is never out-answered by it).
+    /// — the file then stays as it was, which the readers tolerate (a
+    /// present recipe.json is never out-answered by it).
     #[serde(default = "manifest_keep")]
     xmp: String,
     sums: std::collections::BTreeMap<String, String>,
@@ -93,10 +86,12 @@ fn commit_develop_unlocked(src: &Path, commit: DevelopCommit) -> std::io::Result
     if commit.recipe.is_none()
         && matches!(commit.pixels, CommitMember::Keep)
         && matches!(commit.variants, CommitMember::Keep)
-        && matches!(commit.xmp, CommitMember::Keep)
     {
         return Ok(());
     }
+    // The retire rule: an earlier build's `<stem>.xmp` goes whenever the
+    // recipe it was derived from is replaced, and stays put otherwise.
+    let xmp = if commit.recipe.is_some() { MemberRef::Clear } else { MemberRef::Keep };
     let dev = develop_dir(src);
     std::fs::create_dir_all(&dev)?;
     let cdir = commit_dir(src);
@@ -136,9 +131,6 @@ fn commit_develop_unlocked(src: &Path, commit: DevelopCommit) -> std::io::Result
         if let CommitMember::Write(b) = &commit.variants {
             stage("variants.json", b)?;
         }
-        if let CommitMember::Write(b) = &commit.xmp {
-            stage("projection.xmp", b)?;
-        }
         // The staged entries' directory records go down BEFORE the marker
         // can exist (unix: dir fsync; Windows: finish_parent is a no-op and
         // durability rests on the write-through rename below plus journaled
@@ -149,7 +141,7 @@ fn commit_develop_unlocked(src: &Path, commit: DevelopCommit) -> std::io::Result
             recipe: if commit.recipe.is_some() { "write" } else { "keep" }.to_string(),
             pixels: commit.pixels.word().to_string(),
             variants: commit.variants.word().to_string(),
-            xmp: commit.xmp.word().to_string(),
+            xmp: if commit.recipe.is_some() { "clear" } else { "keep" }.to_string(),
             sums,
         };
         // THE commit point: one durable rename. Before it, no live file has
@@ -170,7 +162,7 @@ fn commit_develop_unlocked(src: &Path, commit: DevelopCommit) -> std::io::Result
         commit.recipe.as_deref().map_or(MemberRef::Keep, MemberRef::Write),
         (&commit.pixels).into(),
         (&commit.variants).into(),
-        (&commit.xmp).into(),
+        xmp,
     ) {
         // BEYOND the commit point: the generation is promised and `.commit`
         // stays — recovery completes the apply on the photo's next locked
@@ -265,11 +257,11 @@ fn apply_commit_members(
     }
     apply(pixel_source_path(src), dev.join("pixels.json.bak"), pixels)?;
     apply(variants_path(src), dev.join("variants.json.bak"), variants)?;
-    // The projection LAST, after the recipe it projects, and with the
-    // sidecar's own publish discipline: stage + rename, no retired `.bak`
-    // (it is regenerable from recipe.json, so a crash window has nothing to
-    // recover), and a clear is a plain unlink. Same replay idempotence as
-    // the members above: bytes already live are not rewritten.
+    // The store's `<stem>.xmp` LAST, after the recipe: a plain unlink
+    // retires the one an earlier build left there. The Write arm is reached
+    // only by the replay of a stage an EARLIER build crashed in (this build
+    // stages none): it lands as it was staged, is never read while
+    // recipe.json exists, and the next commit retires it.
     let live = xmp_target(src);
     match xmp {
         MemberRef::Write(bytes) => {

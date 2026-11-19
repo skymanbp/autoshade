@@ -97,8 +97,8 @@ pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// `true` = the file at `path` IS the new, complete payload and only the
 /// durability tail failed ([`durable_os::finish_parent`] — the sole step after
 /// the rename). A caller that "rolls back" on that error destroys a delivered
-/// file instead of cleaning up a half-write; [`export_xmp_beside`] is the one
-/// that used to (R22 L2).
+/// file instead of cleaning up a half-write; the delivery beside the photo
+/// ([`deliver_xmp_beside`]) is the one that used to (R22 L2).
 pub(super) fn durable_write_tracked(path: &Path, bytes: &[u8]) -> (bool, std::io::Result<()>) {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()

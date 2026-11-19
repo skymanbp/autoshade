@@ -64,7 +64,8 @@
     /// no ● badge, and the question is raised instead. Nothing is written by
     /// opening.
     ///
-    /// MUTATION: the gallery badge back on `has_develop_or_sidecar`.
+    /// MUTATION: the gallery badge lit by the file beside the photo again
+    /// (its predicate anything but `store::has_develop`).
     #[test]
     fn opening_never_adopts_the_xmp_beside_the_photo() {
         let (src, xmp, dev, _scrub) = xmp_beside_fixture("open");
@@ -79,7 +80,7 @@
         assert!(develop_files(&dev).is_empty(), "opening wrote nothing: {:?}", develop_files(&dev));
         let gallery = include_str!("../panels/gallery.rs");
         assert!(
-            gallery.contains("autoshade::store::has_develop(path)") && !gallery.contains("has_develop_or_sidecar"),
+            gallery.contains("autoshade::store::has_develop(path)"),
             "the ● badge means what this app saved, nothing else"
         );
     }
@@ -295,10 +296,12 @@
     /// a develop folder holding an older build's `<stem>.xmp` removes it —
     /// Ctrl+S, an Analyze landing, a version load + Ctrl+S, and a paste,
     /// driven through their real doors. Save-all and the reverse-fit landing
-    /// commit through the same member; the source pin below holds every
-    /// commit site in the window to it.
+    /// go through the same `store::commit_develop`, whose rule it is: a commit
+    /// that writes the recipe retires the store's .xmp, and no commit can
+    /// carry one (`DevelopCommit` has no such member).
     ///
-    /// MUTATION: the Analyze landing's member back to the written projection.
+    /// MUTATION: the retire rule removed from `commit_develop_unlocked` (the
+    /// store's .xmp kept whatever the commit writes).
     #[test]
     fn no_save_path_leaves_an_xmp_in_the_store() {
         let (src, _xmp, dev, _scrub) = xmp_beside_fixture("nosave");
@@ -362,23 +365,6 @@
         assert_eq!(app.status, "Adjustments pasted to 1 photo(s)");
         assert!(!other_old.exists(), "a paste retires it too");
         assert!(!other.with_extension("xmp").exists(), "and writes nothing beside the photo");
-
-        // Every commit the window makes — Ctrl+S, Save-all, the Analyze
-        // landing, the reverse-fit landing, the paste — retires the store .xmp.
-        let sources = [
-            include_str!("../export.rs"),
-            include_str!("../actions.rs"),
-            include_str!("../workers.rs"),
-        ];
-        let sites: usize = sources.iter().map(|s| s.matches("autoshade::store::DevelopCommit {").count()).sum();
-        let cleared: usize =
-            sources.iter().map(|s| s.matches("xmp: autoshade::store::CommitMember::Clear").count()).sum();
-        assert_eq!(sites, 5, "the five commit sites");
-        assert_eq!(cleared, sites, "every one retires the store .xmp");
-        assert!(
-            sources.iter().all(|s| !s.contains("xmp_projection_member")),
-            "no save path builds a projection"
-        );
     }
 
     /// Acceptance 6 — "save as an .xmp" is the user's own act: 「Export .xmp

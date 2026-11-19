@@ -127,22 +127,12 @@ pub struct DevelopSnapshot {
     /// an existing save the caller must refuse to render over — falling
     /// back to legacy would resurrect stale edits, so the walk stops.
     pub recipe_err: Option<String>,
-    /// Always `None`: an .xmp beside the RAW is an external source the
-    /// snapshot never reads. Kept until the desktop batch resolver stops
-    /// matching on it.
-    pub lr_xmp: Option<(String, &'static str)>,
     /// The store's XMP projection an earlier build wrote (central, else
     /// legacy ./out) — the recipe-ABSENT fallthrough the open path takes. A
     /// present recipe.json, neutral or not, is never out-answered by it
     /// (2026-09-13): the projection was derived from the recipe, so one that
     /// disagrees can only be stale.
     pub store_xmp: Option<(String, &'static str)>,
-    /// Always `None`, for the same reason as `lr_xmp`.
-    pub lr_unreadable: Option<&'static str>,
-    /// Always `None`: the packet baked into the RAW is an external source too.
-    pub packet_xmp: Option<String>,
-    /// Always `None`, for the same reason as `packet_xmp`.
-    pub packet_unreadable: Option<String>,
     /// [`read_pixel_source`]'s answer, taken under the same lock.
     pub pixel_source: Option<(PathBuf, bool)>,
     /// [`has_pixel_source`]'s answer — a recorded-but-unloadable master
@@ -206,16 +196,11 @@ pub fn read_develop_snapshot(src: &Path) -> std::io::Result<DevelopSnapshot> {
         }
         // An .xmp beside the photo and the packet baked into the RAW are
         // external sources: the snapshot is what this app SAVED, so neither
-        // is read here. The four fields stay until the desktop app's batch
-        // resolver stops matching on them; they are always empty.
+        // is read here.
         Ok(DevelopSnapshot {
             recipe,
             recipe_err,
-            lr_xmp: None,
             store_xmp,
-            lr_unreadable: None,
-            packet_xmp: None,
-            packet_unreadable: None,
             pixel_source: read_pixel_source(src),
             pixel_recorded: has_pixel_source(src),
         })

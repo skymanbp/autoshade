@@ -2083,10 +2083,6 @@ impl AutoShadeApp {
                                                 recipe: Some(recipe_bytes),
                                                 pixels,
                                                 variants,
-                                                // An analysis lands as a
-                                                // develop, never as an .xmp
-                                                // (2026-11-18).
-                                                xmp: autoshade::store::CommitMember::Clear,
                                             },
                                         )?;
                                         Ok(())

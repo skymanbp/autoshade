@@ -495,11 +495,10 @@ fn lightroom_and_the_engine_both_draw_one_ellipse_for_every_roundness() {
     }
 }
 
-/// ONE LAW, THREE FACES: the CLI, the GUI and the `xmp` round trip all save
-/// through `pipeline::write_xmp` and nothing else (`bin/gui/actions.rs`,
-/// `bin/gui/export.rs` and `bin/gui/workers.rs` each call it directly, and the
-/// GUI has no XMP writer of its own), so this drives that one door on the
-/// pack's real bytes.
+/// ONE LAW, THREE FACES: the CLI's `export-xmp`, the web export and the
+/// desktop app's 「Export .xmp beside the photo」 all build their file through
+/// `pipeline::xmp_export_bytes` and nothing else (no surface has an XMP
+/// writer of its own), so this drives that one door on the pack's real bytes.
 ///
 /// Two facts, and they pull against each other. A save that never touched
 /// `tiff:Orientation` could not carry a rotation made here to Lightroom; a

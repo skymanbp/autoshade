@@ -3573,13 +3573,16 @@ ends the read.** `<stem>.xmp` in the store is the Lightroom projection earlier
 builds wrote beside `recipe.json` on every save. It is DERIVED from the recipe
 and can only ever be stale, never newer, so no save writes one any more and
 the commit that writes a recipe retires it in the same single-generation
-commit (`store::commit_develop`, the projection staged as `projection.xmp` in
-the `.commit/` generation and replayed by `resolve_pending_commit_unlocked`;
-an older manifest without the member replays as `Keep`, and an older build's
-crashed stage that still carries one lands beside its recipe, is never read,
-and goes with the next commit). The CLI `analyze` / `auto` / `match`, the
-batch (`pipeline::write_recipe`), the web save and the web Analyze
-(`pipeline::commit_analyzed_develop`) commit with the projection cleared. The
+commit (`store::commit_develop`: a `DevelopCommit` has no .xmp member, and a
+generation that writes the recipe unlinks the file — recorded as the
+manifest's `xmp` word and replayed by `resolve_pending_commit_unlocked`; an
+older manifest without the word replays as `Keep`, and an older build's
+crashed stage that still carries a staged `projection.xmp` lands beside its
+recipe, is never read, and goes with the next commit). Every saver goes
+through that commit: the CLI `analyze` / `auto` / `match`, the batch
+(`pipeline::write_recipe`), the web save and the web Analyze
+(`pipeline::commit_analyzed_develop`), and the desktop app's Ctrl+S, Save all,
+Analyze landing, reverse-fit landing and paste. The
 rule that a stale projection never answers comes from a measured case
 (2026-09-13): a 「◭ Reverse-fit」 card was deleted, its +90-saturation
 projection stayed, and the pristine 「✨ AI generated」 card that remained
@@ -3724,16 +3727,16 @@ from the card it was run from, `RetouchKind::NewDenoised`; the card it was
 run from keeps its pixels and the ▣ card is never redefined. The axis
 predicate is `VariantKind::is_source_based` (Original, Fitted, Denoised) /
 `on_ai_pixels` (Generated, Edited): calibration is stripped from the canvas, the
-`pixels.json` flag is written, and the projection member clears for BOTH
-AI-pixel kinds — the flag records what the master is, which the ✎ card
+`pixels.json` flag is written for BOTH AI-pixel kinds — the flag records
+what the master is, which the ✎ card
 shares with the ✨ card it forked from — while `fit_target` stays a policy
 about the ✨ card's raster alone (an ✎ card's edits are sliders the user
 already has, and the AI panel's empty-state line says which card to select).
 Ctrl+S no longer refuses a card on AI pixels: it saves the develop (the disk
 form re-stamped with the RAW's calibration from `pipeline::photo_calibration`,
 the canvas stripped, exactly the Save-all's and the Analyze saver's rule),
-the strip, the pixel link, and a CLEAR projection member, and its status line
-says "no Lightroom XMP". 「＋」 snapshots an ✎ card and refuses the pristine ✨
+the strip and the pixel link, and its status line says only that the develop
+was saved. 「＋」 snapshots an ✎ card and refuses the pristine ✨
 card (nothing to snapshot); 「▣ apply to Original」 refuses both, each with its
 own reason. At the door, `normalize_ai_cards` splits every ✨ card found
 carrying edits — the shape every build through v1.3.2 saved — into ✨ + ✎ as

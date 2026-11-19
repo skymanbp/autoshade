@@ -1,4 +1,4 @@
-//! Sidecars and legacy files: the capped readers, the stamped sidecar read, the Lightroom sidecar ranking, and the legacy out roots.
+//! Sidecars and legacy files: the capped readers, the stamped sidecar read, and the legacy out roots.
 
 use super::*;
 
@@ -140,59 +140,6 @@ pub fn has_develop(src: &Path) -> bool {
         || legacy_xmp(src).exists()
 }
 
-/// [`has_develop`] PLUS the sidecar Lightroom itself writes beside the RAW
-/// (L13#2). The badge/resume predicate: a photo edited only in Lightroom
-/// showed no ● badge yet clicking it restored the Lightroom develop, and
-/// the CLI batch resume filter spent a PAID analyze on it and then wrote
-/// recipe.json over the user's Lightroom work. Existence-only and
-/// deliberately cheap (called per photo per refresh) — reading and RANKING
-/// the file is [`lightroom_sidecar`]'s job. Conservative by design: a
-/// foreign or neutral sidecar counts as "a develop may exist", because a
-/// false SKIP costs one manual analyze while a false ANALYZE costs money
-/// and supersedes the user's work. A SIBLING of `has_develop`, never a
-/// replacement: [`rank_lightroom_sidecar`] calls `has_develop` to mean "is
-/// there a STORE develop to rank against" — folding the sidecar in there
-/// would make `LrSidecar::Only` unreachable whenever a sidecar exists.
-pub fn has_develop_or_sidecar(src: &Path) -> bool {
-    // The pending-clear marker outranks the sidecar probe exactly as it
-    // outranks the store files (L03): while the develop is being removed, a
-    // projection the user once copied beside the RAW must not resurrect
-    // the badge.
-    if clear_pending(src).exists() {
-        return false;
-    }
-    has_develop(src)
-        || (crate::decode::is_raw(src) && src.with_extension("xmp").exists())
-}
-
-/// What the Lightroom sidecar BESIDE the RAW (`<dir>/<stem>.xmp`) means for
-/// this photo's restore. That file is the one place LIGHTROOM itself writes,
-/// and until this existed no restore surface looked at it — edits made in
-/// Lightroom were silently outranked by an older stored develop. Newest
-/// intent wins:
-///   * byte-identical to our own projection → it is our copied export, not a
-///     Lightroom edit (`None`; the app itself tells users to copy the XMP
-///     beside the RAW);
-///   * no stored develop at all → the sidecar IS the develop (`Only`);
-///   * modified after every stored develop file → Lightroom's edit is the
-///     newest intent (`NewerThanStore`);
-///   * otherwise the store is newer — the user's AutoShade work outranks the
-///     older Lightroom pass (`OlderThanStore`).
-///
-/// Read-only: the store copy is never touched here — only an explicit save
-/// adopts the Lightroom edit as the develop.
-pub enum LrSidecar {
-    None,
-    Only(String),
-    NewerThanStore(String),
-    OlderThanStore,
-    /// A sidecar file IS beside the RAW but cannot be read, and this is why
-    /// (see [`SidecarRead::Unreadable`]). Folding this into `None` opened the
-    /// photo neutral in silence while the user's Lightroom work might sit
-    /// right there (L08) — callers disclose it and fall back to the store.
-    Unreadable(&'static str),
-}
-
 /// What a bounded sidecar read found. `Missing` and `Unreadable` are NOT the
 /// same thing to a caller choosing a merge base: a missing file carries
 /// nothing, while an unreadable one may carry the user's Lightroom work — and
@@ -256,8 +203,8 @@ pub fn read_bytes_capped(path: &Path, cap: u64) -> std::io::Result<Vec<u8>> {
 /// named `DSC0001.xmp` materialises 2 GB in a request thread just to be handed
 /// to a scanner. Real ones are kilobytes; the biggest Lightroom masks documents
 /// are single-digit megabytes. Over the cap the content is refused — restore
-/// callers treat that as "no develop", and the XMP-writing path DISCLOSES it
-/// (see [`crate::pipeline::write_xmp`]) instead of silently merging
+/// callers treat that as "no develop", and the export path DISCLOSES it
+/// (see [`crate::pipeline::xmp_export_bytes`]) instead of silently merging
 /// against a different base.
 ///
 /// `Read::take` rather than a `metadata()` size check: the length is bounded by
@@ -328,118 +275,5 @@ pub fn read_sidecar(path: &Path) -> Option<String> {
     match read_sidecar_checked(path) {
         SidecarRead::Ok(s) => Some(s),
         SidecarRead::Missing | SidecarRead::Unreadable(_) => None,
-    }
-}
-
-/// The RAW's embedded XMP packet AS A RESTORE SOURCE — strictly the
-/// LOWEST-priority answer (a develop Lightroom baked INTO a DNG must not
-/// outrank anything the user did since), and gated by the explicit-clear
-/// markers: unlike every other source, the packet lives inside a file this
-/// app never writes, so `clear_develop` cannot delete it — without the gate,
-/// Reset+Save would resurrect the baked develop on the very next open (the
-/// exact bug [`lightroom_sidecar`]'s cleared-marker contest was built to
-/// close). Known, accepted consequence of "strictly lowest": once any store
-/// file exists the packet is never consulted again — re-baking the DNG in
-/// Lightroom does not win (that would need an mtime rank a file we never
-/// write cannot express).
-///
-/// `Ok(None)` = no packet, or none a restore may consult. `Err(reason)` = a
-/// packet that EXISTS but cannot be read — disclosed by every caller, never
-/// folded into absence.
-pub fn embedded_packet_for_restore(src: &Path) -> Result<Option<String>, String> {
-    if !crate::decode::is_raw(src) {
-        return Ok(None);
-    }
-    if develop_dir(src).join("cleared.txt").exists() || clear_pending(src).exists() {
-        return Ok(None);
-    }
-    crate::decode::embedded_xmp(src).map_err(|e| e.to_string())
-}
-
-pub fn lightroom_sidecar(src: &Path) -> LrSidecar {
-    // Only camera RAWs have a Lightroom-sidecar convention; a baked
-    // PNG/TIFF's neighbouring .xmp (if any) is not ours to interpret.
-    if !crate::decode::is_raw(src) {
-        return LrSidecar::None;
-    }
-    let lr = src.with_extension("xmp");
-    let (read, stamp) = read_sidecar_stamped(&lr);
-    let text = match read {
-        SidecarRead::Ok(t) => t,
-        SidecarRead::Missing => return LrSidecar::None,
-        // A file IS there but cannot answer — never fold that into "absent".
-        SidecarRead::Unreadable(why) => return LrSidecar::Unreadable(why),
-    };
-    rank_lightroom_sidecar(src, &lr, text, stamp)
-}
-
-/// The ranking half of [`lightroom_sidecar`], split so a test can hand it a
-/// deliberately mismatched identity. `stamp` is the HANDLE identity of the
-/// text actually read; the mtime the newest-intent contest uses comes from it
-/// — never from a fresh path stat, which after a swap describes a DIFFERENT
-/// file than the text in hand (generation-N text ranked under
-/// generation-N+1's mtime resurrected stale edits as "newer than the store",
-/// and the mirror swap silently discarded fresh Lightroom work as older).
-pub(super) fn rank_lightroom_sidecar(
-    src: &Path,
-    lr: &Path,
-    text: String,
-    stamp: Option<SidecarStamp>,
-) -> LrSidecar {
-    for ours in [xmp_target(src), legacy_xmp(src)] {
-        if read_sidecar(&ours).is_some_and(|t| t == text) {
-            return LrSidecar::None;
-        }
-    }
-    // An explicit CLEAR (Reset + save, in the GUI or the web) is newest
-    // intent too: its marker competes by mtime like any store file. Without
-    // it, the projection the user once copied beside the RAW — no longer
-    // byte-matchable above once the clear deleted our store copies — was
-    // reborn as a "foreign Lightroom edit" and resurrected the cleared
-    // develop on the very next open. The LIBRARY stays untouched (deleting
-    // or rewriting the user's own sidecar would break the read-only
-    // contract), and a Lightroom edit made AFTER the clear still wins.
-    // A PENDING clear is newest intent too (L03): between the marker and
-    // the completed sweep, a projection beside the RAW must not out-rank
-    // the clear and resurrect what is being removed.
-    let cleared_t = [develop_dir(src).join("cleared.txt"), clear_pending(src)]
-        .iter()
-        .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
-        .max();
-    let lr_t = match stamp {
-        Some(s) => {
-            // ONE re-verification after the read: the path must still
-            // resolve to the very file the handle read. A swap — or an
-            // unlink — after the read means the text in hand no longer
-            // describes what sits beside the photo: disclosed, never ranked.
-            let now = std::fs::metadata(lr)
-                .ok()
-                .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
-            if now != Some(s) {
-                return LrSidecar::Unreadable("it was replaced while it was being read");
-            }
-            Some(s.0)
-        }
-        // No handle identity was available: the old path stat is all there
-        // is — strictly no worse than before this guard existed.
-        None => std::fs::metadata(lr).and_then(|m| m.modified()).ok(),
-    };
-    if !has_develop(src) {
-        return match (lr_t, cleared_t) {
-            (Some(l), Some(cl)) if l <= cl => LrSidecar::None,
-            _ => LrSidecar::Only(text),
-        };
-    }
-    let store_t = [recipe_target(src), xmp_target(src), legacy_recipe(src), legacy_xmp(src)]
-        .iter()
-        .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
-        .max()
-        .max(cleared_t);
-    match (lr_t, store_t) {
-        (Some(l), Some(s)) if l > s => LrSidecar::NewerThanStore(text),
-        // has_develop said a store exists, yet none of its files answers a
-        // stat — trust the sidecar, the one file that demonstrably can.
-        (Some(_), None) => LrSidecar::NewerThanStore(text),
-        _ => LrSidecar::OlderThanStore,
     }
 }

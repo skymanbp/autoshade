@@ -3539,9 +3539,6 @@ impl AutoShadeApp {
                             recipe: Some(recipe_bytes),
                             pixels,
                             variants,
-                            // No save writes an .xmp (2026-11-18); an older
-                            // build's projection retires with this generation.
-                            xmp: autoshade::store::CommitMember::Clear,
                         },
                     )?;
                     Ok(())
@@ -4428,9 +4425,6 @@ impl AutoShadeApp {
                                               p,
                                               autoshade::store::ActiveWrite::Kind("fitted"),
                                           )?,
-                                          // A fit lands as a develop, never
-                                          // as an .xmp (2026-11-18).
-                                          xmp: autoshade::store::CommitMember::Clear,
                                       },
                                   )?;
                                   Ok(())

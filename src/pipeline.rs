@@ -3913,7 +3913,6 @@ pub fn write_recipe(
                 recipe: Some(bytes),
                 pixels: crate::store::CommitMember::Keep,
                 variants: crate::store::CommitMember::Keep,
-                xmp: crate::store::CommitMember::Clear,
             },
         )
         .with_context(|| format!("publish recipe {}", out.display()))?;
@@ -4034,43 +4033,6 @@ pub fn claim_numbered(out: &Path) -> Result<PathBuf> {
 }
 
 
-/// The `xmp` member of a [`crate::store::DevelopCommit`] for the develop
-/// being committed, with the projection's two disclosures (the merge note
-/// and the per-mask loss list) for the caller's own channel.
-///
-/// The projection is DERIVED from `recipe.json` and lives or dies with it,
-/// in the same generation:
-///
-/// * `on_source` — the develop describes the RAW itself (an Original or
-///   Reverse-fit card; the CLI's fits and analyses; a web save over no
-///   generated master) — and the photo is a camera RAW: `Write`, the bytes
-///   [`xmp_projection_bytes`] builds;
-/// * otherwise `Clear`: a develop that sits on AI-generated pixels has no
-///   sidecar that reproduces those pixels, and a baked PNG/JPEG has no
-///   Lightroom-sidecar convention at all.
-///
-/// Until 2026-09-13 every writer published the projection by a SEPARATE
-/// call after its commit — and the quit-time Save-all skipped that call for
-/// a generated card without retiring what stood there. A projection written
-/// for a reverse-fit card therefore outlived the card (deleted) and the
-/// recipe it projected (replaced by the generated card's neutral one), and
-/// the open path restored its +90 saturation over the pristine AI-generated
-/// pixels. `Clear` in the same generation is the writer-side half of that
-/// fix; the readers' half is that a present `recipe.json` — neutral or not
-/// — is never out-answered by the projection beside it.
-pub fn xmp_projection_member(
-    raw: &Path,
-    recipe: &EditRecipe,
-    on_source: bool,
-    sink: &dyn crate::diag::Sink,
-) -> Result<(crate::store::CommitMember, Option<String>, Vec<xmp::MaskLoss>)> {
-    if !on_source || !crate::decode::is_raw(raw) {
-        return Ok((crate::store::CommitMember::Clear, None, Vec::new()));
-    }
-    let (bytes, note, losses) = xmp_projection_bytes(raw, recipe, sink)?;
-    Ok((crate::store::CommitMember::Write(bytes), note, losses))
-}
-
 /// What [`resolve_develop_masks`] did: the AI masks the local segmenter
 /// re-derived (or could not), and the face / eyes / skin masks the face finder
 /// outlined (or took out).
@@ -4149,79 +4111,9 @@ pub fn commit_analyzed_develop(
             recipe: Some(recipe_store_bytes(raw, recipe, sink)?),
             pixels: crate::store::CommitMember::Keep,
             variants,
-            xmp: crate::store::CommitMember::Clear,
         },
     )?;
     Ok(())
-}
-
-/// The store projection's BYTES for `raw` — merge base (the sidecar
-/// Lightroom writes beside the RAW, else the previous projection) and all.
-/// Kept only while the desktop app's savers and its export button still
-/// call it; every other surface writes no projection.
-pub fn xmp_projection_bytes(
-    raw: &Path,
-    recipe: &EditRecipe,
-    sink: &dyn crate::diag::Sink,
-) -> Result<(Vec<u8>, Option<String>, Vec<xmp::MaskLoss>)> {
-    use crate::store::SidecarRead;
-    let target = xmp_target(raw);
-    // MERGE, never regenerate over Lightroom's work (A11): the base is the
-    // sidecar Lightroom itself writes (beside the RAW) when one exists — its
-    // LR-only properties (the camera profile / Look, PointColor, LR
-    // lens-profile data, foreign namespaces) survive our save, so the file
-    // the user copies back beside the RAW keeps them. Else the previous
-    // projection at the destination, which carries forward whatever an
-    // earlier merge preserved.
-    //
-    // The base carries ITS OWN PATH so a failed merge can name the file whose
-    // properties are lost — the note used to name the OUTPUT for every base,
-    // pointing users at a file that was never the problem. And an UNREADABLE
-    // base is a disclosure, never a silent fall-through: `read_sidecar`'s
-    // one-Option shape let an over-the-cap Lightroom sidecar be silently
-    // replaced by our own previous projection as the merge base, so a REAL
-    // loss produced no note — the exact silence this function exists to end.
-    let mut notes: Vec<String> = Vec::new();
-    let mut base: Option<(PathBuf, String)> = None;
-    // Only a camera RAW has a Lightroom-sidecar convention; a baked
-    // PNG/TIFF's neighbouring .xmp is someone else's file (store::
-    // lightroom_sidecar draws the same line for restore). Reading it anyway
-    // meant a foreign sidecar was consulted on every save of a baked photo.
-    if crate::decode::is_raw(raw)
-        && let Some(lr) = crate::xmp_pair::XmpPairing::beside().find(raw)
-    {
-        match crate::store::read_sidecar_checked(&lr) {
-            // A blank file carries nothing to merge and nothing to lose.
-            SidecarRead::Ok(t) if !t.trim().is_empty() => base = Some((lr, t)),
-            SidecarRead::Ok(_) | SidecarRead::Missing => {}
-            // Deliberately says "may not be", not "are not": the save falls
-            // through to the previous projection below, which carries forward
-            // whatever an earlier merge preserved — so some of that sidecar's
-            // properties can survive by that route. What is certain is that
-            // anything added to it SINCE is not represented, and that is the
-            // loss worth naming.
-            SidecarRead::Unreadable(why) => notes.push(format!(
-                "the Lightroom sidecar at {} could not be read ({why}), so this save was \
-                 merged against AutoShade's own previous version instead — anything changed \
-                 in that sidecar since is not in the new file; the sidecar itself is untouched",
-                lr.display()
-            )),
-        }
-    }
-    if base.is_none() {
-        match crate::store::read_sidecar_checked(&target) {
-            SidecarRead::Ok(t) if !t.trim().is_empty() => base = Some((target.clone(), t)),
-            SidecarRead::Ok(_) | SidecarRead::Missing => {}
-            SidecarRead::Unreadable(why) => notes.push(format!(
-                "the previous XMP at {} could not be used as the merge base ({why}) — \
-                 it is replaced by a regenerated file that carries none of its properties",
-                target.display()
-            )),
-        }
-    }
-    let (doc, note, losses) =
-        build_xmp_doc(&target, recipe, base, &crate::diag::Diag::about(sink, raw), notes)?;
-    Ok((doc.into_bytes(), note, losses))
 }
 
 /// Why `raw`'s develop cannot be exported as an .xmp, or `None` when it can.
@@ -4498,7 +4390,7 @@ fn write_xmp_doc(
 /// The document half of [`write_xmp_doc`]: the projection's text plus its
 /// two disclosures, with nothing written. `out` is only NAMED here — the
 /// regenerated-base note says which file lost what — so the same builder
-/// serves the direct writer and the commit member ([`xmp_projection_bytes`]).
+/// serves the direct writer and the export door ([`xmp_export_bytes`]).
 fn build_xmp_doc(
     out: &Path,
     recipe: &EditRecipe,
@@ -5915,15 +5807,6 @@ mod guard_tests {
         let baked = xmp_export_refusal(&png, false).expect("a baked source: no .xmp");
         assert!(baked.contains("camera RAW"), "{baked}");
 
-        // The desktop app's savers still pass a projection member until they
-        // move to the export door; its two Clear arms stay pinned until then.
-        let (member, note, losses) =
-            xmp_projection_member(&raw, &r, false, crate::diag::stderr()).unwrap();
-        assert!(matches!(member, crate::store::CommitMember::Clear), "AI pixels: no sidecar");
-        assert!(note.is_none() && losses.is_empty());
-        let (member, _, _) =
-            xmp_projection_member(&png, &r, true, crate::diag::stderr()).unwrap();
-        assert!(matches!(member, crate::store::CommitMember::Clear), "a baked source: no sidecar");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
     }

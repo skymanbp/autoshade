@@ -2023,7 +2023,6 @@ fn match_cmd(
                     raw,
                     autoshade::store::ActiveWrite::Kind("fitted"),
                 )?,
-                xmp: autoshade::store::CommitMember::Clear,
             },
         )?;
         Ok(())

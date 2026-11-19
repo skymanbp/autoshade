@@ -4,16 +4,14 @@ use super::*;
 
 /// The batch renderer's develop resolution — the OPEN path's precedence
 /// (`persist::read_saved_develop_locked`), mirrored onto a
-/// [`autoshade::store::DevelopSnapshot`] so the two surfaces answer alike
-/// (L13#1: the batch read recipe.json only — an LR-only or XMP-only photo
-/// exported neutral, and an older recipe out-ranked a newer Lightroom
-/// edit). Order: Lightroom's own sidecar when newest → recipe.json (a
-/// NEUTRAL recipe falls through, the open rule) → the store's XMP
-/// projection. XMP-restored recipes get the same fresh-calibration stamp
-/// the open path applies (`persist::stamp_calibration` shape: knots when
-/// non-empty, lens, as-shot pinned only if None). The RAW's embedded packet
-/// answers LAST, exactly as on open (`store::embedded_packet_for_restore`
-/// carries the clear gate; the snapshot read it under the develop lock).
+/// [`autoshade::store::DevelopSnapshot`] so the two surfaces answer alike:
+/// only what this app SAVED. Order: recipe.json (a NEUTRAL one restores
+/// nothing, the open rule) → the XMP an earlier build kept in the store, for
+/// a develop with no recipe.json. An .xmp beside the photo and the packet
+/// inside a RAW are external sources — never read here, as on open. An
+/// XMP-restored recipe gets the same fresh-calibration stamp the open path
+/// applies (`persist::stamp_calibration` shape: knots when non-empty, lens,
+/// as-shot pinned only if None).
 /// `Ok(None)` = no saved develop (the caller's neutral + base-look fallback).
 pub(crate) fn resolve_snapshot_develop(
     p: &std::path::Path,
@@ -28,20 +26,13 @@ pub(crate) fn resolve_snapshot_develop(
     // outcome. (Full unification with persist::read_saved_develop_locked
     // stays registered on the structure track — the WARNING parity is what
     // this closes.)
-    if let Some((text, kind)) = snap.lr_xmp.as_ref()
-        && let Some(hit) = xmp_arm(p, text, kind, warns)
-    {
-        return Ok(Some(hit));
-    }
     if let Some((text, from)) = &snap.recipe {
         let mut r = serde_json::from_str::<EditRecipe>(text)?;
         if r.is_noop() {
             // A neutral recipe.json restores NOTHING — on the open path and
             // here alike (2026-09-13): the projection beside it is derived
-            // from it and can only disagree by being stale, and the snapshot
-            // never carries the embedded packet past a store file. The photo
-            // renders the fresh baseline (not the neutral recipe's stale
-            // calibration).
+            // from it and can only disagree by being stale. The photo renders
+            // the fresh baseline (not the neutral recipe's stale calibration).
             return Ok(None);
         }
         // The one restore path that never went through clamp: a stored
@@ -73,11 +64,6 @@ pub(crate) fn resolve_snapshot_develop(
     }
     if let Some((t, k)) = snap.store_xmp.as_ref()
         && let Some(hit) = xmp_arm(p, t, k, warns)
-    {
-        return Ok(Some(hit));
-    }
-    if let Some(t) = snap.packet_xmp.as_ref()
-        && let Some(hit) = xmp_arm(p, t, "XMP (embedded in the RAW)", warns)
     {
         return Ok(Some(hit));
     }
@@ -770,26 +756,6 @@ impl AutoShadeApp {
                                 (lr.clone(), pix.clone())
                             } else {
                                 let snap = autoshade::store::read_develop_snapshot(p)?;
-                                if let Some(why) = &snap.lr_unreadable {
-                                    // Unreadable is not absent (L08): stderr
-                                    // for the log AND the batch outcome for
-                                    // the user (L16-2 — the windowed build
-                                    // has no console).
-                                    eprintln!(
-                                        "⚠ {}: a Lightroom sidecar sits beside this photo but could not be read ({why}) — the stored develop decides",
-                                        autoshade::pipeline::stem(p)
-                                    );
-                                    photo_warns
-                                        .push(format!("Lightroom sidecar unreadable ({why})"));
-                                }
-                                if let Some(why) = &snap.packet_unreadable {
-                                    // Same rule for the packet INSIDE the RAW.
-                                    eprintln!(
-                                        "⚠ {}: this RAW carries an embedded XMP develop that could not be read ({why}) — it is NOT reflected",
-                                        autoshade::pipeline::stem(p)
-                                    );
-                                    photo_warns.push(format!("embedded XMP unreadable ({why})"));
-                                }
                                 let recipe = match resolve_snapshot_develop(p, &snap, &mut photo_warns)? {
                                     Some((r, _kind)) => r,
                                     // No saved develop → export what the canvas
@@ -1374,9 +1340,6 @@ impl AutoShadeApp {
                     recipe: Some(recipe_bytes),
                     pixels,
                     variants,
-                    // The projection older builds kept in the develop folder
-                    // retires with this generation: no save writes an .xmp.
-                    xmp: autoshade::store::CommitMember::Clear,
                 },
             )?;
             Ok(())
@@ -1661,9 +1624,6 @@ impl AutoShadeApp {
                                             None => autoshade::store::ActiveWrite::Unknown,
                                         },
                                     )?,
-                                    // No paste writes an .xmp; an older
-                                    // build's projection retires with it.
-                                    xmp: autoshade::store::CommitMember::Clear,
                                 },
                             )?;
                             Ok(())
