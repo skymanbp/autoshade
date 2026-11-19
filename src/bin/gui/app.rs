@@ -255,6 +255,10 @@ pub(crate) struct AutoShadeApp {
     // (`fit_prompt_layer`) — None = not asking. Session state: it names a
     // card of the open photo.
     pub(crate) fit_prompt: Option<FitPrompt>,
+    // 2026-11-18: the question an .xmp that came with the opened photo
+    // raises (`xmp_prompt_layer`) — None = not asking. Session state: it
+    // names one photo, and a fresh open replaces or drops it.
+    pub(crate) xmp_prompt: Option<XmpPrompt>,
     // Whether to ask it at all (a pref): the prompt's 「Don't ask again」 turns
     // it off, the checkbox at the foot of the Generate fold turns it back on.
     pub(crate) ask_fit_after_generate: bool,
@@ -1896,6 +1900,7 @@ impl Default for AutoShadeApp {
             fit_ref: None,
             fit_from: None,
             fit_prompt: None,
+            xmp_prompt: None,
             // Mirror Prefs::default.
             ask_fit_after_generate: true,
             show_settings: false,
@@ -2202,6 +2207,11 @@ impl AutoShadeApp {
         // outranks it.
         if !self.confirm_quit {
             self.fit_prompt_layer(ctx);
+            // The .xmp question waits behind the fit prompt: one question on
+            // screen at a time, and the fit prompt's answer starts work.
+            if self.fit_prompt.is_none() {
+                self.xmp_prompt_layer(ctx);
+            }
         }
 
         self.upd_shortcuts(ctx);

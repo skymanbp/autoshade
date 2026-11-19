@@ -1185,72 +1185,26 @@ impl AutoShadeApp {
                                 imported_masks,
                                 carried_globals,
                                 clamp: clamp_dropped,
-                                lr_unreadable,
-                                packet_unreadable,
+                                external,
                             } = self
                                 .src_path
                                 .as_deref()
                                 .map(read_saved_develop)
                                 .unwrap_or_default();
-                            // W20: restore-time sanitisation is not allowed to
-                            // be silent loss — a stored recipe past the caps
-                            // opens minus edits, and the user must hear it.
-                            if !clamp_dropped.is_empty() {
-                                // All four loss kinds — a curve-only or
-                                // string-only truncation used to toast
-                                // "0 mask(s) and 0 component(s)" (16-lane
-                                // scan L14/L16).
-                                let t = trf(
-                                    lang,
-                                    "recipe limits discarded {n} mask(s), {m} component(s), {c} curve point(s) and {s} string byte(s) on restore — the saved file exceeds the app's caps",
-                                    &[
-                                        ("n", &clamp_dropped.dropped_masks.to_string()),
-                                        ("m", &clamp_dropped.dropped_components.to_string()),
-                                        ("c", &clamp_dropped.truncated_curve_points.to_string()),
-                                        ("s", &clamp_dropped.truncated_string_bytes.to_string()),
-                                    ],
-                                );
-                                self.toast(ToastKind::Error, t);
-                            }
-                            // What the sidecar's masks cost on the way in.
-                            // R25 P1 replaced a COUNT of refusals with the
-                            // reader's own named verdicts: the old line said
-                            // "N have no engine equivalent" about corrections
-                            // that were mostly ordinary radials and
-                            // gradients, refused over a rotation angle and a
-                            // default blend mode. Now they import, and the
-                            // sentence names whatever really did not come
-                            // with them. The sidecar is untouched either way.
-                            if let Some(t) =
-                                crate::util::xmp_import_line(lang, imported_masks, &mask_import)
-                            {
-                                self.toast(ToastKind::Error, t);
-                            }
-                            // R24-5 M0, the GLOBAL half of the same story: the
-                            // sidecar's own crs: properties this engine does
-                            // not model. The merge keeps every one of them, so
-                            // nothing is lost — but the canvas will not match
-                            // Lightroom's render, and until now nothing said
-                            // why. Named, not counted: 「Texture」 is the whole
-                            // answer, 「3 settings」 is not. Capped like the
-                            // mask-loss line, for the same reason.
-                            if !carried_globals.is_empty() {
-                                let shown = carried_globals.len().min(4);
-                                let more = carried_globals.len() - shown;
-                                let mut list = carried_globals[..shown].join(", ");
-                                if more > 0 {
-                                    list.push_str(&format!(
-                                        ", {}",
-                                        trf(lang, "+{n} more", &[("n", &more.to_string())])
-                                    ));
-                                }
-                                let t = trf(
-                                    lang,
-                                    "this Lightroom sidecar carries {n} global setting(s) the engine does not render (a save keeps them untouched): {list}",
-                                    &[("n", &carried_globals.len().to_string()), ("list", &list)],
-                                );
-                                self.toast(ToastKind::Error, t);
-                            }
+                            // W20 / A6 / R25 P1 / R24-5: what restoring a
+                            // stored develop cost — the caps' cuts, masks that
+                            // did not come, settings carried but not rendered,
+                            // numbers read as neutral. Only an XMP an older
+                            // build stored has the last three; the sentences
+                            // are the import's own, said by one helper.
+                            self.xmp_import_toasts(
+                                lang,
+                                imported_masks,
+                                &mask_import,
+                                &carried_globals,
+                                &xmp_bad,
+                                &clamp_dropped,
+                            );
                             // The decision half lives in persist::resolve_saved_develop —
                             // this handler applies it to the canvas. Two reasons to skip
                             // the repair decode fold here: a GENERATED canvas strips its
@@ -1276,41 +1230,6 @@ impl AutoShadeApp {
                             );
                             if unresolved {
                                 self.open_unresolved = true;
-                            }
-                            // A6 disclosure: numeric settings in the restored
-                            // XMP that do not parse imported as SILENT
-                            // neutrals — and the next save would write those
-                            // neutrals back over the sidecar. Say so on open.
-                            if !xmp_bad.is_empty() {
-                                let w = trf(
-                                    lang,
-                                    "{n} XMP numeric setting(s) unreadable ({list}) — restored as neutral; saving would overwrite the sidecar with those neutrals",
-                                    &[
-                                        ("n", &xmp_bad.len().to_string()),
-                                        ("list", &xmp_bad.join(", ")),
-                                    ],
-                                );
-                                open_note = merge_note(open_note, w);
-                            }
-                            if let Some(why) = lr_unreadable {
-                                let w = trf(
-                                    lang,
-                                    "a Lightroom sidecar sits beside this photo but could not be read ({why}) — any Lightroom edits in it are NOT reflected",
-                                    &[("why", why)],
-                                );
-                                open_note = merge_note(open_note, w);
-                            }
-                            // Same unreadable-is-not-absent rule for the
-                            // packet INSIDE the RAW — only probed when no
-                            // other source answered, so this fires exactly
-                            // when whatever it holds would have been shown.
-                            if let Some(why) = packet_unreadable {
-                                let w = trf(
-                                    lang,
-                                    "this RAW carries an embedded XMP develop that could not be read ({why}) — it is NOT reflected",
-                                    &[("why", &why)],
-                                );
-                                open_note = merge_note(open_note, w);
                             }
                             if stamp {
                                 stamp_calibration(&mut recipe, &start, &lens, as_shot);
@@ -1911,6 +1830,12 @@ impl AutoShadeApp {
                                 // away in the status line.
                                 self.toast(ToastKind::Error, note);
                             }
+                            // After the open has landed — strip, canvas and
+                            // status in place — the .xmp question for THIS
+                            // photo (2026-11-18: an external file is asked
+                            // about, never adopted). The keep arm never
+                            // reaches here, so a preview re-decode never asks.
+                            self.offer_xmp_prompt(ctx, external);
                         }
                     }
                     Err(e) => {

@@ -2810,10 +2810,10 @@ impl AutoShadeApp {
         }
     }
 
-    /// A modal layer is up — the quit confirm or the fit prompt — and owns
-    /// the keyboard and the pointer (D13).
+    /// A modal layer is up — the quit confirm, the fit prompt or the .xmp
+    /// question — and owns the keyboard and the pointer (D13).
     pub(crate) fn modal_up(&self) -> bool {
-        self.confirm_quit || self.fit_prompt.is_some()
+        self.confirm_quit || self.fit_prompt.is_some() || self.xmp_prompt.is_some()
     }
 
     /// Raise the fit prompt after a whole-frame reimagine landed and the strip
@@ -2971,6 +2971,312 @@ impl AutoShadeApp {
             // toward the result the question named.
             self.fit_ref = None;
             self.start_fit();
+        }
+    }
+
+    /// Raise the .xmp question for the photo that just opened, or drop a
+    /// question still standing for another photo. Asked only in the
+    /// workspaces with the full editor (Normal's one-click sidebar has no
+    /// undo history to land an import in, and never asks — nor stamps), and
+    /// only for a file the store reports as not dealt with yet
+    /// ([`autoshade::store::external_xmp`]): once per version of the file.
+    pub(crate) fn offer_xmp_prompt(&mut self, ctx: &egui::Context, external: autoshade::store::ExternalXmp) {
+        self.xmp_prompt = None;
+        if self.mode.shell().one_click_sidebar {
+            return;
+        }
+        let Some(photo) = self.src_path.clone() else { return };
+        let (beside, text, tag) = match external {
+            autoshade::store::ExternalXmp::None => return,
+            autoshade::store::ExternalXmp::Beside { path, text, tag } => (Some(path), text, tag),
+            autoshade::store::ExternalXmp::Embedded { text, tag } => (None, text, tag),
+        };
+        self.xmp_prompt = Some(XmpPrompt { photo, beside, text, tag });
+        // The layer's Enter waits for "no widget focused" — surrendered now,
+        // as the fit prompt does when it opens.
+        if let Some(id) = ctx.memory(|m| m.focused()) {
+            ctx.memory_mut(|m| m.surrender_focus(id));
+        }
+    }
+
+    /// How a sentence names an .xmp: the file NAME (the full path is the
+    /// hover's), or the photo's own name for a packet inside the RAW.
+    pub(crate) fn xmp_file_label(beside: Option<&std::path::Path>, photo: &std::path::Path) -> String {
+        beside
+            .unwrap_or(photo)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    /// The .xmp question (2026-11-18): the fit prompt's idiom — a scrim that
+    /// keeps the canvas out of reach, Esc = the safe answer (don't read),
+    /// Enter = the primary (read them in), centred. Either answer is recorded
+    /// for this version of the file, so it is asked once.
+    pub(crate) fn xmp_prompt_layer(&mut self, ctx: &egui::Context) {
+        let lang = self.lang;
+        let Some(prompt) = self.xmp_prompt.take() else {
+            return;
+        };
+        // An answer belongs to the photo it was asked about: once another
+        // photo is open the question has nothing to land on.
+        if self.src_path.as_deref() != Some(prompt.photo.as_path()) {
+            return;
+        }
+        let file = Self::xmp_file_label(prompt.beside.as_deref(), &prompt.photo);
+        let mut open = true;
+        let mut read = false;
+        let mut skip = false;
+        let widget_focused = ctx.memory(|m| m.focused()).is_some();
+        ctx.input_mut(|i| {
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                skip = true;
+            }
+            if !widget_focused && i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
+                read = true;
+            }
+        });
+        egui::Area::new(egui::Id::new("xmp_prompt_scrim"))
+            .order(egui::Order::Middle)
+            .fixed_pos(egui::Pos2::ZERO)
+            .show(ctx, |ui| {
+                let r = ctx.screen_rect();
+                ui.allocate_response(r.size(), egui::Sense::click_and_drag());
+                ui.painter().rect_filled(r, 0.0, egui::Color32::from_black_alpha(96));
+            });
+        let title = match prompt.beside {
+            Some(_) => tr(lang, "An .xmp file sits beside this photo"),
+            None => tr(lang, "This photo carries adjustments from another program"),
+        };
+        egui::Window::new(title)
+            .id(egui::Id::new("xmp_prompt"))
+            .order(egui::Order::Foreground)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                // A dialog as wide as its longest sentence would not fit a
+                // laptop screen, so the lines wrap at 420 px — or at the
+                // title bar's width when a long title makes the window wider
+                // than that (egui sizes the bar as the title plus room for a
+                // button on each side): a body wrapped narrower than its own
+                // dialog leaves a blank band down the right edge.
+                let title_w = ui
+                    .painter()
+                    .layout_no_wrap(
+                        title.to_owned(),
+                        egui::TextStyle::Heading.resolve(ui.style()),
+                        ui.visuals().text_color(),
+                    )
+                    .size()
+                    .x;
+                let bar_w = title_w + ui.spacing().interact_size.y + ui.spacing().icon_width;
+                ui.set_max_width(bar_w.max(420.0));
+                match &prompt.beside {
+                    Some(path) => {
+                        ui.label(egui::RichText::new(&file).monospace().weak())
+                            .on_hover_text(abs_display(path));
+                        ui.label(tr(
+                            lang,
+                            "It holds adjustments saved by another program (Lightroom, for example). Read them in?",
+                        ));
+                    }
+                    None => {
+                        ui.label(tr(lang, "They were written into the file itself. Read them in?"));
+                    }
+                }
+                ui.label(tr(
+                    lang,
+                    "Reading them in is one step you can undo. Nothing is saved until you press Ctrl+S.",
+                ));
+                ui.label(
+                    egui::RichText::new(tr(lang, "You will not be asked again unless the file changes."))
+                        .small()
+                        .weak(),
+                );
+                ui.add_space(SPACE_MD);
+                // The safe answer first, the primary tinted and last — the
+                // quit layer's order.
+                ui.horizontal(|ui| {
+                    skip |= action(ui, true, tr(lang, "Don't read")).on_hover_text("Esc").clicked();
+                    read |= primary(ui, true, tr(lang, "Read them in")).on_hover_text("Enter").clicked();
+                });
+            });
+        if !open {
+            skip = true;
+        }
+        if !(read || skip) {
+            self.xmp_prompt = Some(prompt);
+            return;
+        }
+        if read {
+            // The stamp is written by the landing, once the import is on the
+            // canvas — an import that could not land is still a question.
+            self.read_xmp_in(ctx, &file, &prompt.text, Some(&prompt.tag));
+            return;
+        }
+        // "Don't read": recorded at once, so this version is not asked again.
+        let t = trf(lang, "{file} was not read", &[("file", &file)]);
+        self.status = t;
+        self.record_xmp_answer(&prompt.photo, &prompt.tag);
+    }
+
+    /// Remember that the external .xmp with `tag` was dealt with for `photo`.
+    /// A stamp that cannot be written is said — the worst outcome is one
+    /// question too many, never a lost edit.
+    fn record_xmp_answer(&mut self, photo: &std::path::Path, tag: &str) {
+        if let Err(e) =
+            autoshade::store::answer_external_xmp(photo, tag, autoshade::store::DevelopLockMode::NoWait)
+        {
+            let t = trf(
+                self.lang,
+                "your answer could not be recorded ({err}) — you may be asked about this file again",
+                &[("err", &e.to_string())],
+            );
+            self.toast(ToastKind::Error, t);
+        }
+    }
+
+    /// THE landing of an .xmp's adjustments, shared by the question's "Read
+    /// them in" and the Export section's manual import. `label` names the
+    /// file in sentences; `tag` (the question's) is recorded as answered once
+    /// the import has landed.
+    ///
+    /// Where it lands (Q1): an .xmp describes the photo itself, so the active
+    /// variant takes it when it is source-based (▣ ◭ ◈ ▦ — where the user is
+    /// looking); otherwise the strip switches first to the base negative
+    /// ([`crate::model::base_negative_index`]), else to the first
+    /// source-based variant, and with none at all nothing happens and the
+    /// sentence says why. The import is ONE undo step: the recipe is
+    /// replaced wholesale and `commit_if_settled` commits it on the next
+    /// frame, the way a version load or an Analyze landing is. Nothing is
+    /// written but the answered stamp; ● lights, and Ctrl+S saves it.
+    pub(crate) fn read_xmp_in(
+        &mut self,
+        ctx: &egui::Context,
+        label: &str,
+        text: &str,
+        tag: Option<&str>,
+    ) -> bool {
+        let lang = self.lang;
+        let Some(photo) = self.src_path.clone() else { return false };
+        if !self.active_variant().is_some_and(|v| v.kind.is_source_based()) {
+            let target = self
+                .original_index()
+                .or_else(|| self.variants.iter().position(|v| v.kind.is_source_based()));
+            let Some(target) = target else {
+                let t = tr(lang, "This photo has no variant on its own pixels to read the .xmp into");
+                self.status = t.to_string();
+                self.toast(ToastKind::Error, t);
+                return false;
+            };
+            self.switch_variant(target, ctx);
+            if self.active != target {
+                // `switch_variant` said why (a running task holds the strip).
+                return false;
+            }
+            if Some(target) == self.original_index() {
+                self.toast(
+                    ToastKind::Success,
+                    tr(
+                        lang,
+                        "Switched to the ▣ Original variant first — an .xmp describes the photo itself, not an AI-generated image",
+                    ),
+                );
+            }
+        }
+        let imp = autoshade::pipeline::import_xmp_onto(&photo, text, &self.photo_start, autoshade::diag::stderr());
+        if imp.recipe.is_noop() {
+            let t = trf(lang, "{file} holds no adjustments AutoShade can read", &[("file", label)]);
+            self.status = t.clone();
+            self.toast(ToastKind::Error, t);
+            return false;
+        }
+        // Any edit still in flight is its own step, so one Ctrl+Z after the
+        // import returns to exactly the canvas the user had.
+        self.commit_now();
+        self.xmp_import_toasts(
+            lang,
+            imp.imported_masks,
+            &imp.mask_losses,
+            &imp.carried,
+            &imp.bad_numbers,
+            &imp.clamp,
+        );
+        // What placing the file's crop in this photo's frame cost — the
+        // library's own sentence, as every surface says it.
+        if let Some(note) = imp.crop_note {
+            self.toast(ToastKind::Error, note);
+        }
+        self.recipe = imp.recipe;
+        self.rationale = self.recipe.rationale.clone();
+        self.decide_keep_skin_for_card();
+        self.resync_recipe_display();
+        self.dirty = true;
+        self.fork_edited_card();
+        self.status = trf(
+            lang,
+            "Adjustments read in from {file} — not saved yet (Ctrl+S saves, Ctrl+Z undoes)",
+            &[("file", label)],
+        );
+        if let Some(tag) = tag {
+            self.record_xmp_answer(&photo, tag);
+        }
+        true
+    }
+
+    /// What reading an .xmp cost, said once per import (and by the open path
+    /// for an older build's stored XMP): the masks that did not come, the
+    /// settings carried but not rendered, the numbers read as neutral, and
+    /// what the recipe's limits cut.
+    pub(crate) fn xmp_import_toasts(
+        &mut self,
+        lang: Lang,
+        imported_masks: usize,
+        mask_losses: &[autoshade::xmp::MaskImportLoss],
+        carried: &[String],
+        bad: &[String],
+        clamp: &autoshade::recipe::ClampSummary,
+    ) {
+        if let Some(t) = crate::util::xmp_import_line(lang, imported_masks, mask_losses) {
+            self.toast(ToastKind::Error, t);
+        }
+        if !carried.is_empty() {
+            // Named, not counted, and capped like the mask line.
+            let shown = carried.len().min(4);
+            let more = carried.len() - shown;
+            let mut list = carried[..shown].join(", ");
+            if more > 0 {
+                list.push_str(&format!(", {}", trf(lang, "+{n} more", &[("n", &more.to_string())])));
+            }
+            let t = trf(
+                lang,
+                "this .xmp carries {n} setting(s) AutoShade does not render: {list}",
+                &[("n", &carried.len().to_string()), ("list", &list)],
+            );
+            self.toast(ToastKind::Error, t);
+        }
+        if !bad.is_empty() {
+            let t = trf(
+                lang,
+                "{n} XMP numeric setting(s) unreadable ({list}) — read as neutral",
+                &[("n", &bad.len().to_string()), ("list", &bad.join(", "))],
+            );
+            self.toast(ToastKind::Error, t);
+        }
+        if !clamp.is_empty() {
+            let t = trf(
+                lang,
+                "recipe limits discarded {n} mask(s), {m} component(s), {c} curve point(s) and {s} string byte(s) on restore — the saved file exceeds the app's caps",
+                &[
+                    ("n", &clamp.dropped_masks.to_string()),
+                    ("m", &clamp.dropped_components.to_string()),
+                    ("c", &clamp.truncated_curve_points.to_string()),
+                    ("s", &clamp.truncated_string_bytes.to_string()),
+                ],
+            );
+            self.toast(ToastKind::Error, t);
         }
     }
 

@@ -531,8 +531,10 @@
         assert_eq!(std::fs::read(&rj).unwrap(), recipe_bytes, "recipe.json was rewritten");
     }
 
+    /// A newer .xmp beside the RAW is an external source (2026-11-18): the
+    /// open restores the saved develop and REPORTS the file for the question.
     #[test]
-    fn read_saved_develop_lets_a_newer_lightroom_sidecar_win() {
+    fn opening_never_adopts_the_sidecar_beside_the_raw() {
         let dir = std::env::temp_dir().join(format!("autoshade-gui-lr-sidecar-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -563,13 +565,18 @@
             .unwrap()
             .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
             .unwrap();
-        let SavedDevelop::Restored(r, kind) = read_saved_develop(&src).saved else {
-            panic!("a newer Lightroom sidecar must restore");
+        let restored = read_saved_develop(&src);
+        let SavedDevelop::Restored(r, kind) = restored.saved else {
+            panic!("the saved develop must restore");
         };
-        assert_eq!(r.contrast, 33.0, "the newer Lightroom edit wins over the stored develop");
-        assert!(kind.starts_with("XMP"), "stamped like every XMP restore: {kind}");
-        assert!(kind.contains("Lightroom"), "the source is disclosed: {kind}");
-        // The store copy is untouched — only an explicit save adopts it.
+        assert_eq!(kind, "recipe.json", "what this app saved answers");
+        assert_eq!(r.exposure_ev, 0.5);
+        assert_eq!(r.contrast, 0.0, "the newer .xmp is not adopted");
+        let autoshade::store::ExternalXmp::Beside { path, .. } = restored.external else {
+            panic!("the newer .xmp beside the RAW is reported for the question");
+        };
+        assert_eq!(path, lr);
+        // The store copy is untouched.
         let kept: EditRecipe = serde_json::from_str(
             &std::fs::read_to_string(autoshade::store::recipe_target(&src)).unwrap(),
         )

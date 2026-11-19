@@ -1,7 +1,10 @@
 // One part of the GUI's tests (src/bin/gui/tests.rs includes it): the embedded packet, tool disarming, refine budgets, landings, the history gate and the persisted strip.
 
+    /// The packet another program baked into the RAW is OFFERED, never
+    /// restored: the open answers "nothing saved" and reports the packet for
+    /// the question.
     #[test]
-    fn an_embedded_raw_xmp_packet_restores_when_nothing_else_answers() {
+    fn an_embedded_packet_is_offered_never_restored() {
         let dir = std::env::temp_dir().join(format!("autoshade-gui-packet-restore-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -16,12 +19,11 @@
         let _scrub = Scrub(vec![dir.clone(), dev.clone()]);
 
         let restored = read_saved_develop(&src);
-        let SavedDevelop::Restored(r, kind) = restored.saved else {
-            panic!("the baked develop must restore");
+        assert!(matches!(restored.saved, SavedDevelop::Nothing), "the packet is not restored");
+        let autoshade::store::ExternalXmp::Embedded { text, .. } = restored.external else {
+            panic!("the packet is reported for the question");
         };
-        assert_eq!(kind, "XMP (embedded in the RAW)");
-        assert_eq!(r.exposure_ev, 0.8);
-        assert!(restored.packet_unreadable.is_none());
+        assert_eq!(autoshade::xmp::xmp_to_recipe(&text).exposure_ev, 0.8);
 
         // The batch renders what this app saved, and the packet is another
         // program's develop baked into the file: the batch never adopts it.
@@ -32,13 +34,12 @@
         );
     }
 
-    /// The packet never outranks anything, and an explicit clear sticks
-    /// against it: the packet lives in a file this app never writes, so
-    /// without the marker gate Reset+Save would resurrect the baked develop
-    /// on the very next open. An unreadable packet is disclosed, not folded
-    /// into absence.
+    /// The packet is not even asked about over a stored develop or an
+    /// explicit clear: it lives in a file this app never writes, so without
+    /// the marker gate Reset+Save would bring the question back on the very
+    /// next open. An unreadable packet is simply not offered.
     #[test]
-    fn an_embedded_packet_never_outranks_the_store_or_a_clear() {
+    fn an_embedded_packet_is_not_offered_over_the_store_or_a_clear() {
         let dir = std::env::temp_dir().join(format!("autoshade-gui-packet-rank-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -60,11 +61,13 @@
                 .unwrap(),
         )
         .unwrap();
-        let SavedDevelop::Restored(r, kind) = read_saved_develop(&src).saved else {
+        let restored = read_saved_develop(&src);
+        let SavedDevelop::Restored(r, kind) = restored.saved else {
             panic!("the store must answer");
         };
         assert_eq!(kind, "recipe.json");
         assert_eq!(r.exposure_ev, 0.5);
+        assert!(matches!(restored.external, autoshade::store::ExternalXmp::None), "not offered over a save");
 
         // (a2) A NEUTRAL recipe.json is a store file expressing neutral
         // intent — it bars the packet too (Codex L05 EMBED-01: a web-side
@@ -76,8 +79,10 @@
             serde_json::to_string(&EditRecipe::default()).unwrap(),
         )
         .unwrap();
+        let restored = read_saved_develop(&src);
+        assert!(matches!(restored.saved, SavedDevelop::NoopOnly), "a neutral store file answers");
         assert!(
-            matches!(read_saved_develop(&src).saved, SavedDevelop::NoopOnly),
+            matches!(restored.external, autoshade::store::ExternalXmp::None),
             "a neutral store file bars the packet"
         );
         let snap = autoshade::store::read_develop_snapshot(&src).unwrap();
@@ -90,18 +95,19 @@
         // packet must NOT resurrect the cleared develop.
         std::fs::remove_file(autoshade::store::recipe_target(&src)).unwrap();
         std::fs::write(dev.join("cleared.txt"), b"cleared").unwrap();
+        let restored = read_saved_develop(&src);
+        assert!(matches!(restored.saved, SavedDevelop::Nothing), "a cleared develop stays cleared");
         assert!(
-            matches!(read_saved_develop(&src).saved, SavedDevelop::Nothing),
-            "a cleared develop stays cleared"
+            matches!(restored.external, autoshade::store::ExternalXmp::None),
+            "…and the packet is not asked about again"
         );
         std::fs::remove_file(dev.join("cleared.txt")).unwrap();
 
-        // (c) Unreadable ≠ absent: a non-text packet is disclosed.
+        // (c) A non-text packet has nothing to import, so nothing is asked.
         std::fs::write(&src, tiff_with_xmp(&[0xFF, 0xFE, 0x00, 0x01, 0x02])).unwrap();
         let restored = read_saved_develop(&src);
         assert!(matches!(restored.saved, SavedDevelop::Nothing));
-        let why = restored.packet_unreadable.expect("the unreadable packet is disclosed");
-        assert!(why.contains("not UTF-8"), "{why}");
+        assert!(matches!(restored.external, autoshade::store::ExternalXmp::None));
     }
 
     /// L06#3: selection moved ⇒ every index-armed tool whose target is no

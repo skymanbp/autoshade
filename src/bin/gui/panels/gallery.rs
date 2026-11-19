@@ -313,11 +313,12 @@ impl AutoShadeApp {
                                 // writes a sidecar or the folder changes.
                                 let edited = *edited_badge.entry(i).or_insert_with(|| {
                                     // Central store OR legacy ./out — a
-                                    // pre-migration library keeps its ● —
-                                    // OR Lightroom's own sidecar (L13#2:
-                                    // an LR-edited photo showed no badge
-                                    // yet opened with its LR develop).
-                                    autoshade::store::has_develop_or_sidecar(path)
+                                    // pre-migration library keeps its ●.
+                                    // Only what THIS app saved (2026-11-18):
+                                    // an .xmp beside the photo is another
+                                    // program's file, and the open no
+                                    // longer adopts it, so it lights nothing.
+                                    autoshade::store::has_develop(path)
                                 });
                                 // What is true of the file, as ONE label: a
                                 // row of labels stands a full control row
@@ -362,7 +363,13 @@ impl AutoShadeApp {
                                     // whole virtualized scroll.
                                     ui.add(egui::Label::new(name).truncate());
                                     if has_meta {
-                                        ui.add(egui::Label::new(meta).truncate());
+                                        let r = ui.add(egui::Label::new(meta).truncate());
+                                        if edited {
+                                            r.on_hover_text(tr(
+                                                lang,
+                                                "This photo has adjustments saved in AutoShade",
+                                            ));
+                                        }
                                     }
                                 });
                             });

@@ -31,3 +31,4 @@
     include!("tests/top_bar.rs");
     include!("tests/width_probe.rs");
     include!("tests/card_kinds.rs");
+    include!("tests/xmp_question.rs");

@@ -4354,11 +4354,24 @@ pub struct XmpImport {
 /// carries none. A no-op read is returned unstamped, so the caller can say
 /// "nothing to import" instead of landing a calibration-only develop.
 pub fn import_xmp(raw: &Path, text: &str, sink: &dyn crate::diag::Sink) -> XmpImport {
+    let start = fresh_canvas_start(raw, &crate::diag::Diag::about(sink, raw));
+    import_xmp_onto(raw, text, &start, sink)
+}
+
+/// [`import_xmp`] with the photo's fresh start the caller already holds — the
+/// desktop app estimated it when the photo opened, and an import must not
+/// pay that demosaic a second time on the window's own thread.
+pub fn import_xmp_onto(
+    raw: &Path,
+    text: &str,
+    start: &CanvasStart,
+    sink: &dyn crate::diag::Sink,
+) -> XmpImport {
     let diag = crate::diag::Diag::about(sink, raw);
     let (mut recipe, clamp) = xmp::xmp_to_recipe_clamped_with_diag(text, &diag);
     let imported_masks = recipe.masks.len();
     if !recipe.is_noop() {
-        stamp_import_start(raw, &mut recipe, &diag);
+        start.stamp_import(&mut recipe);
         recipe.lens_profile = fresh_lens_profile_for_sidecar(raw, Some(text));
         if recipe.as_shot_k.is_none() {
             let (k, t) = fresh_as_shot_wb(raw);

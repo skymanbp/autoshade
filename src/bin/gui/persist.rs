@@ -62,14 +62,11 @@ pub(crate) struct RestoredDevelop {
     /// What the restore-time clamps DISCARDED (W20: sanitisation must not
     /// be silent loss) — the Opened handler's disclosure channel.
     pub(crate) clamp: autoshade::recipe::ClampSummary,
-    /// A Lightroom sidecar sits beside the RAW but could not be read (the
-    /// reason, verbatim from [`autoshade::store::SidecarRead`]) — whatever it
-    /// holds is NOT in `saved`, and the user must hear that (L08).
-    pub(crate) lr_unreadable: Option<&'static str>,
-    /// The RAW carries an embedded XMP packet that could not be read
-    /// (`autoshade::store::embedded_packet_for_restore`'s `Err`) — same
-    /// unreadable-is-not-absent rule as `lr_unreadable`, its own channel.
-    pub(crate) packet_unreadable: Option<String>,
+    /// An .xmp beside the RAW (or the packet baked into it) that this app has
+    /// not dealt with yet ([`autoshade::store::external_xmp`], looked at under
+    /// the same lock as the restore). Never part of `saved`: the open restores
+    /// what this app saved, and the surface ASKS about this file.
+    pub(crate) external: autoshade::store::ExternalXmp,
 }
 
 impl Default for RestoredDevelop {
@@ -81,8 +78,7 @@ impl Default for RestoredDevelop {
             imported_masks: 0,
             carried_globals: Vec::new(),
             clamp: Default::default(),
-            lr_unreadable: None,
-            packet_unreadable: None,
+            external: autoshade::store::ExternalXmp::None,
         }
     }
 }
@@ -114,64 +110,15 @@ pub(crate) fn read_saved_develop(src: &std::path::Path) -> RestoredDevelop {
 pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelop {
     let mut clamp_dropped = autoshade::recipe::ClampSummary::default();
     autoshade::store::migrate_legacy(src);
-    // The sidecar BESIDE the RAW is the one file Lightroom itself writes.
-    // Newest intent wins (store::lightroom_sidecar): a sidecar Lightroom
-    // touched after our last save outranks the stored develop — it used to
-    // be ignored entirely, so Lightroom edits silently lost to older
-    // AutoShade saves. Our own copied projection is recognised and skipped;
-    // the store copy stays untouched until the user actually saves.
-    let mut lr_unreadable: Option<&'static str> = None;
-    let lr = match autoshade::store::lightroom_sidecar(src) {
-        autoshade::store::LrSidecar::NewerThanStore(t) => {
-            Some((t, "XMP (Lightroom sidecar — newer than the saved develop; Ctrl+S adopts it)"))
-        }
-        autoshade::store::LrSidecar::Only(t) => {
-            Some((t, "XMP (Lightroom sidecar beside the RAW)"))
-        }
-        // The file EXISTS but cannot answer — the old fold into "absent"
-        // opened neutral in silence while Lightroom work might sit right
-        // there (L08). The store still answers below; the note rides along.
-        autoshade::store::LrSidecar::Unreadable(why) => {
-            lr_unreadable = Some(why);
-            None
-        }
-        _ => None,
-    };
-    // A6 disclosure accumulator: unreadable numbers in ANY consulted XMP —
-    // including one whose ONLY edit is corrupt and therefore imports as a
-    // NO-OP. That file restores nothing, so a per-branch warning was
-    // discarded with it, and the next save overwrote the corrupt original
-    // in silence (Codex 32-#1).
+    // An .xmp beside the photo is an external source (2026-11-18): it is
+    // never adopted here — it is REPORTED, and the window asks. Looked at
+    // first, under this same lock, before the walk below can return.
+    let external = autoshade::store::external_xmp(src);
+    // A6 disclosure accumulator: unreadable numbers in ANY consulted stored
+    // XMP — including one whose ONLY edit is corrupt and therefore imports as
+    // a NO-OP. That file restores nothing, so a per-branch warning was
+    // discarded with it (Codex 32-#1).
     let mut xmp_bad: Vec<String> = Vec::new();
-    if let Some((text, kind)) = lr {
-        // CLAMPED door (R28 2b): the reader clamps on its way out, so the
-        // `r.clamp()` below saw an already-cut recipe and reported an empty
-        // summary — a sidecar whose brush dabs were truncated on import
-        // toasted nothing. Both halves are absorbed, and they cannot double
-        // count: the second clamp is idempotent over the first.
-        let diag = autoshade::diag::photo(src);
-        let (mut r, imported_clamp) =
-            autoshade::xmp::xmp_to_recipe_clamped_with_diag(&text, &diag);
-        xmp_bad = autoshade::xmp::unparsable_crs_numbers(&text);
-        // Neutral / foreign content restores nothing — the store answers
-        // exactly as before.
-        if !r.is_noop() {
-            clamp_dropped.absorb(imported_clamp);
-            clamp_dropped.absorb(r.clamp());
-            let mask_import = autoshade::xmp::import_losses_for_photo(&text, src);
-            let imported_masks = r.masks.len();
-            return RestoredDevelop {
-                saved: SavedDevelop::Restored(r, kind),
-                xmp_bad,
-                mask_import,
-                imported_masks,
-                carried_globals: autoshade::xmp::unmodelled_global_crs(&text),
-                clamp: clamp_dropped,
-                lr_unreadable,
-                packet_unreadable: None,
-            };
-        }
-    }
     let mut any = false;
     let mut neutral = false;
     let mut parse_err: Option<String> = None;
@@ -229,18 +176,17 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         return RestoredDevelop {
             saved: SavedDevelop::Restored(r, kind),
             clamp: clamp_dropped,
-            lr_unreadable,
+            external,
             ..Default::default()
         };
     }
     if neutral {
-        // The projection is not consulted (see above); the Lightroom
-        // sidecar's own disclosures, gathered before the store walk, ride.
+        // The projection is not consulted (see above).
         return RestoredDevelop {
             saved: SavedDevelop::NoopOnly,
             xmp_bad,
             clamp: clamp_dropped,
-            lr_unreadable,
+            external,
             ..Default::default()
         };
     }
@@ -270,12 +216,13 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
             }
         };
         any = true;
-        // Clamped door, same reason as the Lightroom branch above (R28 2b).
+        // CLAMPED door (R28 2b): the reader clamps on its way out, so a
+        // later `r.clamp()` alone would report an already-cut recipe as whole.
         let diag = autoshade::diag::photo(src);
         let (mut r, imported_clamp) =
             autoshade::xmp::xmp_to_recipe_clamped_with_diag(&text, &diag);
-        // Accumulated regardless of noop-ness (dedup vs the LR sidecar's
-        // list) — see the accumulator's contract above.
+        // Accumulated regardless of noop-ness — see the accumulator's
+        // contract above.
         for k in autoshade::xmp::unparsable_crs_numbers(&text) {
             if !xmp_bad.contains(&k) {
                 xmp_bad.push(k);
@@ -293,40 +240,6 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         }
         break; // same rule: the file that answered decides
     }
-    // The RAW's own embedded XMP packet — the develop Lightroom bakes INTO a
-    // DNG — as the strictly LOWEST-priority source, probed only when NO store
-    // file exists at all (`!any`, not merely "nothing restored": a NEUTRAL
-    // recipe.json is a store file expressing neutral intent, and probing past
-    // it resurrected the baked develop that a web-side neutral save had just
-    // walked away from — Codex L05 EMBED-01; the clear-marker gate lives in
-    // `embedded_packet_for_restore`). The common developed-photo open
-    // therefore pays no TIFF walk.
-    let mut packet_unreadable: Option<String> = None;
-    if fallback.is_none() && !any {
-        match autoshade::store::embedded_packet_for_restore(src) {
-            Ok(Some(text)) => {
-                // Clamped door (R28 2b), like both branches above.
-                let diag = autoshade::diag::photo(src);
-                let (mut r, imported_clamp) =
-                    autoshade::xmp::xmp_to_recipe_clamped_with_diag(&text, &diag);
-                for k in autoshade::xmp::unparsable_crs_numbers(&text) {
-                    if !xmp_bad.contains(&k) {
-                        xmp_bad.push(k);
-                    }
-                }
-                if !r.is_noop() {
-                    clamp_dropped.absorb(imported_clamp);
-                    clamp_dropped.absorb(r.clamp());
-                    mask_import = autoshade::xmp::import_losses_for_photo(&text, src);
-                    imported_masks = r.masks.len();
-                    carried_globals = autoshade::xmp::unmodelled_global_crs(&text);
-                    fallback = Some((r, "XMP (embedded in the RAW)"));
-                }
-            }
-            Ok(None) => {}
-            Err(why) => packet_unreadable = Some(why),
-        }
-    }
     if let Some(err) = parse_err {
         return RestoredDevelop {
             saved: SavedDevelop::Unreadable { err, fallback },
@@ -335,8 +248,7 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
             imported_masks,
             carried_globals: carried_globals.clone(),
             clamp: clamp_dropped,
-            lr_unreadable,
-            packet_unreadable,
+            external,
         };
     }
     match (fallback, any) {
@@ -347,23 +259,20 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
             imported_masks,
             carried_globals: carried_globals.clone(),
             clamp: clamp_dropped,
-            lr_unreadable,
-            packet_unreadable,
+            external,
         },
         (None, true) => RestoredDevelop {
             saved: SavedDevelop::NoopOnly,
             xmp_bad,
             clamp: clamp_dropped,
-            lr_unreadable,
-            packet_unreadable,
+            external,
             ..Default::default()
         },
         (None, false) => RestoredDevelop {
             saved: SavedDevelop::Nothing,
             xmp_bad,
             clamp: clamp_dropped,
-            lr_unreadable,
-            packet_unreadable,
+            external,
             ..Default::default()
         },
     }

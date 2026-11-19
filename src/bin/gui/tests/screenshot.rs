@@ -628,6 +628,77 @@
         }
     }
 
+    // ---- The .xmp question and the Export section's two .xmp verbs: their
+    // camera.
+
+    /// An app with the .xmp question standing: about a file beside the photo
+    /// (`beside`), or about adjustments written into the photo itself.
+    fn app_with_xmp_question(lang: crate::i18n::Lang, beside: bool) -> AutoShadeApp {
+        let photo = PathBuf::from("D:/library/2026-11 canyon trip/photo.ARW");
+        AutoShadeApp {
+            lang,
+            src_path: Some(photo.clone()),
+            xmp_prompt: Some(crate::model::XmpPrompt {
+                beside: beside.then(|| photo.with_extension("xmp")),
+                photo,
+                text: String::new(),
+                tag: String::new(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// The .xmp question as the app hosts it (`xmp_prompt_layer`: the scrim
+    /// and the centred window), alone on a 720 × 420 screen at 2×, over the
+    /// canvas bed.
+    fn xmp_question_shot(app: &mut AutoShadeApp, theme: crate::theme::ThemePref) -> image::RgbaImage {
+        app.theme = theme;
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::install_theme(&ctx, theme);
+        let size = egui::vec2(720.0, 420.0);
+        let mut tex = ShotTextures::default();
+        let mut last = None;
+        for i in 0..6 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                time: Some(i as f64 / 2.0),
+                ..Default::default()
+            };
+            input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(2.0);
+            let out = ctx.run(input, |ctx| app.xmp_prompt_layer(ctx));
+            tex.apply(&out.textures_delta);
+            last = Some(out);
+        }
+        let out = last.expect("frames ran");
+        let prims = ctx.tessellate(out.shapes.clone(), out.pixels_per_point);
+        rasterise(&prims, &tex, size, out.pixels_per_point, theme.colors().canvas_bed)
+    }
+
+    /// Not a check — the camera for the .xmp question, in its two forms (a
+    /// file beside the photo, adjustments written into the photo), Chinese on
+    /// Dark and English on Light:
+    /// `AUTOSHADE_SHOT_DIR=<dir> cargo test … xmp_screenshots -- --ignored`.
+    #[test]
+    #[ignore = "writes PNGs for a person to look at"]
+    fn xmp_screenshots() {
+        let dir = std::path::PathBuf::from(std::env::var("AUTOSHADE_SHOT_DIR").expect("AUTOSHADE_SHOT_DIR"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let looks = [
+            (crate::i18n::Lang::Zh, crate::theme::ThemePref::Dark),
+            (crate::i18n::Lang::En, crate::theme::ThemePref::Light),
+        ];
+        for (lang, theme) in looks {
+            for (beside, form) in [(true, "beside"), (false, "embedded")] {
+                let mut app = app_with_xmp_question(lang, beside);
+                xmp_question_shot(&mut app, theme)
+                    .save(dir.join(format!("xmp-question-{form}-{lang:?}-{theme:?}.png")))
+                    .unwrap();
+                assert!(app.xmp_prompt.is_some(), "a frame with no answer leaves the question standing");
+            }
+        }
+    }
+
     // ---- The library column (the left-most panel): its scenes, its camera
     // and its pin.
 

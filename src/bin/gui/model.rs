@@ -588,6 +588,24 @@ pub(crate) struct FitPrompt {
     pub(crate) dont_ask: bool,
 }
 
+/// The question an .xmp that came with the opened photo raises (2026-11-18):
+/// read its adjustments in, or not (`xmp_prompt_layer`). An .xmp is an
+/// external source — opening never adopts one — so the user decides, once per
+/// version of the file (`autoshade::store::answer_external_xmp`).
+pub(crate) struct XmpPrompt {
+    /// The photo the question is about: an answer must land on that photo or
+    /// nowhere, whatever was opened since.
+    pub(crate) photo: PathBuf,
+    /// The file beside the photo, or `None` for adjustments another program
+    /// wrote INTO the RAW (the embedded packet).
+    pub(crate) beside: Option<PathBuf>,
+    /// The document's text, as the detector read it — what "Read them in"
+    /// imports, so the answer is about the very bytes the question was about.
+    pub(crate) text: String,
+    /// Its content tag, recorded as answered either way.
+    pub(crate) tag: String,
+}
+
 impl RetouchNote {
     /// The painted area this result consumed, cleared at the landing so the
     /// tool starts clean for its next use; a whole-frame result (reimagine,
