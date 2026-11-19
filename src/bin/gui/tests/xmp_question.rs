@@ -140,9 +140,15 @@
         assert!(app.xmp_prompt.is_none(), "Enter answers \"Read them in\"");
         assert_eq!(app.recipe.contrast, 33.0, "the adjustments are on the canvas");
         assert!(app.unsaved_marker_dirty(), "● lit: {}", app.status);
+        // Through `trf`, as the window says it: the shortcut's modifier is the
+        // platform's own word (Cmd on macOS), which a literal cannot follow.
         assert_eq!(
             app.status,
-            "Adjustments read in from photo.xmp — not saved yet (Ctrl+S saves, Ctrl+Z undoes)"
+            trf(
+                app.lang,
+                "Adjustments read in from {file} — not saved yet (Ctrl+S saves, Ctrl+Z undoes)",
+                &[("file", "photo.xmp")],
+            )
         );
         assert_eq!(develop_files(&dev), ["external-xmp.answered"], "nothing saved but the answer");
         assert!(!autoshade::store::has_develop(&src));
@@ -459,9 +465,15 @@
         write_newer_xmp(&look, 17.0, 0);
         app.import_xmp_file(&ctx, &look);
         assert_eq!(app.recipe.contrast, 17.0, "the picked file's adjustments are on the canvas");
+        // Through `trf`, for the platform's own modifier word (see the
+        // question's landing test above).
         assert_eq!(
             app.status,
-            "Adjustments read in from look.xmp — not saved yet (Ctrl+S saves, Ctrl+Z undoes)"
+            trf(
+                app.lang,
+                "Adjustments read in from {file} — not saved yet (Ctrl+S saves, Ctrl+Z undoes)",
+                &[("file", "look.xmp")],
+            )
         );
         assert!(app.unsaved_marker_dirty(), "● lit");
         assert!(develop_files(&dev).is_empty(), "nothing written: {:?}", develop_files(&dev));
