@@ -3902,3 +3902,300 @@ fn a_version_snapshot_freezes_depth_protect_and_layer_rasters() {
     }
     let _ = std::fs::remove_dir_all(&dev);
 }
+
+/// One scratch photo for the external-XMP tests: a RAW in its own temp
+/// folder and a develop dir guaranteed absent, so every test starts from
+/// "this app has never touched the photo".
+fn external_fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join(format!(
+        "autoshade-external-{tag}-{}-{}",
+        std::process::id(),
+        next_tmp_seq()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let raw = dir.join("_external_probe.arw");
+    std::fs::write(&raw, b"raw").unwrap();
+    let dev = develop_dir(&raw);
+    let _ = std::fs::remove_dir_all(&dev);
+    (dir, raw, dev)
+}
+
+fn set_mtime(p: &Path, t: std::time::SystemTime) {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(p)
+        .unwrap()
+        .set_modified(t)
+        .unwrap();
+}
+
+/// The question is asked once per VERSION of the file: answering it silences
+/// exactly that content, and a different content beside the photo (the user
+/// edited again in Lightroom) is news again.
+#[test]
+fn an_external_xmp_is_asked_about_once_per_version() {
+    let (dir, raw, dev) = external_fixture("once");
+    assert!(matches!(external_xmp(&raw), ExternalXmp::None), "no file, nothing to ask");
+
+    let beside = raw.with_extension("xmp");
+    let v1 = crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 30.0, ..Default::default() });
+    std::fs::write(&beside, &v1).unwrap();
+    let ExternalXmp::Beside { path, text, tag } = external_xmp(&raw) else {
+        panic!("an edited file beside an untouched photo must be reported");
+    };
+    assert_eq!(path, beside);
+    assert_eq!(text, v1);
+    assert_eq!(tag, xmp_tag(&v1));
+
+    answer_external_xmp(&raw, &tag, DevelopLockMode::Wait).unwrap();
+    assert!(
+        matches!(external_xmp(&raw), ExternalXmp::None),
+        "an answered version is not asked about again"
+    );
+
+    let v2 = crate::xmp::recipe_to_xmp(&EditRecipe { contrast: -30.0, ..Default::default() });
+    std::fs::write(&beside, &v2).unwrap();
+    assert!(
+        matches!(external_xmp(&raw), ExternalXmp::Beside { ref tag, .. } if *tag == xmp_tag(&v2)),
+        "a new version of the file is asked about again"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dev);
+}
+
+/// What this app itself put beside the photo is never "found": the export's
+/// delivery stamps its own bytes as answered, and a copy of the old stored
+/// projection (builds before this one told users to copy it there) is
+/// recognised by its bytes.
+#[test]
+fn our_own_xmp_beside_the_photo_is_never_asked_about() {
+    use std::time::{Duration, SystemTime};
+    let (dir, raw, dev) = external_fixture("ours");
+    let doc = crate::xmp::recipe_to_xmp(&EditRecipe { exposure_ev: 0.4, ..Default::default() });
+
+    let to = deliver_xmp_beside(&raw, doc.as_bytes(), false).unwrap();
+    assert_eq!(to, raw.with_extension("xmp"));
+    assert_eq!(std::fs::read(&to).unwrap(), doc.as_bytes(), "delivered byte for byte");
+    assert!(
+        matches!(external_xmp(&raw), ExternalXmp::None),
+        "our own export must not come back as a question"
+    );
+    assert!(!has_develop(&raw), "delivering an export is not saving a develop");
+
+    // The pre-change hand-off: no stamp, but the bytes equal the stored
+    // projection.
+    std::fs::remove_file(dev.join("external-xmp.answered")).unwrap();
+    assert!(
+        matches!(external_xmp(&raw), ExternalXmp::Beside { .. }),
+        "premise: without the stamp the file would be asked about"
+    );
+    std::fs::write(xmp_target(&raw), &doc).unwrap();
+    set_mtime(&xmp_target(&raw), SystemTime::now() - Duration::from_secs(7200));
+    set_mtime(&to, SystemTime::now());
+    assert!(
+        matches!(external_xmp(&raw), ExternalXmp::None),
+        "a copy of our own stored XMP is ours, whatever its time"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dev);
+}
+
+/// A file with nothing to import (another program's defaults, a ratings-only
+/// packet) is never offered; nor is a file beside anything that is not a
+/// camera RAW.
+#[test]
+fn a_neutral_or_non_raw_external_xmp_is_never_offered() {
+    let (dir, raw, dev) = external_fixture("neutral");
+    std::fs::write(raw.with_extension("xmp"), crate::xmp::recipe_to_xmp(&EditRecipe::default()))
+        .unwrap();
+    assert!(
+        matches!(external_xmp(&raw), ExternalXmp::None),
+        "a no-op file has nothing to ask about"
+    );
+
+    let png = dir.join("_external_baked.png");
+    std::fs::write(&png, b"png").unwrap();
+    std::fs::write(
+        png.with_extension("xmp"),
+        crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 30.0, ..Default::default() }),
+    )
+    .unwrap();
+    assert!(
+        matches!(external_xmp(&png), ExternalXmp::None),
+        "only a RAW has the sidecar convention"
+    );
+    assert!(!develop_dir(&png).exists(), "nothing was created for the PNG either");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dev);
+}
+
+/// A file OLDER than this app's own latest work on the photo — a save, an
+/// explicit clear — is not news: the user has already moved on from it here.
+#[test]
+fn a_newer_own_save_or_clear_silences_an_older_external_xmp() {
+    use std::time::{Duration, SystemTime};
+    let (dir, raw, dev) = external_fixture("older");
+    let beside = raw.with_extension("xmp");
+    std::fs::write(
+        &beside,
+        crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 30.0, ..Default::default() }),
+    )
+    .unwrap();
+    std::fs::create_dir_all(&dev).unwrap();
+    std::fs::write(recipe_target(&raw), serde_json::to_string(&EditRecipe::default()).unwrap())
+        .unwrap();
+    let now = SystemTime::now();
+    set_mtime(&beside, now - Duration::from_secs(7200));
+    assert!(
+        matches!(external_xmp(&raw), ExternalXmp::None),
+        "the store's save is newer than the file"
+    );
+    set_mtime(&beside, now + Duration::from_secs(7200));
+    assert!(
+        matches!(external_xmp(&raw), ExternalXmp::Beside { .. }),
+        "the same file edited AFTER the save is news"
+    );
+
+    std::fs::remove_file(recipe_target(&raw)).unwrap();
+    std::fs::write(dev.join("cleared.txt"), b"cleared\n").unwrap();
+    set_mtime(&beside, now - Duration::from_secs(7200));
+    assert!(
+        matches!(external_xmp(&raw), ExternalXmp::None),
+        "an explicit clear after the file outranks it too"
+    );
+    std::fs::write(dev.join("clear.pending"), b"develop clear in progress\n").unwrap();
+    set_mtime(&beside, now + Duration::from_secs(7200));
+    assert!(
+        matches!(external_xmp(&raw), ExternalXmp::None),
+        "nothing is asked while a clear is in progress"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dev);
+}
+
+/// The ranking may only describe the file it actually read: an identity that
+/// no longer matches the path (swapped or rewritten after the read) is not
+/// asked about — the next look reads the new file.
+#[test]
+fn an_external_xmp_swapped_after_the_read_is_not_asked_about() {
+    let (dir, raw, dev) = external_fixture("swap");
+    let beside = raw.with_extension("xmp");
+    let doc = crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 30.0, ..Default::default() });
+    std::fs::write(&beside, &doc).unwrap();
+
+    // No real file carries the epoch mtime with a u64::MAX length.
+    let swapped = rank_external(
+        &raw,
+        &beside,
+        doc.clone(),
+        Some((std::time::SystemTime::UNIX_EPOCH, u64::MAX)),
+    );
+    assert!(matches!(swapped, ExternalXmp::None), "an impossible identity ranks nothing");
+
+    let real = std::fs::metadata(&beside)
+        .ok()
+        .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
+    assert!(real.is_some(), "the fixture filesystem must report mtimes");
+    assert!(
+        matches!(rank_external(&raw, &beside, doc, real), ExternalXmp::Beside { .. }),
+        "the true identity is reported"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dev);
+}
+
+/// LOOKING has no side effects. The file here carries an AutoShade payload
+/// with an embedded mask raster — exactly what the DISCLOSING reader places
+/// into the develop dir — so a detector that used it, or took the develop
+/// lock, would create the dir. Absent before, absent after; and on a photo
+/// that has a develop, every file in it is byte-for-byte what it was.
+#[test]
+fn looking_for_an_external_xmp_changes_nothing_in_the_store() {
+    use std::time::{Duration, SystemTime};
+    let (dir, raw, dev) = external_fixture("pure");
+    let tile = dir.join("tile-probe.png");
+    std::fs::write(&tile, b"png tile bytes").unwrap();
+    let r = EditRecipe {
+        exposure_ev: 0.3,
+        masks: vec![LocalAdjustment {
+            mask: MaskGeometry::Bitmap { path: tile.to_string_lossy().into_owned() },
+            exposure_ev: 0.5,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let doc = crate::xmp::recipe_to_xmp(&r);
+    assert!(doc.contains("Rasters>"), "premise: the file embeds a raster payload");
+    std::fs::write(raw.with_extension("xmp"), &doc).unwrap();
+
+    assert!(matches!(external_xmp(&raw), ExternalXmp::Beside { .. }), "it is reported");
+    assert!(!dev.exists(), "looking must not create the develop dir");
+
+    // A photo WITH a develop: the dir's whole content is unchanged.
+    std::fs::create_dir_all(&dev).unwrap();
+    std::fs::write(recipe_target(&raw), serde_json::to_string(&EditRecipe::default()).unwrap())
+        .unwrap();
+    set_mtime(&recipe_target(&raw), SystemTime::now() - Duration::from_secs(7200));
+    let listing = |d: &Path| {
+        let mut v: Vec<(String, Vec<u8>)> = std::fs::read_dir(d)
+            .unwrap()
+            .flatten()
+            .map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                (name, std::fs::read(e.path()).unwrap_or_default())
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    let before = listing(&dev);
+    assert!(matches!(external_xmp(&raw), ExternalXmp::Beside { .. }), "still reported");
+    assert_eq!(listing(&dev), before, "looking must not write into the develop dir");
+
+    // Non-vacuity: the disclosing reader on the same file DOES write there.
+    let collector = crate::diag::Collector::new();
+    let _ = crate::xmp::xmp_to_recipe_clamped_with_diag(
+        &doc,
+        &crate::diag::Diag::about(&collector, &raw),
+    );
+    assert_ne!(listing(&dev), before, "premise: the disclosing reader places the raster");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dev);
+}
+
+/// The answered stamp is not a develop. On a photo the store has never seen it
+/// creates a dir holding nothing but itself (and the lock file every locked
+/// write leaves), the badge predicate stays false, and clearing the develop
+/// leaves it standing — clearing edits does not un-answer a question.
+#[test]
+fn the_answered_stamp_is_not_a_develop_and_survives_a_clear() {
+    let (dir, raw, dev) = external_fixture("stamp");
+    answer_external_xmp(&raw, "0123456789abcdef", DevelopLockMode::Wait).unwrap();
+    let mut names: Vec<String> = std::fs::read_dir(&dev)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != ".develop.lock")
+        .collect();
+    names.sort();
+    assert_eq!(names, ["external-xmp.answered"], "only the stamp");
+    assert!(!has_develop(&raw), "a stamp alone does not badge the photo");
+    assert!(!has_develop_or_sidecar(&raw), "nor does the gallery/web predicate");
+
+    std::fs::write(recipe_target(&raw), serde_json::to_string(&EditRecipe::default()).unwrap())
+        .unwrap();
+    assert!(has_develop(&raw), "premise: a develop now exists");
+    clear_develop(&raw).unwrap();
+    assert!(!has_develop(&raw), "premise: the clear removed it");
+    assert!(dev.join("external-xmp.answered").exists(), "the clear keeps the stamp");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dev);
+}

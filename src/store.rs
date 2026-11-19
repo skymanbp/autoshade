@@ -11,7 +11,8 @@
 //! ```text
 //! <root>/develops/<stem>-<fnv1a64(abs path)>/
 //!     recipe.json          the working develop (single source of truth)
-//!     <stem>.xmp           Lightroom projection (name kept: LR needs <stem>.xmp)
+//!     <stem>.xmp           XMP an earlier build saved (read only when no recipe.json)
+//!     external-xmp.answered  the external .xmp the user already dealt with
 //!     v<N>.recipe.json     numbered snapshots
 //!     <kind>.png           mask rasters (mask-sky, mask-zone-sky, …)
 //!     pixels.json          baked pixel-master link (retouch/reimagine origin)
@@ -47,6 +48,7 @@ mod backup;
 mod clear;
 mod commit;
 mod durable;
+mod external;
 mod key;
 mod lock;
 mod migrate;
@@ -73,6 +75,10 @@ use clear::{clear_develop_in, unc_or_device_spelling};
 pub use commit::{DevelopCommit, commit_develop};
 use commit::{commit_dir_in, resolve_pending_commit_unlocked};
 pub use durable::{durable_adopt};
+pub use external::{ExternalXmp, answer_external_xmp, external_xmp, xmp_tag};
+use external::answer_external_bytes;
+#[cfg(test)]
+use external::rank_external;
 pub(crate) use durable::{
     durable_rename, durable_replace, durable_retire_and_write, durable_write, next_tmp_seq,
 };
@@ -98,7 +104,8 @@ pub use migrate::{migrate_legacy, migrate_legacy_from_many};
 #[cfg(test)]
 use migrate::{migrate_legacy_in};
 pub use paths::{
-    OwnedRaster, claim_raster, clear_pixel_source, detach_rasters, develop_dir, export_xmp_beside,
+    OwnedRaster, claim_raster, clear_pixel_source, deliver_xmp_beside, detach_rasters, develop_dir,
+    export_xmp_beside,
     masters_dir, own_areas_in, pixel_source_path, pixel_source_record_bytes, raster_target, recipe_target, saved_quarter_turns,
     variants_path, version_target, write_pixel_source, xmp_beside_target, xmp_target,
 };
@@ -160,11 +167,12 @@ use versions::{version_meta_path};
 /// own test modules and nowhere else). Test-only: nothing here is compiled into a
 /// shipped binary.
 #[cfg(test)]
-pub(crate) const SOURCE_FILES: [(&str, &str); 14] = [
+pub(crate) const SOURCE_FILES: [(&str, &str); 15] = [
     ("src/store/backup.rs", include_str!("store/backup.rs")),
     ("src/store/clear.rs", include_str!("store/clear.rs")),
     ("src/store/commit.rs", include_str!("store/commit.rs")),
     ("src/store/durable.rs", include_str!("store/durable.rs")),
+    ("src/store/external.rs", include_str!("store/external.rs")),
     ("src/store/key.rs", include_str!("store/key.rs")),
     ("src/store/lock.rs", include_str!("store/lock.rs")),
     ("src/store/migrate.rs", include_str!("store/migrate.rs")),

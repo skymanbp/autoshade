@@ -197,6 +197,9 @@ pub(super) fn sweep_stale_sidecar_stages(to: &Path, grace: std::time::Duration) 
 /// write half touches nothing inside the develop directory at all. Taking the
 /// lock would therefore only add a way for the hand-off to fail while another
 /// AutoShade happens to be saving.
+///
+/// Kept only for the desktop app's button until it builds its file at click
+/// time ([`deliver_xmp_beside`] is the delivery both share).
 pub fn export_xmp_beside(src: &Path, overwrite: bool) -> std::io::Result<PathBuf> {
     let stored = xmp_target(src);
     // Bounded like every other read in this module (R28 2a): the projection
@@ -219,6 +222,35 @@ pub fn export_xmp_beside(src: &Path, overwrite: bool) -> std::io::Result<PathBuf
             e
         }
     })?;
+    deliver_xmp_beside(src, &bytes, overwrite)
+}
+
+/// Deliver an XMP this app built, at the user's explicit request, to the
+/// photo's own folder as `<name>.xmp` — the only place Lightroom / Camera Raw
+/// look for one. **This is the one deliberate write into the photo's folder**
+/// (see the export notes above: never from a save, a batch or a paste).
+///
+/// `overwrite = false` refuses an existing file with
+/// [`std::io::ErrorKind::AlreadyExists`] through an atomic `create_new` claim,
+/// so the caller can ask before replacing Lightroom's own file. On success the
+/// file's tag is recorded as ANSWERED (`external.rs`): our own export beside
+/// the photo must never come back as "an .xmp was found — read it?". The
+/// stamp is taken with `NoWait` — the desktop app calls this on its UI thread
+/// — and a stamp that cannot be written is said, not fatal: the file IS
+/// delivered, and the worst outcome is one question too many.
+pub fn deliver_xmp_beside(src: &Path, bytes: &[u8], overwrite: bool) -> std::io::Result<PathBuf> {
+    let delivered = deliver_bytes_beside(src, bytes, overwrite)?;
+    if let Err(e) = answer_external_bytes(src, bytes, DevelopLockMode::NoWait) {
+        eprintln!(
+            "⚠ {} was written, but AutoShade could not record it as its own ({e}) — it may ask \
+             about this file the next time the photo opens",
+            delivered.display()
+        );
+    }
+    Ok(delivered)
+}
+
+fn deliver_bytes_beside(src: &Path, bytes: &[u8], overwrite: bool) -> std::io::Result<PathBuf> {
     let Some(to) = xmp_beside_target(src) else {
         return Err(std::io::Error::other(format!(
             "{} has no containing folder to deliver into",
@@ -250,7 +282,7 @@ pub fn export_xmp_beside(src: &Path, overwrite: bool) -> std::io::Result<PathBuf
     // for that. The honest degradation is to keep the file and say the directory
     // ENTRY is one notch less durable: the bytes are there, and only a crash in
     // the next moment could lose the name.
-    match durable_write_tracked(&to, &bytes) {
+    match durable_write_tracked(&to, bytes) {
         (_, Ok(())) => Ok(to),
         (true, Err(e)) => {
             eprintln!(
