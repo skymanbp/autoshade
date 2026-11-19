@@ -17,11 +17,18 @@
 
 use autoshade::recipe::EditRecipe;
 
-/// Arm 1 — the Lightroom-sidecar half (`snapshot_xmp_text`). Before the fix
-/// this resurrected the deleted snapshot BYTE-FOR-BYTE under the recycled
+/// Arm 1 — the XMP-only half (`snapshot_xmp_text`): a develop an earlier
+/// build kept in the store as an .xmp alone, with no recipe.json. Before the
+/// fix this resurrected the deleted snapshot BYTE-FOR-BYTE under the recycled
 /// number on the next gated write.
+///
+/// Until 2026-11-18 this arm was driven by a Lightroom sidecar BESIDE the
+/// photo, which the gate snapshotted too. An .xmp beside the photo is now an
+/// external source that no write here touches, so the gate preserves nothing
+/// on its behalf (the first assertion); the registry this arm guards is
+/// reached through the store's own .xmp.
 #[test]
-fn a_deleted_sidecar_snapshot_stays_deleted() {
+fn a_deleted_xmp_only_snapshot_stays_deleted() {
     let dir = std::env::temp_dir().join("autoshade-repro-xmp-resurrection");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -29,12 +36,21 @@ fn a_deleted_sidecar_snapshot_stays_deleted() {
     std::fs::write(&raw, b"raw").unwrap();
     let dev = autoshade::store::develop_dir(&raw);
     let _ = std::fs::remove_dir_all(&dev);
-    let lr_text =
+    let text =
         autoshade::xmp::recipe_to_xmp(&EditRecipe { contrast: 12.0, ..Default::default() });
-    std::fs::write(raw.with_extension("xmp"), &lr_text).unwrap();
 
-    // Any gated programmatic write preserves the sidecar as v1, and the
-    // dedup holds while the snapshot lives.
+    // An .xmp beside the photo is another program's file: nothing here
+    // writes it, so there is nothing to preserve on its behalf.
+    std::fs::write(raw.with_extension("xmp"), &text).unwrap();
+    assert_eq!(autoshade::store::backup_saved_develop(&raw, None).unwrap(), None);
+    assert!(autoshade::store::list_versions(&raw).is_empty());
+
+    // The store's own .xmp with no recipe.json IS a save, and the recipe
+    // commit a gated write lands retires it: any gated programmatic write
+    // preserves it as v1, and the dedup holds while the snapshot lives.
+    std::fs::create_dir_all(&dev).unwrap();
+    let stored = autoshade::store::xmp_target(&raw);
+    std::fs::write(&stored, &text).unwrap();
     assert_eq!(autoshade::store::backup_saved_develop(&raw, None).unwrap(), Some(1));
     assert_eq!(autoshade::store::backup_saved_develop(&raw, None).unwrap(), None);
 
@@ -49,15 +65,15 @@ fn a_deleted_sidecar_snapshot_stays_deleted() {
     assert_eq!(
         autoshade::store::backup_saved_develop(&raw, None).unwrap(),
         None,
-        "explicitly discarded sidecar content stays discarded"
+        "explicitly discarded .xmp content stays discarded"
     );
     assert!(autoshade::store::list_versions(&raw).is_empty());
 
-    // ...while GENUINELY NEW sidecar content is still preserved — under a
+    // ...while GENUINELY NEW .xmp content is still preserved — under a
     // fresh number, never the deleted label.
-    let lr2 =
+    let newer =
         autoshade::xmp::recipe_to_xmp(&EditRecipe { contrast: 30.0, ..Default::default() });
-    std::fs::write(raw.with_extension("xmp"), &lr2).unwrap();
+    std::fs::write(&stored, &newer).unwrap();
     assert_eq!(autoshade::store::backup_saved_develop(&raw, None).unwrap(), Some(2));
     assert_eq!(autoshade::store::list_versions(&raw), vec![2]);
 
