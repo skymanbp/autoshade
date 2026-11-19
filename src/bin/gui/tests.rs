@@ -32,3 +32,4 @@
     include!("tests/width_probe.rs");
     include!("tests/card_kinds.rs");
     include!("tests/xmp_question.rs");
+    include!("tests/draft_frames.rs");

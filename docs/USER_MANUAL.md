@@ -242,6 +242,13 @@ curves, HSL, color grading, texture, clarity, dehaze, noise reduction,
 sharpening, vignette, crop, and lens-related settings, rendered through the
 same engine as `autoshade apply`.
 
+On a photo that is slow to redraw — a large canvas, many masks, a colour field
+— the canvas follows a slider with a quick, slightly soft draft while you drag,
+and replaces it with the full-quality picture a moment after you stop. The
+draft is only what you look at while your hand moves: a card's thumbnail, the
+saved develop and every export are made from the full picture. A photo that
+redraws quickly is never drawn in drafts.
+
 Every slider in the **Effects** fold renders since v1.5.0 too. The post-crop
 vignette is centred on the **crop**, not on the frame — that is the whole point
 of its name — with Midpoint placing the falloff, Feather softening it,

@@ -54,7 +54,7 @@
             .find("self.fork_edited_card();")
             .map(|i| i + panels)
             .expect("the frame hook after the panels");
-        let dispatch = frame.find("if self.dirty && !self.develop_inflight {").expect("the dispatch");
+        let dispatch = frame.find("self.start_redevelop();").expect("the dispatch");
         assert!(hook < dispatch, "the hook runs before the develop is dispatched");
     }
 
@@ -693,7 +693,13 @@
         let fill = include_str!("../panels/retouch.rs");
         develops_at_film(fill, "fn developed_card_pixels(", "autoshade::decode::film_short_edge(path)", framed);
         let workers = include_str!("../workers.rs");
-        develops_at_film(workers, "pub(crate) fn start_redevelop(", "self.film_short_edge()", "build_preview(");
+        develops_at_film(workers, "pub(crate) fn start_redevelop_at(", "self.film_short_edge()", "build_preview(");
+        // A draft is the same develop at a smaller size (`draft.rs`): the
+        // film edge is the full frame's, or its Detail passes would land at
+        // another scale in the photograph than the frame that replaces it.
+        develops_at_film(workers, "pub(crate) fn start_redevelop_at(", "self.film_short_edge()", "build_draft(");
+        let draft = include_str!("../draft.rs");
+        develops_at_film(draft, "pub(crate) fn build_draft(", "film_short_edge", "build_preview(");
         let util = include_str!("../util.rs");
         develops_at_film(util, "pub(crate) fn build_preview(", "film_short_edge", "develop_preview_film(");
         let serve = include_str!("../../../serve.rs");

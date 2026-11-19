@@ -709,6 +709,15 @@ pub(crate) struct PreviewDone {
     pub(crate) histogram: Vec<[f32; 4]>,
     pub(crate) clipping: Option<egui::ColorImage>,
     pub(crate) thumb: egui::ColorImage,
+    /// How long the worker spent building this frame. A photo whose full
+    /// develop is slow is drawn in drafts while it is edited (`draft.rs`).
+    pub(crate) took: Duration,
+    /// The dispatch this frame answers (`draft.rs`): which card, and its place
+    /// in the order of dispatch. The default on a frame built by hand.
+    pub(crate) tag: FrameTag,
+    /// `Some` on a DRAFT (`draft.rs`): the size the full frame has, which is
+    /// where the canvas lays this smaller picture out. `None` on a full frame.
+    pub(crate) stands_for: Option<egui::Vec2>,
 }
 
 /// Coverage-cache identity. Local effect sliders (Exposure/Temp/Saturation/
@@ -767,6 +776,9 @@ pub(crate) enum Msg {
     /// A synchronous GUI develop used to block egui's update loop. Preview work
     /// now returns here from a single latest-wins worker.
     Developed(Box<anyhow::Result<PreviewDone>>),
+    /// A draft frame (`draft.rs`): the canvas's picture while a slow photo is
+    /// being edited, developed from a reduced copy of its base.
+    DraftDeveloped(Box<anyhow::Result<DraftDone>>),
     /// Carries the gen_epoch it was started under: Analyze is cancellable
     /// (abandon-only — the advisor has no cancel checkpoints, so ✕ unblocks
     /// the UI now and the network call dies at its stall/progress deadline),

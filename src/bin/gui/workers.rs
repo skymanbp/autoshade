@@ -280,11 +280,28 @@ impl AutoShadeApp {
         );
     }
 
-    /// Queue the latest preview state on the single CPU worker. Dispatch is O(1):
-    /// base pixels are Arc-shared and the recipe is small. While a frame is in
-    /// flight, edits only set `dirty`; no parallel render storm is possible.
+    /// Queue the latest preview state on a CPU worker. Dispatch is O(1): base
+    /// pixels are Arc-shared and the recipe is small. While a develop is in
+    /// flight, edits only set `dirty`: at most one full develop and one draft
+    /// run at a time, so no parallel render storm is possible.
     pub(crate) fn start_redevelop(&mut self) {
-        if self.develop_inflight {
+        self.start_redevelop_at(Instant::now());
+    }
+
+    /// [`Self::start_redevelop`] at a stated moment: the scheduler's clock is
+    /// an argument so a test can move it. Which develop this tick is owed is
+    /// `plan_develop`'s answer (`draft.rs`): the full base, or — on a photo
+    /// whose full develop is slow, while its edit gesture runs — a draft.
+    /// Each of the two has its own in-flight guard, so a draft may start
+    /// beside a full develop the gesture has already moved past.
+    pub(crate) fn start_redevelop_at(&mut self, now: Instant) {
+        let plan = self.plan_develop(now);
+        let busy = match plan {
+            DevelopPlan::Full => self.develop_inflight,
+            DevelopPlan::Draft(_) => self.draft.inflight,
+            DevelopPlan::Wait => true,
+        };
+        if busy {
             return;
         }
         // The canvas is only right over pixels that carry its recipe's base
@@ -312,10 +329,23 @@ impl AutoShadeApp {
         let recipe = self.recipe.clone();
         let show_clipping = self.show_clipping;
         let film = self.film_short_edge();
+        let tag = self.frame_tag();
+        if let DevelopPlan::Draft(edge) = plan {
+            // `dirty` stays set: the full develop of this recipe is still owed.
+            let cut = self.draft.dispatching(&base, edge, &recipe);
+            self.spawn_worker(
+                move || {
+                    let (frame, edge, reduced) = build_draft(base, cut, edge, recipe, show_clipping, film, source);
+                    Msg::DraftDeveloped(Box::new(Ok((frame.tagged(tag), edge, reduced))))
+                },
+                |e| Msg::DraftDeveloped(Box::new(Err(e))),
+            );
+            return;
+        }
         self.develop_inflight = true;
         self.dirty = false;
         self.spawn_worker(
-            move || Msg::Developed(Box::new(Ok(build_preview(base, recipe, show_clipping, film, source)))),
+            move || Msg::Developed(Box::new(Ok(build_preview(base, recipe, show_clipping, film, source).tagged(tag)))),
             |e| Msg::Developed(Box::new(Err(e))),
         );
     }
@@ -459,41 +489,80 @@ impl AutoShadeApp {
     }
 
     /// Accept one worker-built frame if it still describes the active base +
-    /// recipe. Old frames are dropped without touching textures; `dirty` remains
-    /// set by the newer edit and starts next. Texture handles are UPDATED in
-    /// place, avoiding a manager allocate/free cycle on every slider tick.
+    /// recipe. A frame of another base is dropped without touching textures,
+    /// and so is one whose recipe has moved on — unless an edit gesture is
+    /// running on its card, when it is shown on its way (`draft.rs`); either
+    /// way `dirty` stays set by the newer edit and the develop of the live
+    /// recipe starts next. Texture handles are UPDATED in place, avoiding a
+    /// manager allocate/free cycle on every slider tick.
     pub(crate) fn finish_redevelop(&mut self, ctx: &egui::Context, done: anyhow::Result<PreviewDone>) {
+        self.finish_redevelop_at(ctx, done, Instant::now());
+    }
+
+    /// A preview develop failed. Pure preview work has no ordinary error
+    /// path; only a caught panic lands here. Keep the last good frame and
+    /// surface the failure — WITHOUT fail(): that helper also clears the
+    /// global `busy` flag, which the preview path never set, and a panicking
+    /// preview worker mid-export used to unlock every busy-gated action.
+    pub(crate) fn preview_develop_failed(&mut self, e: &anyhow::Error) {
+        let text = format!("{}: {e}", tr(self.lang, "preview develop failed"));
+        self.status = text.clone();
+        self.toast(ToastKind::Error, text);
+    }
+
+    /// [`Self::finish_redevelop`] at a stated moment (the tests' clock).
+    pub(crate) fn finish_redevelop_at(&mut self, ctx: &egui::Context, done: anyhow::Result<PreviewDone>, now: Instant) {
         self.develop_inflight = false;
         let frame = match done {
             Ok(frame) => frame,
-            // Pure preview work has no ordinary error path; only a caught panic
-            // lands here. Keep the last good frame and surface the failure —
-            // WITHOUT fail(): that helper also clears the global `busy` flag,
-            // which the preview path never set, and a panicking preview worker
-            // mid-export used to unlock every busy-gated action.
-            Err(e) => {
-                let text = format!("{}: {e}", tr(self.lang, "preview develop failed"));
-                self.status = text.clone();
-                self.toast(ToastKind::Error, text);
-                return;
-            }
+            Err(e) => return self.preview_develop_failed(&e),
         };
-        let current = self
-            .base_preview
-            .as_ref()
-            .is_some_and(|base| Arc::ptr_eq(base, &frame.base))
-            && self.recipe == frame.recipe;
+        let same_base = self.base_preview.as_ref().is_some_and(|base| Arc::ptr_eq(base, &frame.base));
+        if same_base {
+            // What a full develop of this base costs decides whether its
+            // edits are drawn in drafts (`draft.rs`).
+            self.draft.note_full_cost(&frame.base, frame.took);
+        }
+        let current = same_base && self.recipe == frame.recipe;
         if !current {
             // The frame was solved for a recipe that changed mid-flight. The
-            // redispatch gate is `dirty && !develop_inflight`, so a caller
-            // that mutated the recipe WITHOUT setting dirty (historically the
-            // crop path) would freeze the preview here forever — always
-            // re-arm, the gate coalesces to a single fresh develop.
+            // redispatch gate is `dirty`, so a caller that mutated the recipe
+            // WITHOUT setting dirty (historically the crop path) would freeze
+            // the preview here forever — always re-arm, the gate coalesces to
+            // a single fresh develop.
             self.dirty = true;
             ctx.request_repaint();
+            // Dropped — unless an edit gesture is running on this very card:
+            // then it is the newest picture there is, and it is shown on its
+            // way to the live recipe's own.
+            if same_base && self.passing_frame_shows(&frame, now) {
+                self.show_passing_frame(ctx, frame);
+            }
             return;
         }
         self.develop_count += 1;
+        let thumb = self.show_frame(ctx, frame);
+        if let Some(v) = self.variants.get_mut(self.active) {
+            if let Some(tex) = &mut v.thumb {
+                tex.set(thumb, egui::TextureOptions::LINEAR);
+            } else {
+                v.thumb = Some(ctx.load_texture("vthumb", thumb, egui::TextureOptions::LINEAR));
+            }
+        }
+        // A global change can alter a Range Mask's coverage reference. The
+        // coverage-aware key makes this a cheap no-op for ordinary local effect
+        // sliders, whose coverage is independent of their pixel adjustment.
+        self.overlay_stale = true;
+        ctx.request_repaint();
+    }
+
+    /// Put a developed frame on the canvas: its histogram, the After texture,
+    /// the clipping layer, and the pixels the clipping toggle rebuilds from.
+    /// One body for the full frame of the live recipe and for a passing frame
+    /// (`draft.rs`), so the two cannot show a frame differently. Returns the
+    /// frame's card thumbnail: whether it goes on the card is the caller's
+    /// decision, and only the full frame's does.
+    pub(crate) fn show_frame(&mut self, ctx: &egui::Context, frame: PreviewDone) -> egui::ColorImage {
         self.histogram = Some(frame.histogram);
 
         // The ColorImage arrives worker-built (see PreviewDone.after) — the UI
@@ -539,18 +608,10 @@ impl AutoShadeApp {
             }
             None => self.clip_tex = None,
         }
-        if let Some(v) = self.variants.get_mut(self.active) {
-            if let Some(tex) = &mut v.thumb {
-                tex.set(frame.thumb, egui::TextureOptions::LINEAR);
-            } else {
-                v.thumb = Some(ctx.load_texture("vthumb", frame.thumb, egui::TextureOptions::LINEAR));
-            }
-        }
-        // A global change can alter a Range Mask's coverage reference. The
-        // coverage-aware key makes this a cheap no-op for ordinary local effect
-        // sliders, whose coverage is independent of their pixel adjustment.
-        self.overlay_stale = true;
-        ctx.request_repaint();
+        // What the canvas now shows, and — for a draft — the size it is laid
+        // out at (`draft.rs`).
+        self.draft.frame_shown(&frame.base, frame.recipe, &frame.tag, frame.stands_for);
+        frame.thumb
     }
 
     pub(crate) fn poll_workers(&mut self, ctx: &egui::Context) {
@@ -580,6 +641,7 @@ impl AutoShadeApp {
                 }
                 Msg::AiMasksResolved(boxed) => self.on_ai_masks_resolved(lang, *boxed),
                 Msg::Developed(boxed) => self.finish_redevelop(ctx, *boxed),
+                Msg::DraftDeveloped(boxed) => self.finish_draft_at(ctx, *boxed, Instant::now()),
                 Msg::Analyzed(epoch, mut boxed) => {
                     // Normal's one-click look lands through the same door,
                     // then says what happened in plain words (`normal.rs`).

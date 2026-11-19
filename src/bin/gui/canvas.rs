@@ -477,6 +477,11 @@ impl AutoShadeApp {
             });
             return;
         };
+        // A draft's texture is smaller than the frame it stands for
+        // (`draft.rs`): the picture is laid out at the full frame's size, so
+        // the zoom readout, 1:1 and the crop frame stay where they are when
+        // the full frame replaces it.
+        let tex_size = if comparing { tex_size } else { self.draft.stands_for.unwrap_or(tex_size) };
 
         let uv = self.view_uv();
         // Display size fits the VISIBLE window's aspect (in image pixels).

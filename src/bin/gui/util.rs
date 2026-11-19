@@ -1623,6 +1623,7 @@ pub(crate) fn build_preview(
     film_short_edge: Option<u32>,
     source: autoshade::render::SourceFrame,
 ) -> PreviewDone {
+    let started = Instant::now();
     // The Detail panel's radii are FILM pixels (v1.5.0): developed against the
     // source's own short edge, the canvas shows what the export will look like
     // downscaled to it (`AutoShadeApp::film_short_edge`); the source's kind
@@ -1707,7 +1708,20 @@ pub(crate) fn build_preview(
     let thumb_rgb = image::imageops::thumbnail(&rgb, 96, 96);
     let thumb = rgb_to_color_image(&thumb_rgb);
     let after = rgb_to_color_image(&rgb);
-    PreviewDone { base, recipe, rgb, after, histogram, clipping, thumb }
+    PreviewDone {
+        base,
+        recipe,
+        rgb,
+        after,
+        histogram,
+        clipping,
+        thumb,
+        // What the worker spent on this frame: it is what tells a slow photo
+        // from a quick one (`draft.rs`).
+        took: started.elapsed(),
+        tag: FrameTag::default(),
+        stands_for: None,
+    }
 }
 
 /// A brush tip (2026-10-13, user: 画笔羽化 / 流量): how far in from the rim the

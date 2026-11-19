@@ -53,6 +53,7 @@ mod actions;
 mod app;
 mod budget;
 mod canvas;
+mod draft;
 mod export;
 mod masks;
 mod mode;
@@ -67,6 +68,7 @@ use headings::*;
 use theme::*;
 use util::*;
 use app::*;
+use draft::*;
 use side_panel::*;
 use mode::*;
 

@@ -41,6 +41,9 @@ pub(crate) struct AutoShadeApp {
     // --- asynchronous develop scheduler (single in-flight, latest wins) ---
     pub(crate) develop_inflight: bool,
     pub(crate) develop_count: u64, // accepted frames; regression counter (latest-wins)
+    /// Draft frames (`draft.rs`): what the canvas shows while a photo whose
+    /// full develop is slow is being edited, and the scheduler's memory.
+    pub(crate) draft: Draft,
     pub(crate) status: String,
     // Consumed by the startup greeting or the restored folder's status.
     pub(crate) startup_note: Option<String>,
@@ -1838,6 +1841,7 @@ impl Default for AutoShadeApp {
             dirty: false,
             develop_inflight: false,
             develop_count: 0,
+            draft: Draft::default(),
             status: "Open a photo, or open a folder to browse your library.".into(),
             startup_note: None,
             busy: false,
@@ -2257,10 +2261,13 @@ impl AutoShadeApp {
             self.set_before(ctx, &b, &start);
         }
         // A held-still pointer still needs a repaint to receive the result.
-        if self.dirty && !self.develop_inflight {
+        // The scheduler is asked on every dirty frame: it holds the in-flight
+        // guards itself, and it is where an edit made while a develop is in
+        // flight is noticed (`draft.rs`).
+        if self.dirty {
             self.start_redevelop();
         }
-        if self.develop_inflight {
+        if self.develop_inflight || self.draft.inflight {
             ctx.request_repaint();
         }
         // The mask coverage overlay follows develop / selection / toggle /

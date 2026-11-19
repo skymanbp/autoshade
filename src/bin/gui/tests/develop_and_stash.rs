@@ -36,11 +36,17 @@
         // AND the pending edit re-armed. `dirty` is cleared first — it was
         // still true from the swallowed dispatch above, so the re-arm
         // assertion used to be vacuously satisfiable (L26).
-        let stale = build_preview(base, app.recipe.clone(), false, None, autoshade::render::SourceFrame::Baked(None, None));
-        app.recipe.masks[0].exposure_ev = 1.9; // user kept dragging
+        // No gesture is running when it lands (five seconds after the last
+        // edit): DURING one, such a frame is shown on its way to the live
+        // recipe's own (`draft.rs`, tests/draft_frames.rs). It carries a real
+        // dispatch tag, so the gesture rule is what drops it.
+        let stale = build_preview(base, app.recipe.clone(), false, None, autoshade::render::SourceFrame::Baked(None, None))
+            .tagged(app.frame_tag());
+        app.recipe.masks[0].exposure_ev = 1.9; // the recipe moved on
         app.dirty = false;
-        app.finish_redevelop(&ctx, Ok(stale));
+        app.finish_redevelop_at(&ctx, Ok(stale), Instant::now() + Duration::from_secs(5));
         assert_eq!(app.develop_count, 1, "stale frame (recipe moved) discarded");
+        assert_eq!(app.draft.passing_count, 0, "…and not shown: outside a gesture nothing stale goes on screen");
         assert!(app.dirty, "a discarded stale frame re-arms the pending edit");
 
     }
