@@ -4033,34 +4033,6 @@ pub fn claim_numbered(out: &Path) -> Result<PathBuf> {
     anyhow::bail!("{} and 998 numbered copies of it already exist — pick another folder", out.display())
 }
 
-/// Write the develop's XMP projection: the published path, the note when
-/// the merge could not be performed and the sidecar was REGENERATED instead
-/// (see [`write_xmp_doc`] for why that is a loss worth telling the user
-/// about), and the per-mask list of what the projection itself could not
-/// carry (M6a — bitmap/muted masks skipped, bitmap components omitted, radial
-/// rotation dropped, recolour gains past Temp/Tint's reach;
-/// [`xmp::mask_export_losses`]).
-/// Every caller receives both (round-12 disclosure threading): the old
-/// note-dropping `write_xmp` wrapper was how five of seven surfaces stayed
-/// silent, so the values ride the RETURN TYPE where a surface has to look at
-/// them. stderr already hears both via `write_xmp_doc`; UI surfaces route
-/// what they are handed here.
-///
-/// `sink` receives the two ungated lines this path raises (the merge note and
-/// the mask-loss list) — R29-1: the caller decides where they go, and the
-/// SUBJECT is bound from `raw` here rather than taken on trust.
-pub fn write_xmp(
-    raw: &Path,
-    recipe: &EditRecipe,
-    sink: &dyn crate::diag::Sink,
-) -> Result<(PathBuf, Option<String>, Vec<xmp::MaskLoss>)> {
-    let target = xmp_target(raw);
-    let (bytes, note, losses) = xmp_projection_bytes(raw, recipe, sink)?;
-    // Stage + rename, never truncate in place (see `write_xmp_doc`).
-    crate::store::durable_write(&target, &bytes)
-        .with_context(|| format!("publish xmp {}", target.display()))?;
-    Ok((target, note, losses))
-}
 
 /// The `xmp` member of a [`crate::store::DevelopCommit`] for the develop
 /// being committed, with the projection's two disclosures (the merge note
@@ -4072,7 +4044,7 @@ pub fn write_xmp(
 /// * `on_source` — the develop describes the RAW itself (an Original or
 ///   Reverse-fit card; the CLI's fits and analyses; a web save over no
 ///   generated master) — and the photo is a camera RAW: `Write`, the bytes
-///   [`write_xmp`] would publish;
+///   [`xmp_projection_bytes`] builds;
 /// * otherwise `Clear`: a develop that sits on AI-generated pixels has no
 ///   sidecar that reproduces those pixels, and a baked PNG/JPEG has no
 ///   Lightroom-sidecar convention at all.
@@ -4183,11 +4155,10 @@ pub fn commit_analyzed_develop(
     Ok(())
 }
 
-/// The projection's BYTES without publishing them: exactly what
-/// [`write_xmp`] puts at [`xmp_target`] for `raw` — merge base (the sidecar
-/// Lightroom writes beside the RAW, else the previous projection) and all —
-/// so a develop commit can stage the sidecar into the same generation as the
-/// recipe it projects. Same return shape as the writer minus the path.
+/// The store projection's BYTES for `raw` — merge base (the sidecar
+/// Lightroom writes beside the RAW, else the previous projection) and all.
+/// Kept only while the desktop app's savers and its export button still
+/// call it; every other surface writes no projection.
 pub fn xmp_projection_bytes(
     raw: &Path,
     recipe: &EditRecipe,
@@ -4416,6 +4387,53 @@ pub fn read_xmp_file(path: &Path) -> Result<String> {
         SidecarRead::Missing => anyhow::bail!("{} does not exist", path.display()),
         SidecarRead::Unreadable(why) => anyhow::bail!("could not read {} ({why})", path.display()),
     }
+}
+
+/// The develop an explicit export of `raw` describes: what this app SAVED
+/// (`recipe.json`, else an older build's stored XMP), with its rasters
+/// anchored and its frame migrated the way every reader of a recipe file
+/// does. THE door the CLI's `export-xmp` and the web's export share, so the
+/// two cannot export different things or refuse differently.
+///
+/// Every refusal is an error whose message is one plain sentence: not a
+/// camera RAW, nothing saved (or only a neutral develop), or a develop that
+/// sits on AI-generated pixels. Writes nothing: the existence probe comes
+/// first, so a photo the store has never seen gets no develop dir.
+pub fn saved_develop_for_xmp_export(raw: &Path) -> Result<EditRecipe> {
+    if let Some(why) = xmp_export_refusal(raw, false) {
+        anyhow::bail!("{why}");
+    }
+    let nothing = "this photo has no saved develop to export — save it first";
+    if !crate::store::has_develop(raw) {
+        anyhow::bail!("{nothing}");
+    }
+    let snap = crate::store::read_develop_snapshot(raw)?;
+    let mut recipe = if let Some((text, from)) = &snap.recipe {
+        let mut r: EditRecipe = serde_json::from_str(text)
+            .with_context(|| format!("the saved develop {} cannot be read", from.display()))?;
+        if let Some(base) = from.parent() {
+            crate::store::resolve_mask_paths(&mut r, base);
+        }
+        migrate_recipe_coord_frame(raw, &mut r)?;
+        r
+    } else if let Some(err) = &snap.recipe_err {
+        anyhow::bail!("the saved develop cannot be read ({err})");
+    } else if let Some((text, _)) = &snap.store_xmp {
+        xmp::xmp_to_recipe_for_photo(text, raw)
+    } else {
+        anyhow::bail!("{nothing}");
+    };
+    if recipe.is_noop() {
+        anyhow::bail!("the saved develop is neutral — there is nothing to export");
+    }
+    // Record-level, the save's own rule: a develop over a generated master
+    // describes those pixels whether or not the PNG opens right now.
+    let on_ai = crate::store::recorded_pixel_source(raw).is_some_and(|(_, generated)| generated);
+    if let Some(why) = xmp_export_refusal(raw, on_ai) {
+        anyhow::bail!("{why}");
+    }
+    recipe.clamp();
+    Ok(recipe)
 }
 
 /// Write the XMP to an EXPLICIT path — the CLI's `-o`. Built exactly as
@@ -7474,7 +7492,7 @@ mod tests {
     #[test]
     fn every_worker_reachable_warning_flows_through_the_sink() {
         // (file, fragment, how many times it must be raised through the sink)
-        const SITES: [(&str, &str, usize); 20] = [
+        const SITES: [(&str, &str, usize); 19] = [
             ("src/pipeline.rs", "GPT proposer failed", 1),
             ("src/pipeline.rs", "reference search unavailable", 1),
             // The run-scoped `Once` line — 5c had to leave this one
@@ -7488,7 +7506,7 @@ mod tests {
             // The clamp disclosure 5c's sweep MISSED, because it re-walked
             // three files and this one lives in a fourth.
             ("src/recipe.rs", "truncated {} curve point(s)", 1),
-            ("src/main.rs", "XMP failed: {e}\"", 1),
+
             ("src/render.rs", "could not embed the {space:?} ICC profile", 1),
             ("src/render.rs", "bitmap mask '{path}' could not be loaded", 1),
             ("src/render.rs", "bitmap mask '{path}' exceeds the", 1),
@@ -7536,7 +7554,7 @@ mod tests {
             checked += hits.len();
         }
         // PREMISE: a scanner that matched nothing would pass vacuously.
-        assert_eq!(checked, 22, "every registered site must have been inspected");
+        assert_eq!(checked, 21, "every registered site must have been inspected");
         assert!(scanned > 40, "the statement scanner found almost nothing: {scanned}");
 
         // THE CENSUS. What is left of `eprintln!` in the develop chain's own
@@ -7556,18 +7574,18 @@ mod tests {
         //   disclosure is bound to its photograph. The last two are routed but
         //   not injectable, which `crate::diag`'s module doc states as the
         //   decision and the reason.
-        // * `src/main.rs` = 6: the SERIAL single-photo commands (`apply`'s
-        //   clamp line; `match`'s two review lines, its XMP-failure line and
-        //   its import note), plus the line `library-build` ends its one-line
-        //   progress meter with. One job, one thread, a printed header
-        //   directly above — nothing to order and nobody to route to. The
-        //   pooled `batch` worker has none. (`analyze` and `auto` write no
-        //   .xmp and import none, so their lines went with the projection.)
+        // * `src/main.rs` = 5: the SERIAL single-photo commands (`apply`'s
+        //   clamp line and the import note on the .xmp it was handed;
+        //   `match`'s two review lines), plus the line `library-build` ends
+        //   its one-line progress meter with. One job, one thread, a printed
+        //   header directly above — nothing to order and nobody to route to.
+        //   The pooled `batch` worker has none. (No command but `apply`
+        //   imports an .xmp, and none but `export-xmp` writes one.)
         const CENSUS: [(&str, usize); 5] = [
             ("src/diag.rs", 1),
             ("src/pipeline.rs", 0),
             ("src/render.rs", 0),
-            ("src/main.rs", 6),
+            ("src/main.rs", 5),
             ("src/recipe.rs", 0),
         ];
         for (rel, want) in CENSUS {

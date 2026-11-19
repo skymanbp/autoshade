@@ -18,7 +18,7 @@ use autoshade::{correspond, decode, denoise, eval, fit, generative, pipeline, re
 use autoshade::advisor::Verdict;
 use autoshade::config::Config;
 use autoshade::pipeline::{
-    default_out, ensure_parent, find_raws, produce_recipe, stem, write_recipe, write_xmp,
+    default_out, ensure_parent, find_raws, produce_recipe, stem, write_recipe,
     GradeRequest,
 };
 use autoshade::recipe::{DirectionAdherence, EditRecipe, GradeStrength};
@@ -51,7 +51,8 @@ enum Command {
         out: Option<PathBuf>,
     },
     /// Decode a RAW, ask the AI advisor to propose an edit, have Claude verify
-    /// it, and write the recipe JSON + a Lightroom .xmp sidecar (no render).
+    /// it, and write the recipe JSON (no render; an .xmp for Lightroom is
+    /// written only by `export-xmp`).
     /// R20: also runs the visual closed loop — the proposal is RENDERED and
     /// judged by the vision model, which may buy ONE guided revision (or up to
     /// three, with --deep or a high --strength; extra vision cost per run,
@@ -141,8 +142,9 @@ enum Command {
     },
     /// Render an existing EditRecipe onto a RAW and save the developed image.
     /// The recipe may be the JSON `analyze` writes, or a Lightroom / Camera Raw
-    /// `.xmp` sidecar — the same import the desktop app runs when it opens a
-    /// photo that has one. Like every develop of a Bayer RAW, it first maps
+    /// `.xmp` — read the way the desktop app reads an .xmp you import, with
+    /// what the import could not carry said on stderr. Nothing is saved. Like
+    /// every develop of a Bayer RAW, it first maps
     /// isolated hot pixels stronger than 20 local sigma.
     Apply {
         /// Path to the RAW file.
@@ -164,7 +166,27 @@ enum Command {
         #[arg(long)]
         long_edge: Option<u32>,
     },
-    /// End-to-end for one RAW: analyze (recipe + xmp) then render an image.
+    /// Export a RAW's SAVED develop as a Lightroom / Camera Raw .xmp. Nothing
+    /// else writes one: saving, `analyze`, `auto`, `match` and `batch` keep the
+    /// develop in the store only. Refused when the photo has no saved develop,
+    /// is not a camera RAW, or its develop sits on AI-generated pixels (no
+    /// .xmp can reproduce those). Default destination: ./out/<stem>.xmp.
+    ExportXmp {
+        /// Path to the RAW file.
+        raw: PathBuf,
+        /// Write the .xmp to this path instead (never into the photo's own
+        /// folder — that is what --beside is for).
+        #[arg(short, long, conflicts_with = "beside")]
+        out: Option<PathBuf>,
+        /// Write it beside the RAW as <name>.xmp, where Lightroom reads it —
+        /// merged over an .xmp already there, which is refused unless --force.
+        #[arg(long)]
+        beside: bool,
+        /// With --beside: replace an .xmp already beside the RAW.
+        #[arg(long, requires = "beside")]
+        force: bool,
+    },
+    /// End-to-end for one RAW: analyze (recipe) then render an image.
     Auto {
         /// Path to the RAW file.
         raw: PathBuf,
@@ -293,7 +315,9 @@ enum Command {
     },
     /// Batch-process every RAW under a folder (resumes by skipping RAWs that
     /// already have a saved develop). Renders go to ./out; develop state goes
-    /// to the per-user store — the photo library stays read-only.
+    /// to the per-user store — the photo library stays read-only. An .xmp
+    /// beside a photo does not count as a develop: such a photo is analyzed
+    /// like any other, and the .xmp is left as it is.
     Batch {
         /// Folder to scan recursively for RAW files (24 formats — the same set
         /// `decode::is_raw` defines and the GUI and web open).
@@ -323,7 +347,7 @@ enum Command {
         /// of mixed orientations and sensors comes out with one bounded long
         /// edge each rather than one bounded width. 0 = full resolution.
         /// Requires --render, which is what produces the deliverable at all:
-        /// without it this run writes recipes and sidecars and no pixels, and
+        /// without it this run writes recipes and no pixels, and
         /// a size for files that are never written is a typo, not a setting.
         #[arg(long, requires = "render")]
         long_edge: Option<u32>,
@@ -424,7 +448,7 @@ enum Command {
     /// the source and a target rendition (e.g. the `reimagine` output, or any
     /// finished reference of this frame) — solve for the EditRecipe that
     /// reproduces the target through the deterministic engine, and write the
-    /// recipe JSON + Lightroom XMP. No pixels are copied, so the result applies
+    /// recipe JSON. No pixels are copied, so the result applies
     /// at FULL sensor resolution. Deterministic; no API key needed.
     Match {
         /// Source RAW (or baked image) the look should be fitted onto.
@@ -593,6 +617,9 @@ fn main() -> Result<()> {
         }
         Command::Apply { raw, recipe, out, long_edge } => {
             apply_cmd(&raw, &recipe, &out, long_edge)
+        }
+        Command::ExportXmp { raw, out, beside, force } => {
+            export_xmp_cmd(&raw, out.as_deref(), beside, force)
         }
         Command::Auto {
             raw,
@@ -920,8 +947,8 @@ fn same_path(a: &Path, b: &Path) -> bool {
     false
 }
 
-/// What the photo's own Lightroom sidecar costs on the way IN, as one English
-/// sentence, or `None` when there is no such sidecar / nothing was lost.
+/// What an .xmp the user named costs on the way IN, as one English
+/// sentence, or `None` when nothing was lost.
 ///
 /// R27 (L-07) converts the R25 P9 registration「CLI discloses nothing about
 /// mask import loss」into a channel. `xmp::describe_import_losses` had exactly
@@ -929,39 +956,19 @@ fn same_path(a: &Path, b: &Path) -> bool {
 /// holds a brush mask, a Subtract component or a rotation this build cannot
 /// fold said nothing at all about it, while the GUI said it on every open.
 ///
-/// The sentence is a property of the FILE, so it is computed from the same
-/// source `pipeline::write_xmp` merges over — Lightroom's own sidecar beside
-/// the RAW — and printed on the same stderr channel the export-side loss line
-/// uses (`pipeline::write_xmp_doc`). ONE producer, so no CLI command can print
-/// a different (or no) version of it.
-///
-/// `None` for a baked source (a PNG's neighbouring `.xmp` is someone else's
-/// file — the line `store::lightroom_sidecar` and `write_xmp` both draw) and
-/// for an UNREADABLE sidecar, which `write_xmp` already discloses with the
-/// reason.
-fn lightroom_import_note(raw: &Path) -> Option<String> {
-    if !decode::is_raw(raw) {
-        return None;
-    }
-    // The ONE pairing rule (`xmp_pair`), so a `.XMP` sidecar is the same
-    // sidecar on the shipped Mac build as it is on Windows. No `--xmp-dir`
-    // here, deliberately: this file is also `pipeline::write_xmp`'s MERGE
-    // BASE (the two are ONE producer of one fact, see the paragraph above),
-    // and that base is beside-the-RAW by the settled develop-chain rule —
-    // a note that read one file while the save merged another would be worse
-    // than the silence it replaced.
-    let lr = autoshade::xmp_pair::XmpPairing::beside().find(raw)?;
-    let autoshade::store::SidecarRead::Ok(text) = autoshade::store::read_sidecar_checked(&lr) else {
-        return None;
-    };
-    let losses = autoshade::xmp::import_losses_for_photo(&text, raw);
+/// The sentence is a property of the FILE, so it is computed from the file the
+/// user named (`lr`, its `text`) and printed on the same stderr channel the
+/// export-side loss line uses. An .xmp beside the photo that nobody named is
+/// never read, so it never speaks here.
+fn xmp_import_note(raw: &Path, lr: &Path, text: &str) -> Option<String> {
+    let losses = autoshade::xmp::import_losses_for_photo(text, raw);
     // The count the reader WOULD carry — the same number the GUI's open path
     // passes (`bin/gui/export.rs`), so the two surfaces cannot report the same
     // file differently. Taken through the CLAMPED door (R28 2b) because the
     // third sentence below needs what the size caps cut, and re-parsing the
     // document to learn it would be a second producer of one fact.
     let diag = autoshade::diag::photo(raw);
-    let (parsed, clamped) = autoshade::xmp::xmp_to_recipe_clamped_with_diag(&text, &diag);
+    let (parsed, clamped) = autoshade::xmp::xmp_to_recipe_clamped_with_diag(text, &diag);
     let imported = parsed.masks.len();
     // The mask sentence and the CROP sentence (R27) ride together: a file can
     // lose either, both or neither, and a `?` on the first would have swallowed
@@ -975,10 +982,10 @@ fn lightroom_import_note(raw: &Path) -> Option<String> {
     // the frame the reader decoded it in. The UNREADABLE numbers ride too —
     // the GUI's open path has always named them (`persist.rs` `xmp_bad`),
     // and this line was the CLI's only account of the file.
-    let bad = autoshade::xmp::unparsable_crs_numbers(&text);
+    let bad = autoshade::xmp::unparsable_crs_numbers(text);
     let line = [
         autoshade::xmp::describe_import_losses(imported, &losses),
-        autoshade::xmp::crop_import_note_for_photo(&text, raw),
+        autoshade::xmp::crop_import_note_for_photo(text, raw),
         (!clamped.is_empty())
             .then(|| format!("recipe limits then discarded {}", clamped.describe())),
         (!bad.is_empty()).then(|| {
@@ -1073,11 +1080,9 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, req: 
     // (batch passes false — spend never multiplies silently).
     let (recipe, verdict, _notes) =
         pipeline::produce_develop(raw, None, &cfg, true, guidance.as_deref(), None, req, true, autoshade::diag::stderr())?;
-    // Remember whether -o redirected the recipe: the XMP has to follow it (below)
-    // so one develop never splits across two folders. `-o` POINTING AT the
+    // Remember whether -o redirected the recipe. `-o` POINTING AT the
     // canonical path IS a canonical write — out.is_some() alone let that
-    // spelling skip the backup gate and drop the XMP beside it as
-    // recipe.xmp instead of the canonical <stem>.xmp.
+    // spelling skip the backup gate.
     let redirected =
         out.as_ref().is_some_and(|o| !same_path(o, &autoshade::store::recipe_target(raw)));
 
@@ -1213,8 +1218,47 @@ fn read_recipe_at(recipe_path: &Path, raw: &Path) -> Result<EditRecipe> {
     serde_json::from_str(&text).with_context(|| format!("parse recipe {}", recipe_path.display()))
 }
 
+/// `export-xmp`: the saved develop, through the pipeline's export doors. The
+/// merge note and the loss lines go to stderr from the builder, as for every
+/// export; this prints where the file landed.
+fn export_xmp_cmd(raw: &Path, out: Option<&Path>, beside: bool, force: bool) -> Result<()> {
+    let recipe = pipeline::saved_develop_for_xmp_export(raw)?;
+    let path = if beside {
+        match pipeline::export_xmp_beside(raw, &recipe, force, autoshade::diag::stderr()) {
+            Ok(x) => x.path,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => anyhow::bail!(
+                "an .xmp already sits beside {} — pass --force to replace it (it is merged, \
+                 not discarded: what this app does not model in it is kept)",
+                raw.display()
+            ),
+            Err(e) => return Err(e.into()),
+        }
+    } else {
+        let to = out.map_or_else(|| default_out_xmp(raw), Path::to_path_buf);
+        pipeline::guard_readonly(&to, raw)?;
+        ensure_parent(&to)?;
+        pipeline::write_xmp_at(to, &recipe, &autoshade::diag::photo(raw))?.0
+    };
+    println!("xmp    -> {}", path.display());
+    Ok(())
+}
+
+/// `<delivery root>/<stem>.xmp`: the name Lightroom pairs with the photo, so
+/// copying the file beside the RAW needs no rename.
+fn default_out_xmp(raw: &Path) -> std::path::PathBuf {
+    autoshade::config::delivery_root().join(format!("{}.xmp", stem(raw)))
+}
+
 fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path, long_edge: Option<u32>) -> Result<()> {
     let mut recipe: EditRecipe = read_recipe_at(recipe_path, raw)?;
+    // What the .xmp the user named could not carry (R27 L-07): said on the
+    // file the user asked for, the one import this command makes.
+    if recipe_path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xmp"))
+        && let Ok(text) = pipeline::read_xmp_file(recipe_path)
+        && let Some(m) = xmp_import_note(raw, recipe_path, &text)
+    {
+        eprintln!("⚠ {m}");
+    }
     // Store-written recipes reference their rasters by bare file name — anchor
     // them to the recipe's own directory (legacy cwd-relative refs untouched).
     if let Some(base) = recipe_path.parent() {
@@ -1704,18 +1748,16 @@ fn match_cmd(
             autoshade::fit_zoned::semantic::MAX_SEMANTIC_REGIONS,
         );
     }
-    // BEFORE any fitting/segmentation is paid for: `-o` naming the photo's
-    // XMP sidecar wrote the promised recipe JSON there, then the projection
-    // below overwrote it — both lines printed success while the named
-    // artifact no longer existed (16-lane scan L09). Analyze has the
-    // equivalent collision check; the RAW gate matches write_xmp's own.
+    // BEFORE any fitting/segmentation is paid for: `-o` naming the store's
+    // XMP slot would put recipe JSON where the readers expect an older
+    // build's XMP (16-lane scan L09 found the collision when this command
+    // still wrote that file too).
     if decode::is_raw(raw)
         && let Some(o) = out.as_deref()
         && same_path(o, &pipeline::xmp_target(raw))
     {
         anyhow::bail!(
-            "-o names this photo's XMP sidecar ({}) — the XMP projection would overwrite the \
-             recipe JSON written there; choose a different output path",
+            "-o names this photo's stored XMP ({}) — choose a different output path",
             o.display()
         );
     }
@@ -1963,21 +2005,8 @@ fn match_cmd(
     // previously saved heal/generative master — and a stale link surviving a
     // kill between the two writes made every later open apply the new look
     // ON TOP of pixels it was never fitted to (16-lane scan L09/L13).
-    // The projection is a member of the same generation (2026-09-13): a fit
-    // is a source develop, so it writes. A projection this build cannot
-    // produce degrades to Keep and a warning below — the recipe write alone
-    // still decides the saved state (the cross-surface rule).
-    let projection =
-        pipeline::xmp_projection_member(raw, &rep.recipe, true, autoshade::diag::stderr());
-    // Built per call: the commit closure below may run in either of two
-    // branches, and a `CommitMember` owns its bytes.
-    let xmp_member = || match &projection {
-        Ok((autoshade::store::CommitMember::Write(b), _, _)) => {
-            autoshade::store::CommitMember::Write(b.clone())
-        }
-        Ok(_) => autoshade::store::CommitMember::Clear,
-        Err(_) => autoshade::store::CommitMember::Keep,
-    };
+    // No .xmp is written (that is `export-xmp`); the commit retires one an
+    // earlier build kept beside the recipe.
     let commit_canonical = || -> Result<()> {
         autoshade::store::commit_develop(
             raw,
@@ -1994,7 +2023,7 @@ fn match_cmd(
                     raw,
                     autoshade::store::ActiveWrite::Kind("fitted"),
                 )?,
-                xmp: xmp_member(),
+                xmp: autoshade::store::CommitMember::Clear,
             },
         )?;
         Ok(())
@@ -2033,23 +2062,7 @@ fn match_cmd(
         );
     }
     if decode::is_raw(raw) {
-        // The projection landed WITH the commit above (its notes and
-        // mask-loss line reached stderr from the builder); a builder failure
-        // is a warning, not a failure — the recipe committed regardless.
-        match &projection {
-            Ok(_) => {
-                let s = stem(raw);
-                println!(
-                    "xmp    -> {} (copy {s}.xmp beside {s}.ARW for Lightroom)",
-                    pipeline::xmp_target(raw).display()
-                );
-            }
-            Err(e) => eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}"),
-        }
-        // The import half (R27 L-07), same producer as `analyze`.
-        if let Some(m) = lightroom_import_note(raw) {
-            eprintln!("⚠ {m}");
-        }
+        println!("  (for Lightroom: autoshade export-xmp {} --beside)", raw.display());
     }
     Ok(())
     })?;
@@ -2185,12 +2198,12 @@ fn batch_cmd(
     }
 
     // "Pending" = no saved develop anywhere — central store OR legacy ./out,
-    // recipe OR XMP, OR the sidecar Lightroom itself writes beside the RAW
-    // (L13#2: an LR-only photo was "pending", so batch spent a paid analyze
-    // on it and then wrote recipe.json over the user's Lightroom work) — so
-    // an analyzed library is not silently re-analyzed (and re-billed).
+    // recipe OR an older build's XMP — so an analyzed library is not
+    // silently re-analyzed (and re-billed). An .xmp beside the photo is NOT a
+    // develop (Q5, 2026-11-18): it is another program's file, which this
+    // batch neither reads nor writes, so the photo is analyzed like any other.
     let pending: Vec<&PathBuf> =
-        raws.iter().filter(|r| !autoshade::store::has_develop_or_sidecar(r)).collect();
+        raws.iter().filter(|r| !autoshade::store::has_develop(r)).collect();
     let todo = pending.len();
     let n = todo.min(limit);
     println!("{todo} pending; processing {n} this run (--limit {limit}).");
@@ -2356,7 +2369,7 @@ fn batch_cmd(
     // The SAME predicate as the up-front filter, or the summary contradicts
     // the selection it reports on.
     let still_pending =
-        pending.iter().filter(|p| !autoshade::store::has_develop_or_sidecar(p.as_path())).count();
+        pending.iter().filter(|p| !autoshade::store::has_develop(p.as_path())).count();
     // The remedy note keys on the photos that NEED it, counted directly: a
     // FAILED photo whose develop persisted is exactly what `apply` finishes.
     // The old proxy (`still_pending < fail`) compared the library-wide
@@ -2427,16 +2440,12 @@ fn process_one(
     if verdict.decision != autoshade::advisor::Decision::Accept {
         return Ok((verdict, notes));
     }
-    // Every fallible product BEFORE the completion markers: `has_develop`
-    // (the batch resume filter) keys on the sidecars, so any failure after
-    // one lands would leave a photo both "failed" in this run AND skipped by
-    // every later resume. The render is idempotent, so a crash after it but
-    // before the sidecars simply re-renders on retry. Between the two
-    // sidecars the RECIPE goes first — it is the lossless truth and the
-    // cross-surface rule is "the recipe write alone decides the saved state";
-    // the old xmp-first order could crash into an XMP-only marker that
-    // suppressed every retry while the authoritative recipe never landed.
-    // Sidecar persistence, shared by the success path and the failed-render
+    // Every fallible product BEFORE the completion marker: `has_develop` (the
+    // batch resume filter) keys on the stored recipe, so any failure after it
+    // lands would leave a photo both "failed" in this run AND skipped by every
+    // later resume. The render is idempotent, so a crash after it but before
+    // the recipe simply re-renders on retry.
+    // Develop persistence, shared by the success path and the failed-render
     // path below: once the verdict is Accept, the PAID analysis must land.
     let persist = |recipe: &EditRecipe| -> Result<()> {
         autoshade::store::with_develop_lock(
@@ -2449,24 +2458,8 @@ fn process_one(
         if let Err(e) = autoshade::store::backup_saved_develop(raw, Some(recipe)) {
             anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
         }
+        // The recipe commit ALONE is the saved state, and it writes no .xmp.
         write_recipe(raw, recipe, None, sink)?;
-        // The recipe write ALONE decides the saved state (cross-surface rule):
-        // failing the photo here made the batch report it failed while the
-        // resume filter — which sees recipe.json — permanently skipped it.
-        if let Err(e) = write_xmp(raw, recipe, sink) {
-            // The one disclosure the batch worker itself owns, and the
-            // "main.rs:1586" the `jobs` disclosure and the comment above name
-            // (both re-located at R28 HEAD). It fires INSIDE the pool, after
-            // the develop lock, so at `--jobs 3` it used to land between two
-            // other photos' output with nothing to tie it to its own; it now
-            // goes to the caller's channel, which puts it in this photo's
-            // block. `WarnNested` keeps the "  ⚠ " the CLI's XMP-failure
-            // family has always worn.
-            autoshade::diag::Diag::about(sink, raw).emit(
-                autoshade::diag::Mark::WarnNested,
-                format!("recipe saved, but the Lightroom XMP failed: {e}"),
-            );
-        }
         Ok(())
             },
         )
@@ -3463,9 +3456,10 @@ mod tests {
     }
 
     /// R27 L-07. `xmp::describe_import_losses` had two callers and both were
-    /// in the GUI: a CLI run over a photo whose Lightroom sidecar holds a
-    /// brush mask printed nothing at all about it, while the window said it on
-    /// every open. This is the CLI's half of that channel.
+    /// in the GUI: a CLI run that read a Lightroom sidecar holding a brush
+    /// mask printed nothing at all about it, while the window said it on
+    /// every import. This is the CLI's half of that channel, on the .xmp the
+    /// user names to `apply`.
     ///
     /// The fixture is SYNTHETIC (public repo — no user sidecar bytes here).
     /// Its shape follows the reference corpus: a `Correction` whose only
@@ -3473,10 +3467,7 @@ mod tests {
     /// so there are no pixels for a third-party reader to take.
     ///
     /// MUTATION THIS CATCHES: drop the `describe_import_losses` call from
-    /// `lightroom_import_note` (or gate it on `decode::is_raw` being FALSE)
-    /// and the brush arm goes silent again; drop the `is_raw` guard entirely
-    /// and the baked arm starts consulting a neighbouring `.xmp` that belongs
-    /// to somebody else's file.
+    /// `xmp_import_note` and the brush arm goes silent again.
     #[test]
     fn a_lossy_lightroom_sidecar_is_disclosed_on_the_cli() {
         let root = std::env::temp_dir()
@@ -3524,8 +3515,9 @@ mod tests {
 ";
         let raw = root.join("lossy.arw");
         std::fs::write(&raw, b"not a real ARW - the note never decodes pixels").unwrap();
-        std::fs::write(raw.with_extension("xmp"), brush).unwrap();
-        let note = lightroom_import_note(&raw).expect("a brush correction is a disclosed loss");
+        let named = raw.with_extension("xmp");
+        let note =
+            xmp_import_note(&raw, &named, brush).expect("a brush correction is a disclosed loss");
         assert!(note.contains("Brush 1"), "the sentence must name the correction: {note}");
         assert!(
             note.contains("AI / brush correction(s) skipped"),
@@ -3536,29 +3528,17 @@ mod tests {
         // A sidecar with global settings only loses nothing, and says nothing.
         let clean = root.join("clean.arw");
         std::fs::write(&clean, b"stub").unwrap();
-        std::fs::write(
-            clean.with_extension("xmp"),
-            brush
-                .split("   <crs:MaskGroupBasedCorrections>")
-                .next()
-                .unwrap()
-                .to_string()
-                + "  </rdf:Description>\n </rdf:RDF>\n</x:xmpmeta>\n",
-        )
-        .unwrap();
-        assert_eq!(lightroom_import_note(&clean), None, "a faithful import says nothing");
-
-        // A baked photo's neighbouring `.xmp` is someone else's file — the
-        // line `pipeline::write_xmp` draws before it consults one.
-        let baked = root.join("baked.png");
-        std::fs::write(&baked, b"stub").unwrap();
-        std::fs::write(baked.with_extension("xmp"), brush).unwrap();
-        assert_eq!(lightroom_import_note(&baked), None, "a baked source has no LR sidecar");
-
-        // No sidecar at all is silence, not a panic.
-        let bare = root.join("bare.arw");
-        std::fs::write(&bare, b"stub").unwrap();
-        assert_eq!(lightroom_import_note(&bare), None);
+        let clean_doc = brush
+            .split("   <crs:MaskGroupBasedCorrections>")
+            .next()
+            .unwrap()
+            .to_string()
+            + "  </rdf:Description>\n </rdf:RDF>\n</x:xmpmeta>\n";
+        assert_eq!(
+            xmp_import_note(&clean, &clean.with_extension("xmp"), &clean_doc),
+            None,
+            "a faithful import says nothing"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3574,7 +3554,7 @@ mod tests {
     /// 256), and the same channel carries the 393 KB dab stream the xmp-side
     /// test exercises.
     ///
-    /// MUTATION THIS CATCHES: revert `lightroom_import_note` to
+    /// MUTATION THIS CATCHES: revert `xmp_import_note` to
     /// `xmp_to_recipe` + a two-element `line`, or revert `xmp_to_recipe`'s
     /// tail to a bare `r.clamp();` — the note goes back to `None` and the
     /// truncation is once again said nowhere.
@@ -3636,11 +3616,75 @@ mod tests {
             "premise: the gradient imports whole — {:?}",
             autoshade::xmp::import_losses(&doc)
         );
-        let note = lightroom_import_note(&raw).expect("a truncated import must not be silent");
+        let note = xmp_import_note(&raw, &raw.with_extension("xmp"), &doc)
+            .expect("a truncated import must not be silent");
         assert!(note.contains("recipe limits then discarded"), "{note}");
         assert!(note.contains("144 string byte(s)"), "400 - 256 = 144: {note}");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `export-xmp` writes the SAVED develop — not something rebuilt or
+    /// guessed — and refuses, each in its own sentence, a photo with nothing
+    /// saved, a baked source, and a develop that sits on AI-generated pixels.
+    /// `--beside` lands where Lightroom reads it and is never asked about as a
+    /// found file afterwards.
+    ///
+    /// MUTATION THIS CATCHES: export a fresh recipe instead of the saved one,
+    /// or drop the AI-pixel refusal from `saved_develop_for_xmp_export`.
+    #[test]
+    fn export_xmp_writes_the_saved_develop_and_refuses_ai_pixels() {
+        let root = std::env::temp_dir()
+            .join(format!("autoshade-cli-export-xmp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let photos = root.join("photos");
+        let exports = root.join("exports");
+        std::fs::create_dir_all(&photos).unwrap();
+        let raw = photos.join("export.arw");
+        std::fs::write(&raw, b"stub").unwrap();
+        let dev = autoshade::store::develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+
+        // Nothing saved: refused, nothing written.
+        let to = exports.join("export.xmp");
+        let err = export_xmp_cmd(&raw, Some(&to), false, false).unwrap_err().to_string();
+        assert!(err.contains("no saved develop"), "{err}");
+        assert!(!to.exists());
+
+        // A saved develop: exported as saved.
+        std::fs::create_dir_all(&dev).unwrap();
+        let saved = EditRecipe { exposure_ev: 0.75, ..Default::default() };
+        std::fs::write(autoshade::store::recipe_target(&raw), serde_json::to_string(&saved).unwrap())
+            .unwrap();
+        export_xmp_cmd(&raw, Some(&to), false, false).unwrap();
+        let text = std::fs::read_to_string(&to).unwrap();
+        assert!(text.contains("crs:Exposure2012=\"0.75\""), "the saved develop: {text}");
+        assert!(!raw.with_extension("xmp").exists(), "-o writes nothing beside the photo");
+
+        // --beside: lands where Lightroom reads it, refuses to clobber, and
+        // is this app's own file to the detector.
+        export_xmp_cmd(&raw, None, true, false).unwrap();
+        assert!(raw.with_extension("xmp").exists());
+        assert!(matches!(autoshade::store::external_xmp(&raw), autoshade::store::ExternalXmp::None));
+        let again = export_xmp_cmd(&raw, None, true, false).unwrap_err().to_string();
+        assert!(again.contains("--force"), "{again}");
+        export_xmp_cmd(&raw, None, true, true).unwrap();
+
+        // On AI-generated pixels: refused.
+        let master = dev.join("generated-1.png");
+        std::fs::write(&master, b"png").unwrap();
+        autoshade::store::write_pixel_source(&raw, &master, true).unwrap();
+        let ai = export_xmp_cmd(&raw, Some(&to), false, false).unwrap_err().to_string();
+        assert!(ai.contains("AI-generated pixels"), "{ai}");
+
+        // A baked source: refused.
+        let png = photos.join("baked.png");
+        std::fs::write(&png, b"png").unwrap();
+        let baked = export_xmp_cmd(&png, Some(&to), false, false).unwrap_err().to_string();
+        assert!(baked.contains("camera RAW"), "{baked}");
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&dev);
     }
 
     /// Every flag S1 added carries `--help` text, and the library commands say
