@@ -248,9 +248,10 @@
         <div class="row" style="margin-top:0">
           <button class="export">Export → ./out</button>
           <button class="secondary download">Download…</button>
-          <button class="secondary savexmp">Save XMP</button>
+          <button class="secondary savedev">Save develop</button>
+          <button class="secondary exportxmp" title="Download this photo's SAVED develop as a Lightroom / Camera Raw .xmp (RAW only)">Export .xmp</button>
         </div>
-        <div class="hint">Export writes to ./out. XMP + recipe go to the develop store; XMP only for RAW.</div>
+        <div class="hint">Export writes to ./out. Save develop keeps your edit in the develop store. Export .xmp downloads the saved develop for Lightroom.</div>
       </div>
       <div class="panel fill-panel" style="margin-top:14px">
         <h3>Generative Fill <span class="sub">· experimental</span></h3>
@@ -442,10 +443,10 @@ document.addEventListener("keydown", e => {
   // field too (typing a direction and hitting Ctrl+S saved the PAGE) —
   // unlike Ctrl+Z, which stays native inside text fields.
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-    // Ctrl+S means "save my edit", not "save the page" — Save XMP was
+    // Ctrl+S means "save my edit", not "save the page" — Save develop was
     // click-only (D13).
     e.preventDefault();
-    if (state.id !== null && state.recipe) saveXmp();
+    if (state.id !== null && state.recipe) saveDevelop();
     return;
   }
   const t = e.target, NON_TEXT = ["range","checkbox","radio","button","submit","reset","file","color"];
@@ -561,6 +562,9 @@ async function loadList(offset) {
       <div><div class="name">${escapeHtml(it.stem)}</div>
         <div class="tags">${it.baked?'<span class="pill">PNG/TIFF</span>':''}${it.analyzed?'<span class="badge">● edited</span>':''}</div>
       </div>`;
+    // Only a camera RAW pairs with an .xmp: the export button follows the
+    // photo that is open.
+    div.dataset.baked = it.baked ? "1" : "";
     div.onclick = () => selectPhoto(it.id, it.stem, div);
     div.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); div.click(); } };
     grid.appendChild(div);
@@ -1011,6 +1015,8 @@ async function selectPhoto(id, stem, el) {
   document.querySelectorAll(".thumb").forEach(t=>t.classList.remove("sel"));
   if (el) el.classList.add("sel");
   state.id = id; state.stem = stem;
+  state.baked = !!(el && el.dataset.baked);
+  { const ex = document.querySelector(".exportxmp"); if (ex) ex.disabled = state.baked; }
   // The OLD photo's recipe dies synchronously with the id: it used to
   // survive the awaits below, and Ctrl+S in that window saved photo A's
   // recipe into photo B's develop dir. Null until B's own recipe lands
@@ -1027,7 +1033,7 @@ async function selectPhoto(id, stem, el) {
   // A damaged / unreachable recipe must still leave a WORKING panel: fall back
   // to the neutral recipe and show the server's reason, instead of throwing out
   // of selectPhoto and leaving an empty control column with no explanation.
-  let loaded = null, loadedFrom = null, loadedWarn = null, loadErr = null, freshCurve = null,
+  let loaded = null, loadedWarn = null, loadErr = null, freshCurve = null,
       freshLens = null, freshAsShot = null;
   // The fresh-open calibration arrives through two doors (the 404 body below,
   // and /api/fresh-base for a saved recipe) and the server builds ONE payload
@@ -1046,7 +1052,6 @@ async function selectPhoto(id, stem, el) {
     if (seq !== selectSeq) return;
     if (rr.ok) {
       loaded = await rr.json();
-      loadedFrom = rr.headers.get("X-Recipe-Source");
       loadedWarn = rr.headers.get("X-Recipe-Warning");
       savedRev = rr.headers.get("ETag");
     }
@@ -1089,12 +1094,8 @@ async function selectPhoto(id, stem, el) {
     if (!("schema_era" in loaded)) loaded.schema_era = 0;
     state.recipe = Object.assign(structuredClone(DEFAULT_RECIPE), loaded);
     markSaved(); // this IS the saved state until the user edits it
-    // Which file answered matters: a Lightroom sidecar beside the RAW that
-    // is newer than the saved develop wins the restore (newest intent), and
-    // the user deserves to know they are looking at their LIGHTROOM edit.
-    $(".verdict").innerHTML = loadedFrom === "lightroom-sidecar"
-      ? '<span class="tag saved">SAVED</span> Loaded the Lightroom sidecar beside the RAW (its edits are newest). Saving adopts it as the develop.'
-      : '<span class="tag saved">SAVED</span> Loaded a previously-saved recipe. Re-run Analyze for a live verdict.';
+    $(".verdict").innerHTML =
+      '<span class="tag saved">SAVED</span> Loaded a previously-saved recipe. Re-run Analyze for a live verdict.';
     if (loadedWarn) {
       // Server-provided text: textContent, never innerHTML (the XSS rule).
       const w = document.createElement("div");
@@ -1164,7 +1165,7 @@ async function selectPhoto(id, stem, el) {
       pop.innerHTML = `<h4>Library</h4>
         <b>Working folder:</b> <code>${escapeHtml(d.working_dir||"—")}</code> · ${d.working_count||0} source(s)<br>
         <b>Output:</b> <code>${escapeHtml(d.out_dir||"./out")}</code> — renders / heals / exports land here<br>
-        <b>Develop store:</b> <code>${escapeHtml(d.store_dir||"—")}</code> — recipes / XMP / versions live here<br><br>
+        <b>Develop store:</b> <code>${escapeHtml(d.store_dir||"—")}</code> — recipes / versions live here<br><br>
         ${styleHtml}
         <div class="srow" style="margin-top:8px; gap:6px; flex-wrap:nowrap">
           <input class="sinput sb-dir" placeholder="Folder of your finished photos (JPEG / TIFF / PNG)…" style="font-size:11px" />
@@ -1257,7 +1258,8 @@ async function selectPhoto(id, stem, el) {
   // posting it stampless would launder it to era-2 and disable the repair
   // forever.
   main.querySelector(".reset").onclick = ()=>{ const cur = state.recipe && state.recipe.base_curve; const curVer = state.recipe ? state.recipe.version : null; const usedFresh = !!(state.freshCurve && state.freshCurve.length); const bc = usedFresh ? state.freshCurve : cur; const curLens = state.recipe && state.recipe.lens_profile; const lp = state.freshLens || curLens; const curAs = (state.recipe && state.recipe.as_shot_k != null) ? { k: state.recipe.as_shot_k, t: state.recipe.as_shot_tint } : null; const as = state.freshAsShot || curAs; state.recipe = structuredClone(DEFAULT_RECIPE); if (bc && bc.length) state.recipe.base_curve = structuredClone(bc); if (!usedFresh && bc && bc.length && curVer != null) state.recipe.version = curVer; if (lp) state.recipe.lens_profile = structuredClone(lp); if (as) { state.recipe.as_shot_k = as.k; state.recipe.as_shot_tint = (as.t != null ? as.t : null); } state.region = null; selBox.hidden = true; state.sessionMaster = null; syncSliders(); pushHistory(state.recipe); renderAfter(); };
-  main.querySelector(".savexmp").onclick = saveXmp;
+  main.querySelector(".savedev").onclick = saveDevelop;
+  main.querySelector(".exportxmp").onclick = exportXmp;
   main.querySelector(".export").onclick = exportFull;
   main.querySelector(".download").onclick = downloadFull;
 
@@ -1593,20 +1595,20 @@ async function analyze() {
   } finally { analyzeBusy = false; btn.disabled = false; }
 }
 
-async function saveXmp() {
+async function saveDevelop() {
   if (state.id == null || !state.recipe) return;   // mid-select: nothing coherent to save
   // One save in flight: overlapping clicks are independent requests and the
   // server only guarantees mutual exclusion, not invocation order — a slower
   // OLDER click could land after (and silently overwrite) a newer one.
-  const btn = document.querySelector(".savexmp");
+  const btn = document.querySelector(".savedev");
   if (btn && btn.disabled) return;
   if (btn) btn.disabled = true;
-  setStatus("saving xmp…");
+  setStatus("saving…");
   // The answer belongs to THIS photo: markSaved() after a switch would
   // baseline the NEW photo's canvas as saved and silence its own
   // unsaved-edits warning (the fill/heal handlers' guard).
   // Snapshot the BASELINE at send time, not at response time. Sliders, Undo
-  // and the fill/heal buttons all stay live during the flight (only .savexmp
+  // and the fill/heal buttons all stay live during the flight (only .savedev
   // is disabled), so a markSaved() after the await recorded whatever the
   // canvas happened to hold — edits the server never received were marked
   // "on disk" and were then discarded without warning on the next photo
@@ -1619,14 +1621,14 @@ async function saveXmp() {
     // The revision this tab loaded (or last saved). Absent against an old
     // server — the save is then unconditional, exactly as before.
     if (savedRev) hdrs["If-Match"] = savedRev;
-    const r = await fetch("/api/xmp", {method:"POST", headers:hdrs,
+    const r = await fetch("/api/save", {method:"POST", headers:hdrs,
       body: JSON.stringify({id: reqId, recipe: state.recipe,
                             master: sentMaster || undefined})});
     const body = await r.text();
-    // The server writes the recipe.json alongside the XMP, so reopening this photo
-    // (here or in the GUI) restores exactly this edit. A NEUTRAL recipe is not a
-    // save at all: the server deletes the sidecars instead (Reset + Save = "clear
-    // my edits") and answers "cleared …".
+    // The server writes recipe.json, so reopening this photo (here or in the
+    // GUI) restores exactly this edit. A NEUTRAL recipe is not a save at all:
+    // the server clears the develop instead (Reset + Save = "clear my edits")
+    // and answers "cleared …".
     const stale = reqId !== state.id || reqSeq !== selectSeq;
     if (!r.ok) {
       const why = r.status === 412
@@ -1636,13 +1638,9 @@ async function saveXmp() {
       return;
     }
     if (stale) { setStatus("save for another photo finished — its develop is on disk"); loadList(); return; }
-    // The server APPENDS why a clear could not be marked (without the marker
-    // a sidecar beside the RAW can restore the edits on the next open).
-    // Substituting a fixed string threw away the one thing worth reading.
-    // …and a save that wrote no sidecar (a develop over AI-generated pixels,
-    // a baked source) says so itself, starting with "recipe saved".
-    setStatus(body.startsWith("cleared") || body.startsWith("recipe saved")
-      ? body : ("xmp + recipe saved → " + body));
+    // The server's reply is the whole status ("develop saved → …", or
+    // "cleared …" with why a clear could not be recorded): shown verbatim.
+    setStatus(body);
     // The recipe and the pixel link land in ONE commit (`commit_develop`), so
     // a 200 means both are on disk and the baseline is exactly what this
     // request CARRIED — there is no half-landed master to exclude.
@@ -1699,6 +1697,33 @@ async function exportFull() {
     setStatus((r.ok ? ("exported → " + body) : ("export failed: " + body))
       + (relook ? "  ·  ⚠ (" + (stem || "photo") + ") " + relook : ""));
   } finally { exportBusy = false; btn.disabled = false; }
+}
+
+// The saved develop as a Lightroom .xmp, downloaded. The server builds it
+// from what is SAVED (not from unsaved sliders) and writes nothing of its
+// own; a refusal (nothing saved, not a RAW, a develop on AI pixels) is its
+// plain sentence.
+async function exportXmp() {
+  if (state.id == null) return;
+  const id = state.id, stem = state.stem;
+  const btn = $(".exportxmp"); btn.disabled = true;
+  setStatus(hasUnsavedEdits()
+    ? "exporting the SAVED develop (unsaved changes are not in it)…"
+    : "exporting .xmp…");
+  try {
+    const r = await fetch(`/api/export-xmp?id=${id}`);
+    if (!r.ok) { setStatus("export .xmp: " + await r.text()); return; }
+    const blob = await r.blob();
+    const a = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    a.href = url;
+    a.download = `${stem || "photo"}.xmp`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    const warn = r.headers.get("X-Export-Warning");
+    setStatus(".xmp downloaded — put it beside the RAW for Lightroom"
+      + (warn ? "  ·  ⚠ " + warn : ""));
+  } finally { btn.disabled = !!state.baked; }
 }
 
 async function downloadFull() {

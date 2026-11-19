@@ -4971,7 +4971,7 @@ mod tests {
         assert!(
             degenerate.is_noop(),
             "clamp no longer neutralises a degenerate crop — if this changed on \
-             purpose, re-check serve.rs's api_xmp clear branch, which is ordered \
+             purpose, re-check serve.rs's api_save clear branch, which is ordered \
              around it"
         );
     }

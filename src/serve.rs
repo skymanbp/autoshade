@@ -345,7 +345,7 @@ fn id_bound_mutation(path: &str) -> bool {
             | "/api/develop"
             | "/api/export"
             | "/api/download"
-            | "/api/xmp"
+            | "/api/save"
             | "/api/retouch"
             | "/api/heal"
             | "/api/stack"
@@ -416,6 +416,7 @@ fn handle(mut request: Request, state: &AppState, image_token: &str) -> Result<(
         (false, "/api/thumb") => api_image(&request, state, 256),
         (false, "/api/preview") => api_image(&request, state, PREVIEW_EDGE),
         (false, "/api/recipe") => api_recipe(&request, state),
+        (false, "/api/export-xmp") => api_export_xmp(&request, state),
         (false, "/api/fresh-base") => api_fresh_base(&request, state),
         (false, "/api/library-info") => api_library_info(state),
         (true, "/api/library-build") => api_library_build(&mut request),
@@ -431,7 +432,7 @@ fn handle(mut request: Request, state: &AppState, image_token: &str) -> Result<(
         (true, "/api/stack") => api_stack(&mut request, state),
         (true, "/api/export") => api_export(&mut request, state),
         (true, "/api/download") => api_download(&mut request, state),
-        (true, "/api/xmp") => api_xmp(&mut request, state),
+        (true, "/api/save") => api_save(&mut request, state),
         _ => Ok(status_response(404, "not found")),
     };
     // A failure has to reach the BROWSER: a dropped request answers with a
@@ -531,11 +532,11 @@ fn api_list(request: &Request, state: &AppState) -> Result<ResponseBox> {
         .skip(offset)
         .take(limit)
         .map(|(id, raw)| {
-            // Central store OR legacy ./out, recipe OR XMP — pre-migration
-            // libraries keep their "analyzed" badges — OR Lightroom's own
-            // sidecar (L13#2: the web restore already prefers it, so the
-            // badge must agree with what a click restores).
-            let analyzed = crate::store::has_develop_or_sidecar(raw);
+            // Central store OR legacy ./out, recipe OR an older build's XMP —
+            // pre-migration libraries keep their "analyzed" badges. An .xmp
+            // beside the RAW is not a develop of this app's (a click never
+            // restores it), so it does not badge the photo.
+            let analyzed = crate::store::has_develop(raw);
             json!({
                 "id": id,
                 "stem": pipeline::stem(raw),
@@ -944,85 +945,26 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
             // recipe.json); the tag is the store's own, read under the same
             // lock as the body.
             crate::store::migrate_legacy(&raw);
-            let ranked = crate::store::lightroom_sidecar(&raw);
-            let resp = api_recipe_locked(&raw, &ranked)?;
+            let resp = api_recipe_locked(&raw)?;
             Ok(with_revision(resp, crate::store::recipe_revision(&raw).as_deref()))
         },
     );
 
-    fn api_recipe_locked(raw: &Path, ranked: &crate::store::LrSidecar) -> Result<ResponseBox> {
-    // The sidecar BESIDE the RAW is the one file Lightroom itself writes —
-    // newest intent wins, the same contract as the GUI's read_saved_develop
-    // (store::lightroom_sidecar: our own copied projection is skipped, ties
-    // go to the store). The header says where the recipe came from; the BODY
-    // stays a pure EditRecipe — clients post recipes back to /api/develop,
-    // where an unknown field is a 422.
-    // A6 disclosure survives a NO-OP import (Codex 32-#1): a sidecar whose
-    // only edit is corrupt parses to neutral, restores nothing — and the
-    // next save then overwrites it. The warning rides every answer below,
-    // the 404 "not analyzed yet" included.
+    fn api_recipe_locked(raw: &Path) -> Result<ResponseBox> {
+    // What this app SAVED, and nothing else: an .xmp beside the RAW (or the
+    // packet baked into it) is an external source the web never reads — the
+    // explicit export is its one XMP door. The A6 disclosure of an older
+    // build's stored XMP rides every answer below, the 404 included.
     let mut xmp_warn: Option<Header> = None;
-    match ranked {
-        crate::store::LrSidecar::NewerThanStore(text) | crate::store::LrSidecar::Only(text) => {
-            let diag = crate::diag::photo(raw);
-            let mut r = crate::xmp::xmp_to_recipe_with_diag(text, &diag);
-            xmp_warn = recipe_warning_header(text);
-            if !r.is_noop() {
-                r.clamp();
-                // Same stamp rule as the XMP fallback below: Lightroom tuned
-                // this file over its own profile-corrected base.
-                stamp_import_start(raw, &mut r);
-                r.lens_profile = pipeline::fresh_lens_profile(raw);
-                // Stamp-if-None: an old-era AutoShade projection arrives with
-                // the 5500 anchor PINNED by xmp_to_recipe (its Kelvin was
-                // tuned relative) — overwriting the pin would reinterpret it.
-                if r.as_shot_k.is_none() {
-                    let (ask, ast) = pipeline::fresh_as_shot_wb(raw);
-                    r.as_shot_k = ask;
-                    r.as_shot_tint = ast;
-                }
-                let h = Header::from_bytes(&b"X-Recipe-Source"[..], &b"lightroom-sidecar"[..])
-                    .expect("static ASCII header");
-                let mut resp = json_text(serde_json::to_string(&r)?).with_header(h);
-                if let Some(w) = xmp_warn {
-                    resp = resp.with_header(w);
-                }
-                return Ok(resp);
-            }
-        }
-        crate::store::LrSidecar::Unreadable(why) => {
-            // The file EXISTS but cannot answer — the old fold into "absent"
-            // answered from the store in silence (L08). The store still
-            // answers below; the warning rides every answer.
-            // Through header(), never raw from_bytes: {why} is a localized
-            // (often non-ASCII) OS error string, and the raw ASCII-only
-            // constructor silently killed this warning on such systems.
-            xmp_warn = header(
-                "X-Recipe-Warning",
-                &format!(
-                    "a Lightroom sidecar sits beside this photo but could not be read ({why}) - \
-                     any Lightroom edits in it are NOT reflected"
-                ),
-            );
-        }
-        _ => {}
-    }
     // Central first; then any legacy file a failed migration left behind.
     let mut parse_err: Option<String> = None;
-    // ANY store file read below — a NEUTRAL one included — bars the embedded
-    // packet at the tail (the GUI open path's `!any` rule; Codex L05
-    // EMBED-01: a neutral save must not be out-answered by the baked packet).
-    let mut store_answered = false;
     // A NEUTRAL central recipe.json ends the store walk (2026-09-13): the
     // projection beside it is derived from it and can only disagree by
     // being stale, so the loop below is not entered.
     let mut neutral_store = false;
     for path in [crate::store::recipe_target(raw), crate::store::legacy_recipe(raw)] {
         let text = match crate::store::read_text_capped(&path, crate::store::MAX_STORE_JSON) {
-            Ok(t) => {
-                store_answered = true;
-                t
-            }
+            Ok(t) => t,
             // Missing IS absence; any OTHER read failure (permissions, I/O)
             // is an EXISTING save we could not honour — treating it as
             // absent silently resurrected stale legacy/XMP edits over it.
@@ -1067,9 +1009,9 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
             break;
         }
         // A corrupt or unreadable CENTRAL recipe.json outranked by the legacy
-        // ./out copy served from this iteration is disclosed the way the two
-        // fallbacks below (the lossy XMP projection, the embedded packet)
-        // disclose it: the authoritative save is unreadable, the answer is an
+        // ./out copy served from this iteration is disclosed the way the
+        // fallback below (an older build's lossy stored XMP) discloses it:
+        // the authoritative save is unreadable, the answer is an
         // OLDER file, and the next explicit save overwrites the unreadable
         // one. `parse_err` is only ever set by the central iteration, so a
         // Some here means exactly that. Detail to stderr (the path can be
@@ -1111,10 +1053,8 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
             if let Some(h) = header("X-Recipe-Warning", &note) {
                 resp.add_header(h);
             }
-            // The accumulated sidecar warning rides EVERY answer shape
-            // (review R12-05): the valid-recipe returns used to drop it,
-            // so "the Lightroom sidecar could not be read" vanished exactly
-            // when a store recipe answered.
+            // The accumulated warning rides EVERY answer shape (review
+            // R12-05): the valid-recipe returns used to drop it.
             if let Some(h) = legacy_over_corrupt {
                 resp = resp.with_header(h);
             }
@@ -1132,7 +1072,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
         }
         return Ok(resp);
     }
-    // No recipe.json → fall back to the XMP sidecar, exactly like the GUI's
+    // No recipe.json → fall back to the XMP an older build stored, like the GUI's
     // `read_saved_develop`: a foreign / neutral sidecar parses to a no-op recipe,
     // and "restoring" that would only produce a misleading SAVED tag. An XMP
     // was tuned in Lightroom over ITS camera-profile base, so it gets the
@@ -1149,8 +1089,6 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                 // honour: the silent skip served 404 "not analyzed yet" over
                 // real saved edits — the same fold-into-absent this handler
                 // already refuses for the LR sidecar and for recipe.json.
-                // It bars the embedded packet below like any store file.
-                store_answered = true;
                 eprintln!(
                     "⚠ the saved XMP projection {} exists but cannot be read ({e})",
                     path.display()
@@ -1168,7 +1106,6 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
             }
         };
         {
-            store_answered = true;
             let diag = crate::diag::photo(raw);
             let mut r = crate::xmp::xmp_to_recipe_with_diag(&text, &diag);
             // First consulted file wins the disclosure slot (GUI accumulates
@@ -1213,72 +1150,6 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                     resp = resp.with_header(w);
                 }
                 return Ok(resp);
-            }
-        }
-    }
-    // The RAW's own embedded XMP packet — the develop Lightroom bakes INTO a
-    // DNG — as the strictly LOWEST-priority source, the same rule and clear
-    // gate as the GUI open path and the batch snapshot
-    // (store::embedded_packet_for_restore; the surfaces must answer alike).
-    // A store file that EXISTS — neutral or unreadable — bars it.
-    match if store_answered || parse_err.is_some() {
-        Ok(None)
-    } else {
-        crate::store::embedded_packet_for_restore(raw)
-    } {
-        Ok(Some(text)) => {
-            let diag = crate::diag::photo(raw);
-            let mut r = crate::xmp::xmp_to_recipe_with_diag(&text, &diag);
-            if xmp_warn.is_none() {
-                xmp_warn = recipe_warning_header(&text);
-            }
-            if !r.is_noop() {
-                r.clamp();
-                // Same stamp rule as the XMP branches above: the packet was
-                // tuned in Lightroom over its own camera-profile base.
-                stamp_import_start(raw, &mut r);
-                r.lens_profile = pipeline::fresh_lens_profile(raw);
-                if r.as_shot_k.is_none() {
-                    let (ask, ast) = pipeline::fresh_as_shot_wb(raw);
-                    r.as_shot_k = ask;
-                    r.as_shot_tint = ast;
-                }
-                let h = Header::from_bytes(&b"X-Recipe-Source"[..], &b"embedded-xmp"[..])
-                    .expect("static ASCII header");
-                let mut resp = json_text(serde_json::to_string(&r)?).with_header(h);
-                if let Some(err) = &parse_err {
-                    eprintln!(
-                        "⚠ recipe.json for {} is unreadable ({err}) — serving the RAW's embedded XMP instead",
-                        raw.display()
-                    );
-                    if let Some(h) = header(
-                        "X-Recipe-Warning",
-                        "the saved recipe.json is unreadable - showing the RAW's embedded \
-                         XMP develop instead; saving overwrites the unreadable file",
-                    ) {
-                        resp = resp.with_header(h);
-                    }
-                }
-                if let Some(w) = xmp_warn.take() {
-                    resp = resp.with_header(w);
-                }
-                return Ok(resp);
-            }
-        }
-        Ok(None) => {}
-        // Unreadable ≠ absent: nothing else answered, so whatever the packet
-        // holds WOULD have been shown — disclosed on the fresh-open answer.
-        Err(why) => {
-            if xmp_warn.is_none() {
-                xmp_warn = header(
-                    "X-Recipe-Warning",
-                    "this RAW carries an embedded XMP develop that could not be read - \
-                     it is NOT reflected",
-                );
-                eprintln!(
-                    "⚠ embedded XMP develop in {} could not be read ({why}) — not reflected",
-                    raw.display()
-                );
             }
         }
     }
@@ -1567,7 +1438,7 @@ struct DevelopReq {
     master: Option<String>,
 }
 #[derive(Deserialize)]
-struct XmpReq {
+struct SaveReq {
     id: usize,
     #[serde(deserialize_with = "live_frame_recipe")]
     recipe: EditRecipe,
@@ -1834,7 +1705,7 @@ fn source_dims(raw: &Path) -> Option<(f32, f32)> {
 fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let stamp = request_gen(request);
     let mut req: AnalyzeReq = read_json(request)?;
-    // Untrusted network input — the same clamp the DevelopReq/XmpReq bodies
+    // Untrusted network input — the same clamp the DevelopReq/SaveReq bodies
     // get (both nested recipes feed view_for_mapping / the AI proposal, and
     // an unclamped million-knot lens vector would occupy the handler).
     if let Some(b) = req.base.as_mut() {
@@ -1943,7 +1814,7 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             "saved": false,
             "warning": format!(
                 "verdict {:?} — not saved (a non-Accept verdict never auto-saves); \
-                 Save XMP keeps it, switching photos discards it",
+                 Save develop keeps it, switching photos discards it",
                 verdict.decision
             ),
         })));
@@ -2540,6 +2411,52 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
     Ok(resp.boxed())
 }
 
+/// `GET /api/export-xmp?id=<n>`: the photo's SAVED develop as a Lightroom
+/// .xmp, handed to the browser as a download — the web's one XMP door, since
+/// Save writes none.
+///
+/// Built through the CLI's own door (`pipeline::saved_develop_for_xmp_export`,
+/// so the two export the same develop and refuse alike) and merged over the
+/// .xmp beside the RAW exactly as an export beside the photo would be, so a
+/// file the user then drops there keeps Lightroom's own properties. It writes
+/// NOTHING here: no file beside the RAW, nothing in the store, no answered
+/// stamp — a browser download is not a file beside the photo, and where it
+/// lands is the user's business. A refusal is a 409 whose body is its plain
+/// sentence; what the .xmp could not carry rides `X-Export-Warning`.
+fn api_export_xmp(request: &Request, state: &AppState) -> Result<ResponseBox> {
+    let raw = raw_for(request, state)?;
+    let recipe = match pipeline::saved_develop_for_xmp_export(&raw) {
+        Ok(r) => r,
+        Err(e) => return Ok(status_response(409, &format!("{e:#}"))),
+    };
+    let base = crate::store::xmp_beside_target(&raw).unwrap_or_else(|| raw.with_extension("xmp"));
+    let (bytes, note, losses) =
+        pipeline::xmp_export_bytes(&raw, &recipe, &base, crate::diag::stderr())?;
+    let warns: Vec<String> =
+        note.into_iter().chain(pipeline::xmp_loss_lines(&recipe, &losses)).collect();
+    // ASCII `filename=` (header values cannot carry anything else) plus the
+    // real name percent-encoded, the `api_download` spelling (RFC 5987).
+    let stem = pipeline::stem(&raw);
+    let disposition = format!(
+        "attachment; filename=\"{}.xmp\"; filename*=UTF-8''{}",
+        ascii_sanitize(&stem).replace('"', "_"),
+        percent_encode(&format!("{stem}.xmp"))
+    );
+    let mut resp = Response::from_data(bytes).with_header(no_store());
+    if let Some(h) = header("Content-Type", "application/rdf+xml") {
+        resp = resp.with_header(h);
+    }
+    if let Some(h) = header("Content-Disposition", &disposition) {
+        resp = resp.with_header(h);
+    }
+    if !warns.is_empty()
+        && let Some(h) = header("X-Export-Warning", &warns.join("; "))
+    {
+        resp = resp.with_header(h);
+    }
+    Ok(resp.boxed())
+}
+
 static DL_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Best-effort sweep of leftover `autoshade_dl_*` / `autoshade_mask_*` temp
@@ -2565,13 +2482,13 @@ fn sweep_stale_temp_files() {
     }
 }
 
-fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
+fn api_save(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let stamp = request_gen(request);
     // Read BEFORE read_json takes the body reader. The precondition itself
     // is evaluated inside the develop lock below, where the current
     // revision cannot move under it.
     let if_match = req_header(request, "If-Match");
-    let mut req: XmpReq = read_json(request)?;
+    let mut req: SaveReq = read_json(request)?;
     // "Did the client ask to clear?" is decided on what the client SENT,
     // BEFORE clamping — because clamping can manufacture a neutral recipe, and
     // the neutral branch below DELETES the photo's saved edits.
@@ -2583,7 +2500,7 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // clamp DROPS whole components rather than merely bounding them: a
     // degenerate crop becomes `None` (`recipe.rs`: under 1e-3 wide or tall), a
     // non-finite slider collapses to 0.0, a non-finite mask is retained away.
-    // So `POST /api/xmp {"id":0,"recipe":{"crop":{"left":0.5,"top":0.5,
+    // So `POST /api/save {"id":0,"recipe":{"crop":{"left":0.5,"top":0.5,
     // "right":0.5,"bottom":0.5}}}` clamped to exactly `EditRecipe::default()`,
     // took the clear branch, and answered "cleared — saved edits removed"
     // after unlinking recipe.json, the XMP and the legacy sidecar. The same
@@ -2670,14 +2587,11 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         // back the very retouch this call reported as cleared.
         return match crate::store::clear_develop(&raw) {
             Ok(outcome) => {
-                // Said, never swallowed: the store copies ARE gone, but without
-                // the marker a projection the user copied beside the RAW now
-                // out-ranks this clear and restores the edits on the next open.
+                // Said, never swallowed: the store copies ARE gone, but
+                // without the marker an .xmp beside the RAW that predates the
+                // clear may be offered again.
                 let note = match &outcome.marker_warning {
-                    Some(w) => format!(
-                        " - but the clear could not be marked ({w}); a sidecar beside the RAW \
-                         may restore these edits when you reopen"
-                    ),
+                    Some(w) => format!(" - but the clear could not be recorded ({w})"),
                     None => String::new(),
                 };
                 Ok(with_revision(
@@ -2700,14 +2614,6 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     if let Some(note) = crate::pipeline::repair_pre_era_base_curve(&raw, &mut req.recipe) {
         save_note = format!(" — {note}");
     }
-    // Dual-write, exactly as the GUI's `save_xmp` does: the XMP alone is lossy
-    // (no bitmap masks / recolour gains) AND neither surface reads it back while
-    // a `recipe.json` exists — so an XMP-only save was unreachable, silently
-    // shadowed by whatever recipe.json Analyze had left behind. recipe.json
-    // FIRST (same order as the GUI): it is the authoritative projection, and
-    // writing the XMP first meant a failed recipe write left a NEW XMP shadowed
-    // by the STALE recipe both surfaces prefer.
-    //
     // ONE single-generation commit (the Ctrl+S rule, L03): the recipe and the
     // browser-session master's pixels.json land whole or the save fails whole
     // — the client then never baselines (markSaved) on a 200 whose pixels
@@ -2751,28 +2657,16 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             None => crate::store::ActiveWrite::Unknown,
         },
     )?;
-    // The projection is a member of this generation (2026-09-13): a develop
-    // that sits on a GENERATED master — this session's, or one the GUI
-    // persisted — projects nothing (no sidecar reproduces AI pixels, and a
-    // projection left standing from an earlier card is what the open path
-    // used to restore over a pristine generated card), so the member clears.
-    let on_source = ai_master.is_none();
-    let (xmp_member, xmp_outcome) = match pipeline::xmp_projection_member(
-        &raw,
-        &req.recipe,
-        on_source,
-        crate::diag::stderr(),
-    ) {
-        Ok((m, note, losses)) => (m, Ok((note, losses))),
-        Err(e) => (crate::store::CommitMember::Keep, Err(e)),
-    };
+    // A save writes no .xmp (that is the explicit export, `GET
+    // /api/export-xmp`), and retires one an earlier build kept beside the
+    // recipe in the same generation.
     crate::store::commit_develop(
         &raw,
         crate::store::DevelopCommit {
             recipe: Some(pipeline::recipe_store_bytes(&raw, &req.recipe, crate::diag::stderr())?),
             pixels,
             variants,
-            xmp: xmp_member,
+            xmp: crate::store::CommitMember::Clear,
         },
     )?;
     let mut master_note = String::new();
@@ -2799,60 +2693,16 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
                        baked pixels"
             .to_string();
     }
-    // Recipe committed = saved (the cross-surface rule): a failed XMP
-    // projection reports success WITH the warning instead of a 500 that
-    // contradicts the on-disk state.
-    // The NEW revision rides both success replies (recipe.json committed
-    // either way), so the tab adopts it without a re-GET. Computed AFTER
-    // the projection write in each arm: the develop tag folds in a sidecar
-    // that out-ranks the store, and the tag the tab adopts must describe
-    // the state its next If-Match is compared against.
-    match xmp_outcome {
-        // A regenerated (rather than merged) sidecar is a LOSS of the user's
-        // Lightroom-only properties, so it rides the same reply as the path —
-        // reporting a bare success here is what made the loss silent.
-        Ok((merge_note, losses)) => {
-            let merge_note = merge_note.map(|m| format!("\n⚠ {m}")).unwrap_or_default();
-            // M6a export-side disclosure, in the SAME "\n⚠ …" note shape the
-            // merge loss already uses (the reply is plain text; a new field
-            // would be a new API the tab does not read).
-            // Masks AND global controls (a lens blur, fill layers…): the
-            // GUI said both, the web only the masks until 2026-10-26.
-            let mask_note: String = pipeline::xmp_loss_lines(&req.recipe, &losses)
-                .iter()
-                .map(|m| format!("\n⚠ {m}"))
-                .collect();
-            // The reply's first token names what landed: the projection when
-            // one was written (the tab prefixes "xmp + recipe saved →"), else
-            // the recipe, with the reason there is no sidecar — the tab shows
-            // a "recipe saved" body verbatim.
-            let landed = if !crate::decode::is_raw(&raw) {
-                format!(
-                    "recipe saved → {} (XMP applies to RAW only)",
-                    crate::store::recipe_target(&raw).display()
-                )
-            } else if !on_source {
-                format!(
-                    "recipe saved → {} (no Lightroom XMP: this develop sits on AI-generated pixels)",
-                    crate::store::recipe_target(&raw).display()
-                )
-            } else {
-                pipeline::xmp_target(&raw).display().to_string()
-            };
-            Ok(with_revision(
-                text_response(&format!(
-                    "{landed}{save_note}{master_note}{merge_note}{mask_note}"
-                )),
-                crate::store::recipe_revision(&raw).as_deref(),
-            ))
-        }
-        Err(e) => Ok(with_revision(
-            text_response(&format!(
-                "saved (recipe.json) — but the Lightroom XMP projection failed: {e:#}{save_note}{master_note}"
-            )),
-            crate::store::recipe_revision(&raw).as_deref(),
+    // The NEW revision rides the reply, so the tab adopts it without a
+    // re-GET; computed after the commit, so it describes the state the tab's
+    // next If-Match is compared against. The body is shown verbatim.
+    Ok(with_revision(
+        text_response(&format!(
+            "develop saved → {}{save_note}{master_note}",
+            crate::store::recipe_target(&raw).display()
         )),
-    }
+        crate::store::recipe_revision(&raw).as_deref(),
+    ))
         },
     )
 }
@@ -3867,7 +3717,7 @@ mod tests {
     #[test]
     fn a_body_keeps_the_era_it_states_and_a_silent_one_is_current() {
         use crate::recipe::{COORD_ERA, SCHEMA_ERA};
-        let xmp = |body: &str| serde_json::from_str::<XmpReq>(body).expect("an XMP body").recipe;
+        let xmp = |body: &str| serde_json::from_str::<SaveReq>(body).expect("an XMP body").recipe;
         let stated = xmp(r#"{"id":0,"recipe":{"schema_era":1,"coord_era":0,"exposure_ev":0.5}}"#);
         assert_eq!(stated.schema_era, 1, "a file's stamp rides through the page");
         assert_eq!(stated.coord_era, COORD_ERA, "the frame stamp is unconditional, as before");
@@ -3884,7 +3734,7 @@ mod tests {
         assert!(analyze(r#"{"id":0}"#).is_none() && analyze(r#"{"id":0,"base":null}"#).is_none());
         // Still the recipe's own door: an unknown field is refused through the
         // intermediate value exactly as it was without one.
-        assert!(serde_json::from_str::<XmpReq>(r#"{"id":0,"recipe":{"no_such_control":1}}"#).is_err());
+        assert!(serde_json::from_str::<SaveReq>(r#"{"id":0,"recipe":{"no_such_control":1}}"#).is_err());
         // The page states a legacy file's silence before it holds the recipe.
         // Assembled so this test cannot match itself.
         let legacy = concat!("if (!(\"schema_era\" in loaded)) loaded", ".schema_era = 0;");
@@ -4123,6 +3973,202 @@ mod tests {
         let _ = std::fs::remove_file(&legacy);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// The web state for one photo in its own temp folder, with no develop.
+    fn one_photo_state(tag: &str, file: &str) -> (PathBuf, PathBuf, AppState) {
+        use std::sync::atomic::AtomicU64;
+        let dir = std::env::temp_dir().join(format!("autoshade-serve-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join(file);
+        std::fs::write(&raw, b"raw").unwrap();
+        let _ = std::fs::remove_dir_all(crate::store::develop_dir(&raw));
+        let state = AppState {
+            dir: RwLock::new(dir.clone()),
+            raws: RwLock::new(vec![raw.clone()]),
+            cfg: RwLock::new(Config::load()),
+            dir_gen: AtomicU64::new(0),
+            installed_gen: AtomicU64::new(0),
+            port: 0,
+        };
+        (dir, raw, state)
+    }
+
+    fn get(path: &str) -> Vec<u8> {
+        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").into_bytes()
+    }
+
+    fn body_of(resp: ResponseBox) -> Vec<u8> {
+        use std::io::Read as _;
+        let mut b = Vec::new();
+        resp.into_reader().read_to_end(&mut b).unwrap();
+        b
+    }
+
+    /// The web reads only what this app saved: an edited .xmp beside the RAW
+    /// neither badges the photo in the list nor answers the GET, and the
+    /// precondition tag is the store's own (`none` with nothing saved).
+    ///
+    /// MUTATION: count the file beside the RAW in `api_list` again, or restore
+    /// the sidecar arm of `api_recipe_locked`, and an assertion fails.
+    #[test]
+    fn the_web_ignores_the_sidecar_beside_the_raw() {
+        let (dir, raw, state) = one_photo_state("ignores-sidecar", "_serve_sidecar.arw");
+        std::fs::write(
+            raw.with_extension("xmp"),
+            crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 30.0, ..Default::default() }),
+        )
+        .unwrap();
+
+        let (_s, request, client) = loopback_request(get("/api/list"));
+        let list: serde_json::Value =
+            serde_json::from_slice(&body_of(api_list(&request, &state).unwrap())).unwrap();
+        drop(request);
+        client.join().unwrap();
+        let items = list["items"].as_array().or_else(|| list.as_array()).expect("a list");
+        assert_eq!(items[0]["analyzed"], serde_json::json!(false), "{list}");
+
+        let (_s, request, client) = loopback_request(get("/api/recipe?id=0"));
+        let resp = api_recipe(&request, &state).unwrap();
+        assert_eq!(resp.status_code().0, 404, "nothing saved, so nothing to serve");
+        let etag = resp
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("ETag"))
+            .map(|h| h.value.as_str().to_string());
+        assert_eq!(etag.as_deref(), Some("\"none\""));
+        drop(request);
+        client.join().unwrap();
+
+        let _ = std::fs::remove_dir_all(crate::store::develop_dir(&raw));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A web Save writes the develop and no .xmp — none in the store, none
+    /// beside the photo — retires one an earlier build kept, and says so in
+    /// a reply that names no XMP.
+    ///
+    /// MUTATION: commit a projection member again in `api_save` and the
+    /// store assertion fails.
+    #[test]
+    fn a_web_save_writes_no_xmp() {
+        let (dir, raw, state) = one_photo_state("save-no-xmp", "_serve_save.arw");
+        let dev = crate::store::develop_dir(&raw);
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(crate::store::xmp_target(&raw), b"<x:xmpmeta/>").unwrap();
+        let body = serde_json::json!({ "id": 0, "recipe": { "exposure_ev": 0.4 } }).to_string();
+        let mut raw_http = format!(
+            "POST /api/save HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\
+             X-AutoShade-Gen: 0\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        raw_http.extend_from_slice(body.as_bytes());
+        let (_s, mut request, client) = loopback_request(raw_http);
+        let resp = api_save(&mut request, &state).unwrap();
+        assert_eq!(resp.status_code().0, 200);
+        let text = String::from_utf8(body_of(resp)).unwrap();
+        drop(request);
+        client.join().unwrap();
+        assert!(text.starts_with("develop saved"), "{text}");
+        // The recipe path is the store's (its folder names can say anything);
+        // the WORDS of the reply are what must not mention an .xmp.
+        let words = text.replace(&crate::store::recipe_target(&raw).display().to_string(), "");
+        assert!(!words.to_lowercase().contains("xmp"), "a save says nothing of XMP: {text}");
+        assert!(crate::store::recipe_target(&raw).exists(), "the develop landed");
+        assert!(!crate::store::xmp_target(&raw).exists(), "no .xmp in the store");
+        assert!(!raw.with_extension("xmp").exists(), "none beside the photo");
+
+        let _ = std::fs::remove_dir_all(&dev);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The web export returns exactly the bytes `pipeline::xmp_export_bytes`
+    /// builds for the saved develop, as a named download, and writes nothing
+    /// on this machine — no file beside the RAW, no .xmp in the store, no
+    /// answered stamp. Each refusal is a 409 carrying its own sentence.
+    ///
+    /// MUTATION: deliver the file beside the photo (`pipeline::export_xmp_beside`)
+    /// instead of only returning it, and the writes-nothing assertions fail.
+    #[test]
+    fn the_web_export_downloads_the_saved_develop_and_writes_nothing() {
+        let (dir, raw, state) = one_photo_state("export-xmp", "_serve_export.arw");
+        let dev = crate::store::develop_dir(&raw);
+        let export = |state: &AppState| {
+            let (_s, request, client) = loopback_request(get("/api/export-xmp?id=0"));
+            let resp = api_export_xmp(&request, state).unwrap();
+            let code = resp.status_code().0;
+            let disposition = resp
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Content-Disposition"))
+                .map(|h| h.value.as_str().to_string());
+            let body = body_of(resp);
+            drop(request);
+            client.join().unwrap();
+            (code, disposition, body)
+        };
+
+        // Nothing saved: refused, in a sentence.
+        let (code, _, body) = export(&state);
+        assert_eq!(code, 409);
+        assert!(String::from_utf8_lossy(&body).contains("no saved develop"));
+        assert!(!dev.exists(), "a refusal creates no develop dir");
+
+        // Saved: the exact bytes the pipeline builds, as <stem>.xmp.
+        std::fs::create_dir_all(&dev).unwrap();
+        let saved = EditRecipe { exposure_ev: 0.75, ..Default::default() };
+        std::fs::write(crate::store::recipe_target(&raw), serde_json::to_string(&saved).unwrap())
+            .unwrap();
+        let listing = |d: &Path| {
+            let mut v: Vec<(String, Vec<u8>)> = std::fs::read_dir(d)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name() != ".develop.lock")
+                .map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    (name, std::fs::read(e.path()).unwrap_or_default())
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        let before = listing(&dev);
+        let (code, disposition, body) = export(&state);
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&body));
+        let want = pipeline::saved_develop_for_xmp_export(&raw).unwrap();
+        let (built, _, _) =
+            pipeline::xmp_export_bytes(&raw, &want, &raw.with_extension("xmp"), crate::diag::silent())
+                .unwrap();
+        assert_eq!(body, built, "the download is the pipeline's bytes");
+        assert!(String::from_utf8_lossy(&body).contains("crs:Exposure2012=\"0.75\""));
+        let disposition = disposition.expect("a download");
+        assert!(
+            disposition.contains("attachment; filename=\"_serve_export.xmp\""),
+            "{disposition}"
+        );
+        assert!(!raw.with_extension("xmp").exists(), "nothing beside the photo");
+        assert!(!crate::store::xmp_target(&raw).exists(), "nothing in the store");
+        assert_eq!(listing(&dev), before, "no answered stamp, no other store file");
+
+        // On AI pixels: refused.
+        let master = dev.join("generated-1.png");
+        std::fs::write(&master, b"png").unwrap();
+        crate::store::write_pixel_source(&raw, &master, true).unwrap();
+        let (code, _, body) = export(&state);
+        assert_eq!(code, 409);
+        assert!(String::from_utf8_lossy(&body).contains("AI-generated pixels"));
+        let _ = std::fs::remove_dir_all(&dev);
+
+        // A baked photo: refused.
+        let (dir2, _png, state2) = one_photo_state("export-xmp-baked", "_serve_export.png");
+        let (code, _, body) = export(&state2);
+        assert_eq!(code, 409);
+        assert!(String::from_utf8_lossy(&body).contains("camera RAW"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
     }
 
     /// L02: the aggregate body budget — a small charge fits, and a charge

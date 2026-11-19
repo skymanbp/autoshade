@@ -3936,7 +3936,7 @@ pub fn write_recipe(
 /// Rasters living beside the recipe are stored by bare file name so the
 /// develop dir stays relocatable (store::resolve_mask_paths re-anchors them
 /// at load). The size caps belong to the WRITE, not to each caller's memory:
-/// every render route clamped its untrusted input and `api_xmp` — the one
+/// every render route clamped its untrusted input and `api_save` — the one
 /// that persists — did not, so a hostile body landed on disk as the photo's
 /// authoritative recipe.json and was re-parsed by every later reader. The
 /// routes that already clamp see a no-op — a floor no future route can
