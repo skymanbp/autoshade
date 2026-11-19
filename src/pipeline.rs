@@ -4296,9 +4296,174 @@ pub fn xmp_projection_bytes(
     Ok((doc.into_bytes(), note, losses))
 }
 
-/// Write the XMP to an EXPLICIT path. Used when the recipe was redirected with
-/// `-o`: the two halves of one develop must stay in the same folder, or the
-/// GUI/web would keep restoring an older `out/<stem>.xmp` instead.
+/// Why `raw`'s develop cannot be exported as an .xmp, or `None` when it can.
+///
+/// An .xmp is a parametric description of a camera RAW — the only kind of
+/// file Lightroom / Camera Raw pair one with. A develop that sits on
+/// AI-generated pixels describes those pixels, which no sidecar can
+/// reproduce: exported anyway, Lightroom would apply its settings to the
+/// untouched RAW and show something the user never made. Both refusals are
+/// plain sentences every surface prints as they are.
+pub fn xmp_export_refusal(raw: &Path, on_ai_pixels: bool) -> Option<&'static str> {
+    if !crate::decode::is_raw(raw) {
+        return Some("an .xmp can only be exported for a camera RAW, and this photo is not one");
+    }
+    if on_ai_pixels {
+        return Some(
+            "this develop sits on AI-generated pixels — an .xmp cannot reproduce it, so none is exported",
+        );
+    }
+    None
+}
+
+/// The merge base an export writing to `to` starts from: the file it is about
+/// to replace. Merge, never regenerate over another program's work (A11): when
+/// `to` is Lightroom's own sidecar beside the RAW, its LR-only properties (the
+/// camera profile / Look, PointColor, LR lens-profile data, ratings, foreign
+/// namespaces) survive the export. A blank file carries nothing to merge and
+/// nothing to lose; an unreadable one is a disclosure, never a silent
+/// regeneration.
+fn export_merge_base(to: &Path) -> (Option<(PathBuf, String)>, Vec<String>) {
+    use crate::store::SidecarRead;
+    match crate::store::read_sidecar_checked(to) {
+        SidecarRead::Ok(t) if !t.trim().is_empty() => (Some((to.to_path_buf(), t)), Vec::new()),
+        SidecarRead::Ok(_) | SidecarRead::Missing => (None, Vec::new()),
+        SidecarRead::Unreadable(why) => (
+            None,
+            vec![format!(
+                "the existing .xmp at {} could not be used as the merge base ({why}) — \
+                 it is replaced by a regenerated file that carries none of its properties",
+                to.display()
+            )],
+        ),
+    }
+}
+
+/// The bytes an explicit export writes for `raw`'s develop `recipe` at `to`,
+/// merged over the file already at `to` ([`export_merge_base`]), with the
+/// merge note and the per-mask list of what the .xmp could not carry. Nothing
+/// is written: the caller delivers the bytes ([`export_xmp_beside`], or the
+/// CLI's `-o` path through [`write_xmp_at`], which builds the same way).
+pub fn xmp_export_bytes(
+    raw: &Path,
+    recipe: &EditRecipe,
+    to: &Path,
+    sink: &dyn crate::diag::Sink,
+) -> Result<(Vec<u8>, Option<String>, Vec<xmp::MaskLoss>)> {
+    let (base, notes) = export_merge_base(to);
+    let (doc, note, losses) =
+        build_xmp_doc(to, recipe, base, &crate::diag::Diag::about(sink, raw), notes)?;
+    Ok((doc.into_bytes(), note, losses))
+}
+
+/// What an export beside the photo delivered: the file, the merge note and
+/// the per-mask losses (the surface says the loss lines; [`xmp_loss_lines`]).
+pub struct XmpExport {
+    pub path: PathBuf,
+    pub note: Option<String>,
+    pub losses: Vec<xmp::MaskLoss>,
+}
+
+/// THE export door into the photo's own folder: build the .xmp for `recipe`
+/// at the moment the user asks, merged over whatever sits beside the RAW, and
+/// deliver it there ([`crate::store::deliver_xmp_beside`]: an atomic claim
+/// that refuses an existing file unless `overwrite`, then the answered stamp
+/// so this file never comes back as "an .xmp was found").
+///
+/// `io::Result` so a surface keeps its `AlreadyExists` arm — the confirmation
+/// before replacing Lightroom's own file. The caller checks
+/// [`xmp_export_refusal`] first; this door does not know whether the develop
+/// sits on AI pixels.
+pub fn export_xmp_beside(
+    raw: &Path,
+    recipe: &EditRecipe,
+    overwrite: bool,
+    sink: &dyn crate::diag::Sink,
+) -> std::io::Result<XmpExport> {
+    let Some(to) = crate::store::xmp_beside_target(raw) else {
+        return Err(std::io::Error::other(format!(
+            "{} has no containing folder to export into",
+            raw.display()
+        )));
+    };
+    let (bytes, note, losses) =
+        xmp_export_bytes(raw, recipe, &to, sink).map_err(|e| std::io::Error::other(format!("{e:#}")))?;
+    let path = crate::store::deliver_xmp_beside(raw, &bytes, overwrite)?;
+    Ok(XmpExport { path, note, losses })
+}
+
+/// What reading an .xmp the user chose brought in, and everything the read
+/// has to say about it.
+pub struct XmpImport {
+    /// The develop, calibrated for this photo (see [`import_xmp`]). A no-op
+    /// recipe means the file holds nothing this app can read.
+    pub recipe: EditRecipe,
+    /// The file's content tag ([`crate::store::xmp_tag`]) — what the caller
+    /// records as answered once the import lands.
+    pub tag: String,
+    /// What the recipe's size caps cut on the way in.
+    pub clamp: crate::recipe::ClampSummary,
+    /// Numeric `crs:` settings that could not be parsed and were read as neutral.
+    pub bad_numbers: Vec<String>,
+    /// The masks the file names that did not come with it, and how many did.
+    pub mask_losses: Vec<xmp::MaskImportLoss>,
+    pub imported_masks: usize,
+    /// Global `crs:` settings the engine keeps but does not render.
+    pub carried: Vec<String>,
+    /// What placing the file's crop in this photo's frame cost, if anything.
+    pub crop_note: Option<String>,
+}
+
+/// THE import door: read an .xmp the user asked for into a develop of `raw`.
+///
+/// The DISCLOSING reader, so an AutoShade payload's mask rasters are placed
+/// into the photo's develop dir — the user asked for this file, unlike the
+/// detector, which only looks ([`crate::store::external_xmp`]). Then the steps
+/// the open path used to take when it adopted a sidecar, so an import renders
+/// what it always rendered: the import's start (its own camera profile, else
+/// the photo's fresh start), the sidecar-aware lens profile (a Lightroom lens
+/// switch is obeyed), and the as-shot white-balance anchor when the file
+/// carries none. A no-op read is returned unstamped, so the caller can say
+/// "nothing to import" instead of landing a calibration-only develop.
+pub fn import_xmp(raw: &Path, text: &str, sink: &dyn crate::diag::Sink) -> XmpImport {
+    let diag = crate::diag::Diag::about(sink, raw);
+    let (mut recipe, clamp) = xmp::xmp_to_recipe_clamped_with_diag(text, &diag);
+    let imported_masks = recipe.masks.len();
+    if !recipe.is_noop() {
+        stamp_import_start(raw, &mut recipe, &diag);
+        recipe.lens_profile = fresh_lens_profile_for_sidecar(raw, Some(text));
+        if recipe.as_shot_k.is_none() {
+            let (k, t) = fresh_as_shot_wb(raw);
+            recipe.as_shot_k = k;
+            recipe.as_shot_tint = t;
+        }
+    }
+    XmpImport {
+        recipe,
+        tag: crate::store::xmp_tag(text),
+        clamp,
+        bad_numbers: xmp::unparsable_crs_numbers(text),
+        mask_losses: xmp::import_losses_for_photo(text, raw),
+        imported_masks,
+        carried: xmp::unmodelled_global_crs(text),
+        crop_note: xmp::crop_import_note_for_photo(text, raw),
+    }
+}
+
+/// Read an .xmp the user named, through the store's bounded sidecar reader. A
+/// missing or unreadable file is an error that says which and why.
+pub fn read_xmp_file(path: &Path) -> Result<String> {
+    use crate::store::SidecarRead;
+    match crate::store::read_sidecar_checked(path) {
+        SidecarRead::Ok(t) => Ok(t),
+        SidecarRead::Missing => anyhow::bail!("{} does not exist", path.display()),
+        SidecarRead::Unreadable(why) => anyhow::bail!("could not read {} ({why})", path.display()),
+    }
+}
+
+/// Write the XMP to an EXPLICIT path — the CLI's `-o`. Built exactly as
+/// [`xmp_export_bytes`] builds (merged over the file it replaces), then
+/// published.
 ///
 /// `diag` carries BOTH halves the old `photo: Option<&Path>` parameter was
 /// standing in for (R29-1): the photograph — read back out for the frame
@@ -4308,20 +4473,7 @@ pub fn write_xmp_at(
     recipe: &EditRecipe,
     diag: &crate::diag::Diag<'_>,
 ) -> Result<(PathBuf, Option<String>, Vec<xmp::MaskLoss>)> {
-    use crate::store::SidecarRead;
-    let mut notes: Vec<String> = Vec::new();
-    let base = match crate::store::read_sidecar_checked(&out) {
-        SidecarRead::Ok(t) if !t.trim().is_empty() => Some((out.clone(), t)),
-        SidecarRead::Ok(_) | SidecarRead::Missing => None,
-        SidecarRead::Unreadable(why) => {
-            notes.push(format!(
-                "the previous XMP at {} could not be used as the merge base ({why}) — \
-                 it is replaced by a regenerated file that carries none of its properties",
-                out.display()
-            ));
-            None
-        }
-    };
+    let (base, notes) = export_merge_base(&out);
     write_xmp_doc(out, recipe, base, diag, notes)
 }
 
@@ -5694,8 +5846,12 @@ mod guard_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// The export merges over the file it replaces: Lightroom's own sidecar
+    /// beside the RAW keeps what this app does not model, and our settings
+    /// replace theirs rather than doubling them. Exporting writes nothing into
+    /// the store but the answered stamp.
     #[test]
-    fn write_xmp_merges_over_the_lightroom_sidecar_beside_the_raw() {
+    fn the_export_merges_over_the_lightroom_sidecar_it_replaces() {
         let dir = std::env::temp_dir().join(format!("autoshade-pipe-xmp-merge-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -5718,22 +5874,23 @@ mod guard_tests {
         )
         .unwrap();
         let r = EditRecipe { exposure_ev: 0.75, ..Default::default() };
-        let (out, _, _) = write_xmp(&raw, &r, crate::diag::stderr()).unwrap();
-        let text = std::fs::read_to_string(&out).unwrap();
-        assert!(text.contains("crs:PointColor=\"0\""), "LR-only property survives the save");
+        let x = export_xmp_beside(&raw, &r, true, crate::diag::stderr()).unwrap();
+        assert_eq!(x.path, lr, "the export lands on the file Lightroom reads");
+        let text = std::fs::read_to_string(&x.path).unwrap();
+        assert!(text.contains("crs:PointColor=\"0\""), "LR-only property survives the export");
         assert_eq!(text.matches("crs:Exposure2012=").count(), 1, "ours replaces, never duplicates");
         assert!(text.contains("crs:Exposure2012=\"0.75\""), "…with OUR value");
+        assert!(!xmp_target(&raw).exists(), "an export puts no .xmp into the store");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
     }
 
-    /// The commit member is the writer's bytes, merge base and all — so a
-    /// develop commit stages exactly what `write_xmp` would have published
-    /// after it; and it is `Clear` wherever no sidecar may project the
-    /// develop: a develop over AI-generated pixels (`on_source = false`) or
-    /// a baked source, which has no Lightroom-sidecar convention.
+    /// The export delivers exactly the bytes [`xmp_export_bytes`] builds,
+    /// merge base and all; and it is refused wherever no .xmp can describe the
+    /// develop: one that sits on AI-generated pixels, or a baked source, which
+    /// has no Lightroom-sidecar convention.
     #[test]
-    fn the_projection_member_stages_what_write_xmp_publishes() {
+    fn the_export_writes_exactly_its_bytes_and_refuses_ai_pixels_and_baked_sources() {
         let dir = std::env::temp_dir().join(format!("autoshade-pipe-xmp-member-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -5741,8 +5898,9 @@ mod guard_tests {
         std::fs::write(&raw, b"raw").unwrap();
         let dev = crate::store::develop_dir(&raw);
         let _ = std::fs::remove_dir_all(&dev);
+        let lr = dir.join("_pipe_xmp_member.xmp");
         std::fs::write(
-            dir.join("_pipe_xmp_member.xmp"),
+            &lr,
             "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n \
              <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  \
              <rdf:Description rdf:about=\"\"\n    \
@@ -5753,23 +5911,28 @@ mod guard_tests {
         )
         .unwrap();
         let r = EditRecipe { exposure_ev: 0.75, contrast: 9.0, ..Default::default() };
-        let (member, _, _) =
-            xmp_projection_member(&raw, &r, true, crate::diag::stderr()).unwrap();
-        let crate::store::CommitMember::Write(staged) = member else {
-            panic!("a source develop of a RAW projects");
-        };
-        let (out, _, _) = write_xmp(&raw, &r, crate::diag::stderr()).unwrap();
-        assert_eq!(std::fs::read(&out).unwrap(), staged, "member bytes == writer bytes");
+        let (built, _, _) = xmp_export_bytes(&raw, &r, &lr, crate::diag::stderr()).unwrap();
+        let x = export_xmp_beside(&raw, &r, true, crate::diag::stderr()).unwrap();
+        assert_eq!(std::fs::read(&x.path).unwrap(), built, "delivered bytes == built bytes");
         assert!(
-            String::from_utf8_lossy(&staged).contains("crs:PointColor=\"0\""),
+            String::from_utf8_lossy(&built).contains("crs:PointColor=\"0\""),
             "…merge base included"
         );
+
+        assert!(xmp_export_refusal(&raw, false).is_none(), "a source develop of a RAW exports");
+        let ai = xmp_export_refusal(&raw, true).expect("AI pixels: no .xmp");
+        assert!(ai.contains("AI-generated pixels"), "{ai}");
+        let png = dir.join("_pipe_xmp_member.png");
+        std::fs::write(&png, b"png").unwrap();
+        let baked = xmp_export_refusal(&png, false).expect("a baked source: no .xmp");
+        assert!(baked.contains("camera RAW"), "{baked}");
+
+        // The desktop app's savers still pass a projection member until they
+        // move to the export door; its two Clear arms stay pinned until then.
         let (member, note, losses) =
             xmp_projection_member(&raw, &r, false, crate::diag::stderr()).unwrap();
         assert!(matches!(member, crate::store::CommitMember::Clear), "AI pixels: no sidecar");
         assert!(note.is_none() && losses.is_empty());
-        let png = dir.join("_pipe_xmp_member.png");
-        std::fs::write(&png, b"png").unwrap();
         let (member, _, _) =
             xmp_projection_member(&png, &r, true, crate::diag::stderr()).unwrap();
         assert!(matches!(member, crate::store::CommitMember::Clear), "a baked source: no sidecar");
@@ -5777,12 +5940,12 @@ mod guard_tests {
         let _ = std::fs::remove_dir_all(&dev);
     }
 
-    /// L05#4 end-to-end: a save whose recipe HAS masks over a sidecar
-    /// carrying a foreign (brush) mask block publishes the develop's own
-    /// masks and RETURNS the loss note — before, the projection showed the
-    /// old pass's masks, suppressed ours, and reported plain success.
+    /// L05#4 end-to-end: an export whose recipe HAS masks over a sidecar
+    /// carrying a foreign (brush) mask block writes the develop's own masks
+    /// and RETURNS the loss note — before, the file showed the old pass's
+    /// masks, suppressed ours, and reported plain success.
     #[test]
-    fn a_save_with_own_masks_reports_the_foreign_mask_block_it_replaced() {
+    fn an_export_with_own_masks_reports_the_foreign_mask_block_it_replaced() {
         use crate::recipe::{LocalAdjustment, MaskGeometry};
         let dir = std::env::temp_dir().join(format!("autoshade-pipe-xmp-maskintent-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -5827,25 +5990,24 @@ mod guard_tests {
             exposure_ev: 0.4,
             ..Default::default()
         });
-        let (out, note, _) = write_xmp(&raw, &r, crate::diag::stderr()).unwrap();
-        let text = std::fs::read_to_string(&out).unwrap();
-        assert!(text.contains("Mask/CircularGradient"), "the develop's mask is published");
+        let x = export_xmp_beside(&raw, &r, true, crate::diag::stderr()).unwrap();
+        let text = std::fs::read_to_string(&x.path).unwrap();
+        assert!(text.contains("Mask/CircularGradient"), "the develop's mask is written");
         assert!(!text.contains("Mask/Brush"), "the foreign block is not resurrected");
         assert!(text.contains("crs:PointColor=\"0\""), "LR-only globals still survive");
-        let note = note.expect("the replaced block must be disclosed");
+        let note = x.note.expect("the replaced block must be disclosed");
         assert!(note.contains("mask block carries"), "the note names the loss: {note}");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
     }
 
-    /// M6a end-to-end: the WRITE path hands its per-mask projection losses back
-    /// to the caller, judged on the CLAMPED recipe it actually published. Every
-    /// surface (GUI status line, web reply, CLI stderr) renders THIS list, so a
-    /// boundary that dropped it would put every export-side disclosure back to
-    /// the silence it was built to end — and no test of the writer alone would
-    /// notice.
+    /// M6a end-to-end: the export hands its per-mask losses back to the
+    /// caller, judged on the CLAMPED recipe it actually wrote. The surface
+    /// renders THIS list, so a boundary that dropped it would put every
+    /// export-side disclosure back to the silence it was built to end — and no
+    /// test of the writer alone would notice.
     #[test]
-    fn the_write_path_hands_back_what_the_projection_could_not_carry() {
+    fn the_export_hands_back_what_the_xmp_could_not_carry() {
         use crate::recipe::{LocalAdjustment, MaskGeometry};
         let dir = std::env::temp_dir().join(format!("autoshade-pipe-xmp-masklosses-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -5867,28 +6029,28 @@ mod guard_tests {
             ],
             ..Default::default()
         };
-        let (out, _, losses) = write_xmp(&raw, &r, crate::diag::stderr()).unwrap();
+        let x = export_xmp_beside(&raw, &r, true, crate::diag::stderr()).unwrap();
         assert_eq!(
-            losses,
+            x.losses,
             vec![
                 xmp::MaskLoss { name: "sky".into(), reason: xmp::MaskLossReason::Bitmap },
                 // v1.3.1: the payload's own verdict on the same mask — its
-                // raster is not on disk, so the sidecar cannot carry it either.
+                // raster is not on disk, so the file cannot carry it either.
                 xmp::MaskLoss { name: "sky".into(), reason: xmp::MaskLossReason::RasterNotEmbedded },
             ],
-            "the write path must report the raster mask it skipped, and nothing about the other"
+            "the export must report the raster mask it skipped, and nothing about the other"
         );
-        let text = std::fs::read_to_string(&out).unwrap();
+        let text = std::fs::read_to_string(&x.path).unwrap();
         assert_eq!(
             text.matches("crs:What=\"Correction\"").count(),
             1,
-            "…which is what the published document says too"
+            "…which is what the written document says too"
         );
-        // A faithful projection reports an EMPTY list (not a missing one): the
+        // A faithful export reports an EMPTY list (not a missing one): the
         // surfaces stay silent on that, and an always-non-empty list would make
-        // every clean save shout.
+        // every clean export shout.
         let clean = EditRecipe { masks: vec![r.masks[1].clone()], ..Default::default() };
-        let (_, _, none) = write_xmp(&raw, &clean, crate::diag::stderr()).unwrap();
+        let none = export_xmp_beside(&raw, &clean, true, crate::diag::stderr()).unwrap().losses;
         assert!(none.is_empty(), "an exportable develop loses nothing: {none:?}");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
@@ -5944,8 +6106,9 @@ mod guard_tests {
 
     /// A sidecar the splicer cannot account for is REGENERATED rather than
     /// merged — which drops the user's Lightroom-only properties. The fallback
-    /// itself is correct (never fail a save); doing it silently was the defect,
-    /// because the loss only surfaced the next time they opened the catalog.
+    /// itself is correct (never fail an export); doing it silently was the
+    /// defect, because the loss only surfaced the next time they opened the
+    /// catalog.
     #[test]
     fn an_unmergeable_sidecar_is_regenerated_and_says_so() {
         let dir = std::env::temp_dir().join(format!("autoshade-pipe-xmp-disclose-{}", std::process::id()));
@@ -5966,13 +6129,13 @@ mod guard_tests {
              crs:PointColor=\"0\"></rdf:Description>\n",
         )
         .unwrap();
-        let (out, note, _) = write_xmp(&raw, &r, crate::diag::stderr()).unwrap();
-        assert!(note.is_none(), "a merge that worked has nothing to disclose: {note:?}");
-        assert!(std::fs::read_to_string(&out).unwrap().contains("crs:PointColor=\"0\""));
+        let x = export_xmp_beside(&raw, &r, true, crate::diag::stderr()).unwrap();
+        assert!(x.note.is_none(), "a merge that worked has nothing to disclose: {:?}", x.note);
+        assert!(std::fs::read_to_string(&x.path).unwrap().contains("crs:PointColor=\"0\""));
 
         // An UNTERMINATED description is markup the splicer cannot account
-        // for: the save still succeeds, the PointColor is gone, and the caller is
-        // told exactly that.
+        // for: the export still succeeds, the PointColor is gone, and the
+        // caller is told exactly that.
         std::fs::write(
             &lr,
             "<rdf:Description rdf:about=\"\" \
@@ -5980,11 +6143,11 @@ mod guard_tests {
              crs:PointColor=\"0\">\n",
         )
         .unwrap();
-        let (out, note, _) = write_xmp(&raw, &r, crate::diag::stderr()).unwrap();
-        let text = std::fs::read_to_string(&out).unwrap();
-        assert!(text.contains("crs:Exposure2012=\"0.75\""), "the save still happened");
+        let x = export_xmp_beside(&raw, &r, true, crate::diag::stderr()).unwrap();
+        let text = std::fs::read_to_string(&x.path).unwrap();
+        assert!(text.contains("crs:Exposure2012=\"0.75\""), "the export still happened");
         assert!(!text.contains("crs:PointColor"), "…by regenerating, so the LR property is gone");
-        let note = note.expect("the loss must be disclosed, not silent");
+        let note = x.note.expect("the loss must be disclosed, not silent");
         assert!(note.contains("regenerated"), "the note names what happened: {note}");
         // R25 B4: the example the note gives used to be "camera profile /
         // Look". `crs:CameraProfile` rides in `EditRecipe::passthrough` now,
@@ -6000,11 +6163,10 @@ mod guard_tests {
 
     /// The disclosure is only worth having if it is TRUE. Three shapes made it
     /// false: a blank sidecar "lost" properties it never had (a note on every
-    /// save, forever); a baked photo's neighbouring .xmp — someone else's
-    /// file, which store::lightroom_sidecar refuses to interpret — was read
-    /// and warned about anyway; and every note named the OUTPUT path as "the
-    /// existing sidecar that could not be merged", pointing the user at a
-    /// file that was never the problem.
+    /// export, forever); a baked photo's neighbouring .xmp — someone else's
+    /// file — was read and warned about (a baked photo is now never exported
+    /// at all); and a note that named a file other than the one whose
+    /// properties were lost.
     #[test]
     fn the_merge_note_fires_only_for_a_real_loss_and_names_the_base_file() {
         let dir = std::env::temp_dir().join(format!("autoshade-pipe-xmp-truthful-note-{}", std::process::id()));
@@ -6019,36 +6181,26 @@ mod guard_tests {
         let dev = crate::store::develop_dir(&raw);
         let _ = std::fs::remove_dir_all(&dev);
         std::fs::write(dir.join("_pipe_note_blank.xmp"), b"").unwrap();
-        let (_, note, _) = write_xmp(&raw, &r, crate::diag::stderr()).unwrap();
+        let note = export_xmp_beside(&raw, &r, true, crate::diag::stderr()).unwrap().note;
         assert!(note.is_none(), "an empty sidecar carries nothing to disclose: {note:?}");
         // Whitespace-only is the same emptiness.
         std::fs::write(dir.join("_pipe_note_blank.xmp"), b"  \n\t\n").unwrap();
-        let (_, note, _) = write_xmp(&raw, &r, crate::diag::stderr()).unwrap();
+        let note = export_xmp_beside(&raw, &r, true, crate::diag::stderr()).unwrap().note;
         assert!(note.is_none(), "whitespace is not a merge base: {note:?}");
         let _ = std::fs::remove_dir_all(&dev);
 
-        // A baked photo: its neighbouring .xmp is not ours to interpret, so
-        // even an unmergeable one is no concern of the save.
+        // A baked photo: its neighbouring .xmp is not ours to interpret, and
+        // an export for it is refused before anything is read.
         let png = dir.join("_pipe_note_baked.png");
         std::fs::write(&png, b"png").unwrap();
-        let dev_png = crate::store::develop_dir(&png);
-        let _ = std::fs::remove_dir_all(&dev_png);
-        std::fs::write(
-            dir.join("_pipe_note_baked.xmp"),
-            "<rdf:Description rdf:about=\"\" xmlns:crs=\"c\" crs:PointColor=\"0\">\n",
-        )
-        .unwrap();
-        let (_, note, _) = write_xmp(&png, &r, crate::diag::stderr()).unwrap();
-        assert!(note.is_none(), "a baked photo's neighbour .xmp is not read: {note:?}");
-        let _ = std::fs::remove_dir_all(&dev_png);
+        assert!(xmp_export_refusal(&png, false).is_some(), "a baked photo is never exported");
 
         // A well-formed RATINGS sidecar (no crs at all) beside the RAW — the
         // population the backlog actually named: exiftool / Bridge / Capture
         // One keywords and stars. There is nothing of ours to splice into, so
-        // the old code regenerated and reported the loss on EVERY save,
-        // forever, with no action the user could take. It is now a real merge:
-        // the rating survives, our settings land, and there is nothing to
-        // disclose.
+        // the old code regenerated and reported the loss every time, with no
+        // action the user could take. It is a real merge: the rating
+        // survives, our settings land, and there is nothing to disclose.
         let raw2 = dir.join("_pipe_note_ratings.arw");
         std::fs::write(&raw2, b"raw").unwrap();
         let dev2 = crate::store::develop_dir(&raw2);
@@ -6060,24 +6212,20 @@ mod guard_tests {
              xmp:Rating=\"5\" xmp:Label=\"Green\"></rdf:Description>\n \
              </rdf:RDF>\n</x:xmpmeta>\n";
         std::fs::write(&lr2, ratings).unwrap();
-        let (out2, note, _) = write_xmp(&raw2, &r, crate::diag::stderr()).unwrap();
-        assert!(note.is_none(), "a foreign sidecar we CAN merge has no loss to report: {note:?}");
-        let merged = std::fs::read_to_string(&out2).unwrap();
+        let x = export_xmp_beside(&raw2, &r, true, crate::diag::stderr()).unwrap();
+        assert!(x.note.is_none(), "a foreign sidecar we CAN merge has no loss to report: {:?}", x.note);
+        assert_eq!(x.path, lr2, "the export replaces the file it merged over");
+        let merged = std::fs::read_to_string(&x.path).unwrap();
         assert!(merged.contains("xmp:Rating=\"5\""), "the user's rating survives: {merged}");
         assert!(merged.contains("xmp:Label=\"Green\""), "…and their label");
         assert!(merged.contains("crs:Exposure2012=\"0.75\""), "…and our settings landed");
-        assert_eq!(
-            std::fs::read_to_string(&lr2).unwrap(),
-            ratings,
-            "the sidecar beside the RAW is never written"
-        );
-        // Saving AGAIN must not stack a second Description: the merged store
-        // copy now carries crs, so the ordinary merge path takes over.
-        let (out2b, note, _) = write_xmp(&raw2, &r, crate::diag::stderr()).unwrap();
-        let again = std::fs::read_to_string(&out2b).unwrap();
-        assert!(note.is_none(), "the second save has nothing to disclose either: {note:?}");
+        // Exporting AGAIN must not stack a second Description: the merged file
+        // now carries crs, so the ordinary merge path takes over.
+        let x = export_xmp_beside(&raw2, &r, true, crate::diag::stderr()).unwrap();
+        let again = std::fs::read_to_string(&x.path).unwrap();
+        assert!(x.note.is_none(), "the second export has nothing to disclose either: {:?}", x.note);
         assert_eq!(again.matches("crs:Exposure2012=").count(), 1, "one settings block, not two");
-        assert!(again.contains("xmp:Rating=\"5\""), "the rating still survives the re-save");
+        assert!(again.contains("xmp:Rating=\"5\""), "the rating still survives the re-export");
         let _ = std::fs::remove_dir_all(&dev2);
 
         // …and the splice point must be real MARKUP. A sidecar whose header
@@ -6105,8 +6253,8 @@ mod guard_tests {
                 ),
             )
             .unwrap();
-            let (out4, _, _) = write_xmp(&raw4, &r, crate::diag::stderr()).unwrap();
-            let t = std::fs::read_to_string(&out4).unwrap();
+            let x = export_xmp_beside(&raw4, &r, true, crate::diag::stderr()).unwrap();
+            let t = std::fs::read_to_string(&x.path).unwrap();
             let settings = t.find("crs:Exposure2012").expect("our settings landed somewhere");
             let real_root = t.rfind("<rdf:RDF").expect("the real root survives");
             assert!(
@@ -6118,7 +6266,7 @@ mod guard_tests {
         }
 
         // A base we genuinely CANNOT account for still regenerates and still
-        // says so — and the note names the SIDECAR, not the output.
+        // says so — and the note names that file, the one the export replaced.
         let raw3 = dir.join("_pipe_note_broken.arw");
         std::fs::write(&raw3, b"raw").unwrap();
         let dev3 = crate::store::develop_dir(&raw3);
@@ -6131,24 +6279,19 @@ mod guard_tests {
              crs:PointColor=\"0\">\n",
         )
         .unwrap();
-        let (_, note, _) = write_xmp(&raw3, &r, crate::diag::stderr()).unwrap();
+        let note = export_xmp_beside(&raw3, &r, true, crate::diag::stderr()).unwrap().note;
         let note = note.expect("an unaccountable base is a real loss");
-        assert!(
-            note.contains(&lr3.display().to_string()),
-            "the note names the base file, not only the output: {note}"
-        );
-        assert!(note.contains("untouched"), "…and is honest that it was not modified: {note}");
+        assert!(note.contains(&lr3.display().to_string()), "the note names the base file: {note}");
+        assert!(note.contains("regenerated"), "…and says it was replaced by a regeneration: {note}");
         let _ = std::fs::remove_dir_all(&dev3);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Over the 16 MiB cap the Lightroom sidecar cannot BE the merge base —
-    /// fine — but the one-Option reader turned that refusal into silence: the
-    /// `.or_else` fell back to our own previous projection, the merge
-    /// "succeeded", and the REAL loss (Lightroom's newer work not carried
-    /// into the new file) produced no note at all. The disclosure mechanism
-    /// round four built was defeated by round five's own size cap.
+    /// Over the 16 MiB cap the file beside the RAW cannot BE the merge base —
+    /// fine — but the refusal must not turn into silence: the export replaces
+    /// a file whose properties it could not carry, and that loss is said, with
+    /// the file and the reason.
     #[test]
     fn an_oversized_lightroom_sidecar_is_disclosed_not_silently_skipped() {
         let dir = std::env::temp_dir().join(format!("autoshade-pipe-xmp-oversized-{}", std::process::id()));
@@ -6160,20 +6303,7 @@ mod guard_tests {
         let _ = std::fs::remove_dir_all(&dev);
         let lr = dir.join("_pipe_oversized.xmp");
 
-        // First save: a mergeable Lightroom base whose PointColor lands in the
-        // projection — the carried-forward property the second save must keep.
-        std::fs::write(
-            &lr,
-            "<rdf:Description rdf:about=\"\" \
-             xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
-             crs:PointColor=\"0\"></rdf:Description>\n",
-        )
-        .unwrap();
-        let r1 = EditRecipe { exposure_ev: 0.5, ..Default::default() };
-        let (_, note, _) = write_xmp(&raw, &r1, crate::diag::stderr()).unwrap();
-        assert!(note.is_none(), "the mergeable base has nothing to disclose: {note:?}");
-
-        // The sidecar balloons past the cap (Lightroom AI masks, or hostile).
+        // The sidecar is past the cap (Lightroom AI masks, or hostile).
         let mut big = String::with_capacity(16 * 1024 * 1024 + 64);
         big.push_str("<x:xmpmeta>");
         while big.len() <= 16 * 1024 * 1024 {
@@ -6181,15 +6311,13 @@ mod guard_tests {
         }
         std::fs::write(&lr, &big).unwrap();
 
-        let r2 = EditRecipe { exposure_ev: 0.75, ..Default::default() };
-        let (out, note, _) = write_xmp(&raw, &r2, crate::diag::stderr()).unwrap();
-        // The fallback itself is CORRECT — the previous projection carries
-        // forward what the first merge preserved, and the save must succeed.
-        let text = std::fs::read_to_string(&out).unwrap();
-        assert!(text.contains("crs:Exposure2012=\"0.75\""), "the save still happened");
-        assert!(text.contains("crs:PointColor=\"0\""), "the projection base carried forward");
+        let r = EditRecipe { exposure_ev: 0.75, ..Default::default() };
+        let x = export_xmp_beside(&raw, &r, true, crate::diag::stderr()).unwrap();
+        // Regenerating is CORRECT — the export must succeed.
+        let text = std::fs::read_to_string(&x.path).unwrap();
+        assert!(text.contains("crs:Exposure2012=\"0.75\""), "the export still happened");
         // Doing it SILENTLY was the defect.
-        let note = note.expect("an unreadable Lightroom sidecar must be disclosed");
+        let note = x.note.expect("an unreadable file at the target must be disclosed");
         assert!(
             note.contains(&lr.display().to_string()) && note.contains("16 MiB"),
             "the note names the file and the reason: {note}"
@@ -9789,20 +9917,20 @@ mod develop_surface_tests {
         (dir, raw)
     }
 
-    /// GROUP C (2026-10-26): the write path every CLI and web save goes
-    /// through says which GLOBAL controls the sidecar cannot carry, not only
-    /// which masks — the GUI said both, the other surfaces only the masks, so
-    /// a lens blur saved from the CLI or the browser vanished from the sidecar
-    /// in silence.
+    /// GROUP C (2026-10-26): the export says which GLOBAL controls the .xmp
+    /// cannot carry, not only which masks — the GUI said both, the other
+    /// surfaces only the masks, so a lens blur exported from the CLI vanished
+    /// from the file in silence.
     #[test]
-    fn the_write_path_names_the_global_controls_the_sidecar_cannot_carry() {
+    fn the_export_names_the_global_controls_the_xmp_cannot_carry() {
         let (dir, raw) = scratch_photo("globals");
+        let to = raw.with_extension("xmp");
         let r = EditRecipe {
             lens_blur: Some(crate::render::LensBlur { depth_map: "depth.png".into(), ..Default::default() }),
             ..Default::default()
         };
         let collector = crate::diag::Collector::new();
-        let (_, _, losses) = write_xmp(&raw, &r, &collector).unwrap();
+        let (_, _, losses) = xmp_export_bytes(&raw, &r, &to, &collector).unwrap();
         let said: Vec<String> = collector.take().into_iter().map(|l| l.text).collect();
         assert!(
             said.iter().any(|t| t.contains("lens blur")),
@@ -9811,9 +9939,67 @@ mod develop_surface_tests {
         let lines = xmp_loss_lines(&r, &losses);
         assert!(lines.iter().any(|t| t.contains("lens blur")), "…and so must the lines a web reply carries: {lines:?}");
         let clean = EditRecipe { exposure_ev: 0.3, ..Default::default() };
-        let (_, _, none) = write_xmp(&raw, &clean, &collector).unwrap();
-        assert!(xmp_loss_lines(&clean, &none).is_empty(), "a faithful projection says nothing");
+        let (_, _, none) = xmp_export_bytes(&raw, &clean, &to, &collector).unwrap();
+        assert!(xmp_loss_lines(&clean, &none).is_empty(), "a faithful export says nothing");
         let _ = std::fs::remove_dir_all(crate::store::develop_dir(&raw));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The import door is the one that may WRITE: the user asked for this
+    /// file, so an AutoShade payload's mask raster is placed into the photo's
+    /// develop dir (the detector's silent read never does), the lens profile
+    /// follows the file's own switch, the tag is the file's, and what the read
+    /// could not parse is handed back. A file with nothing in it comes back
+    /// as a no-op, unstamped, so the surface can say so.
+    #[test]
+    fn import_xmp_places_what_the_user_asked_for_and_says_what_it_cost() {
+        use crate::recipe::{LocalAdjustment, MaskGeometry};
+        let (dir, raw) = scratch_photo("import");
+        let dev = crate::store::develop_dir(&raw);
+        let tile = dir.join("tile-import.png");
+        std::fs::write(&tile, b"png tile bytes").unwrap();
+        let r = EditRecipe {
+            exposure_ev: 0.3,
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Bitmap { path: tile.to_string_lossy().into_owned() },
+                exposure_ev: 0.5,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let text = xmp::recipe_to_xmp(&r);
+        assert!(!dev.exists(), "premise: the photo has no develop dir");
+        let imp = import_xmp(&raw, &text, crate::diag::silent());
+        assert!(!imp.recipe.is_noop(), "the develop came in");
+        assert_eq!(imp.tag, crate::store::xmp_tag(&text));
+        assert_eq!(imp.imported_masks, 1);
+        assert!(
+            std::fs::read_dir(&dev).is_ok_and(|d| d
+                .flatten()
+                .any(|e| std::fs::read(e.path()).is_ok_and(|b| b == b"png tile bytes"))),
+            "the payload's raster is placed into the develop dir"
+        );
+        assert_eq!(
+            imp.recipe.lens_profile,
+            fresh_lens_profile_for_sidecar(&raw, Some(&text)),
+            "the lens profile is the one the file's own switch decides"
+        );
+
+        let bad = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+                   xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description \
+                   rdf:about=\"\" xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+                   crs:Contrast2012=\"+20\" crs:Exposure2012=\"lots\"/></rdf:RDF></x:xmpmeta>";
+        let imp = import_xmp(&raw, bad, crate::diag::silent());
+        assert!(
+            imp.bad_numbers.iter().any(|n| n.contains("Exposure2012")),
+            "the unparsable number is handed back: {:?}",
+            imp.bad_numbers
+        );
+
+        let neutral = xmp::recipe_to_xmp(&EditRecipe::default());
+        let imp = import_xmp(&raw, &neutral, crate::diag::silent());
+        assert!(imp.recipe.is_noop(), "nothing to import comes back as a no-op");
+        let _ = std::fs::remove_dir_all(&dev);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -526,8 +526,8 @@ fn one_law_three_faces_a_turn_saved_here_reaches_lightroom_and_comes_back() {
     if std::fs::hard_link(root.join("base.ARW"), &raw).is_err() {
         std::fs::copy(root.join("base.ARW"), &raw).expect("place the pack's capture");
     }
-    // The Lightroom sidecar, beside the RAW, which is where `write_xmp` looks
-    // for its merge base.
+    // The Lightroom sidecar, beside the RAW: the file an export beside the
+    // photo replaces, and so its merge base.
     let lr = dir.join("base.xmp");
     std::fs::copy(root.join("xmp").join("C-A12-F25.xmp"), &lr).expect("place the pack's sidecar");
     let text = std::fs::read_to_string(&lr).expect("read the placed sidecar");
@@ -537,12 +537,13 @@ fn one_law_three_faces_a_turn_saved_here_reaches_lightroom_and_comes_back() {
     assert_eq!(recipe.quarter_turns, 1, "the sidecar's rotation did not survive the import");
     assert_eq!(recipe.masks.len(), 1, "and its one radial came with it");
 
-    // FACE 2 — save it back unchanged. The tag Lightroom wrote is still the
-    // tag in the file, exactly once.
+    // FACE 2 — export it back unchanged. The tag Lightroom wrote is still the
+    // tag in the file, exactly once. The bytes the export builds over the
+    // sidecar, not written: every face merges over the same Lightroom file.
     let save = |r: &EditRecipe| {
-        let (out, _, _) = crate::pipeline::write_xmp(&raw, r, crate::diag::silent())
-            .expect("write the sidecar projection");
-        std::fs::read_to_string(&out).expect("read the sidecar projection back")
+        let (bytes, _, _) = crate::pipeline::xmp_export_bytes(&raw, r, &lr, crate::diag::silent())
+            .expect("build the exported .xmp");
+        String::from_utf8(bytes).expect("the export is UTF-8")
     };
     let unchanged = save(&recipe);
     assert_eq!(unchanged.matches("tiff:Orientation").count(), 1, "{unchanged}");
