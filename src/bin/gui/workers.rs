@@ -2035,11 +2035,6 @@ impl AutoShadeApp {
                                     t
                                 }
                                 Ok(backed) => {
-                                    // The recipe write ALONE decides the saved
-                                    // state (same rule as save_xmp): once it
-                                    // lands, reopening restores it regardless
-                                    // of the XMP — so the ● baseline follows
-                                    // it even when the XMP half fails.
                                     // Analyze is a SAVER (same rule as
                                     // Ctrl+S) — ONE single-generation
                                     // commit (L03): recipe + pixel link
@@ -2065,22 +2060,6 @@ impl AutoShadeApp {
                                         .and_then(|v| v.origin.clone());
                                     let generated = self.active_on_ai_pixels();
                                     let strip_rec = self.current_strip_record();
-                                    // The projection is a member of the same
-                                    // generation (2026-09-13) — and for a
-                                    // GENERATED canvas it CLEARS: this landing
-                                    // used to write a sidecar claiming the
-                                    // RAW carried the analysis grade that was
-                                    // in fact tuned over AI pixels.
-                                    let (xmp_member, xmp_outcome) =
-                                        match autoshade::pipeline::xmp_projection_member(
-                                            &p,
-                                            &stamped,
-                                            !generated,
-                                            autoshade::diag::stderr(),
-                                        ) {
-                                            Ok((m, note, losses)) => (m, Ok((note, losses))),
-                                            Err(e) => (autoshade::store::CommitMember::Keep, Err(e)),
-                                        };
                                     let commit_res: anyhow::Result<()> = (|| {
                                         let recipe_bytes =
                                             autoshade::pipeline::recipe_store_bytes(&p, &stamped, autoshade::diag::stderr())?;
@@ -2104,7 +2083,10 @@ impl AutoShadeApp {
                                                 recipe: Some(recipe_bytes),
                                                 pixels,
                                                 variants,
-                                                xmp: xmp_member,
+                                                // An analysis lands as a
+                                                // develop, never as an .xmp
+                                                // (2026-11-18).
+                                                xmp: autoshade::store::CommitMember::Clear,
                                             },
                                         )?;
                                         Ok(())
@@ -2133,57 +2115,18 @@ impl AutoShadeApp {
                                             if backed.is_some() {
                                                 self.refresh_versions();
                                             }
-                                            let mut s = match backed {
+                                            // No path, no file format, no
+                                            // Lightroom (2026-11-18; owner's
+                                            // ruling 2026-11-17): the develop
+                                            // was saved, and that is all.
+                                            match backed {
                                                 Some(n) => trf(
                                                     lang,
                                                     "AI develop applied · saved (previous save backed up as v{n})",
                                                     &[("n", &n.to_string())],
                                                 ),
-                                                None => tr(lang, "AI develop applied · saved to recipe.json").to_string(),
-                                            };
-                                            if autoshade::decode::is_raw(&p) && !generated {
-                                                match xmp_outcome {
-                                                    // The same as Ctrl+S: the
-                                                    // regenerated-not-merged
-                                                    // note is said, and neither
-                                                    // direction of the Lightroom
-                                                    // disclosure is — not what
-                                                    // the projection cannot
-                                                    // carry (the writer's mask
-                                                    // verdicts, ignored here),
-                                                    // not what Lightroom renders
-                                                    // and this canvas does not.
-                                                    // Owner's ruling 2026-11-17:
-                                                    // an independent program
-                                                    // does not talk about
-                                                    // Lightroom when no
-                                                    // Lightroom file was asked
-                                                    // for. 「Export .xmp beside
-                                                    // the photo」 says both, at
-                                                    // the hand-off.
-                                                    Ok((merge_note, _)) => {
-                                                        // A regenerated-not-merged
-                                                        // sidecar always
-                                                        // interrupts: it dropped
-                                                        // the user's own
-                                                        // Lightroom properties.
-                                                        if let Some(m) = merge_note {
-                                                            self.toast(ToastKind::Error, m.clone());
-                                                            s = format!("{s} — ⚠ {m}");
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        let t = trf(
-                                                            lang,
-                                                            "recipe saved — but the Lightroom XMP failed: {err}",
-                                                            &[("err", &e.to_string())],
-                                                        );
-                                                        self.toast(ToastKind::Error, t.clone());
-                                                        s = t;
-                                                    }
-                                                }
+                                                None => tr(lang, "AI develop applied · saved").to_string(),
                                             }
-                                            s
                                         }
                                         Err(e) => {
                                             // The old save was already COPIED
@@ -2193,7 +2136,7 @@ impl AutoShadeApp {
                                             // scrolls away.
                                             let t = trf(
                                                 lang,
-                                                "AI develop applied — but saving the sidecar failed: {err}",
+                                                "AI develop applied — but saving it failed: {err}",
                                                 &[("err", &e.to_string())],
                                             );
                                             self.toast(ToastKind::Error, t.clone());
@@ -3023,19 +2966,6 @@ impl AutoShadeApp {
                 " · NOT persisted: saving the develop failed ({err}) — Ctrl+S to save explicitly",
                 &[("err", e)],
             ),
-            FitNote::XmpWritten(p) => {
-                trf(lang, " · XMP → {path}", &[("path", &p.display().to_string())])
-            }
-            FitNote::XmpMergeNote(m) => trf(lang, " · ⚠ {note}", &[("note", m)]),
-            FitNote::XmpFailed(e) => {
-                let mut s = String::from(" · ");
-                s.push_str(&trf(
-                    lang,
-                    "recipe saved — but the Lightroom XMP failed: {err}",
-                    &[("err", e)],
-                ));
-                s
-            }
             FitNote::BackedUpAs(n) => {
                 trf(lang, " · previous save backed up as v{n}", &[("n", &n.to_string())])
             }
@@ -3234,28 +3164,11 @@ impl AutoShadeApp {
                                 self.saved_recipe = r;
                                 self.nav_stash.remove(&p);
                             }
-                            let mut s = trf(
+                            self.done(trf(
                                 lang,
-                                "Recipe pasted to {ok} photos ({xmp} XMP) → develop store",
-                                &[("ok", &out.ok.to_string()), ("xmp", &out.xmp.to_string())],
-                            );
-                            if !out.xmp_fails.is_empty() {
-                                let d = brief_list(&out.xmp_fails);
-                                s.push_str(&trf(
-                                    lang,
-                                    " — ⚠ {n} XMP projection(s) failed (those pastes ARE saved): {detail}",
-                                    &[("n", &out.xmp_fails.len().to_string()), ("detail", &d)],
-                                ));
-                            }
-                            if !out.xmp_notes.is_empty() {
-                                let d = brief_list(&out.xmp_notes);
-                                s.push_str(&trf(
-                                    lang,
-                                    " — {n} sidecar(s) regenerated rather than merged (Lightroom-only properties dropped): {detail}",
-                                    &[("n", &out.xmp_notes.len().to_string()), ("detail", &d)],
-                                ));
-                            }
-                            self.done(s);
+                                "Adjustments pasted to {ok} photo(s)",
+                                &[("ok", &out.ok.to_string())],
+                            ));
                         }
                         Ok(out) => {
                             self.pasted_open = None;

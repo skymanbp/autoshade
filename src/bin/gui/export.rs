@@ -988,26 +988,24 @@ impl AutoShadeApp {
         }
     }
 
-    /// Can this photo's sidecar be handed to Lightroom at all? RAW only, and
-    /// keyed to the ORIGINAL photo (`src_path`), never the active variant: the
-    /// projection belongs to the RAW no matter which rendition is on screen.
-    ///
-    /// Only a camera RAW has the sidecar convention — `store::
-    /// lightroom_sidecar` and `pipeline::write_xmp` draw the same line, and a
-    /// baked PNG/TIFF's neighbouring `.xmp` is another program's file, which
-    /// this must never offer to overwrite.
-    ///
-    /// Deliberately NOT gated on the projection existing: that would be a disk
-    /// stat per frame, and "save the develop first" is a better answer from the
-    /// click (the store's own NotFound message says exactly that) than a button
-    /// that is greyed out for a reason nothing explains.
+    /// Can this variant's adjustments go out as an .xmp at all? Keyed to the
+    /// ORIGINAL photo (`src_path`) — the file lands beside it whichever
+    /// variant is on screen — and refused where
+    /// `pipeline::xmp_export_refusal` refuses: a photo that is not a camera
+    /// RAW (its neighbouring .xmp is another program's file), and a canvas on
+    /// AI-generated pixels, whose look no .xmp can carry. The button is
+    /// disabled wherever this is false, and its hover says which.
     pub(crate) fn can_export_xmp_beside(&self) -> bool {
-        self.src_path.as_deref().is_some_and(autoshade::decode::is_raw)
+        self.src_path
+            .as_deref()
+            .is_some_and(|p| autoshade::pipeline::xmp_export_refusal(p, self.active_on_ai_pixels()).is_none())
     }
 
-    /// SF8-A: hand the stored Lightroom sidecar over to Lightroom — copy this
-    /// photo's `<stem>.xmp` projection out of the hashed develop folder and
-    /// beside the photo itself, the only place Lightroom looks.
+    /// 「Export .xmp beside the photo」 (2026-11-18): the one door that writes
+    /// an .xmp, and it writes what is ON THE CANVAS — unsaved changes
+    /// included — merged over whatever sits beside the RAW
+    /// (`pipeline::export_xmp_beside`, which also records the file as
+    /// answered, so this app never asks about its own export).
     ///
     /// Two-click confirm rather than a modal: an existing `.xmp` beside the
     /// photo may be Lightroom's OWN, so the first click arms
@@ -1018,46 +1016,54 @@ impl AutoShadeApp {
     pub(crate) fn export_xmp_beside(&mut self) {
         let lang = self.lang;
         let Some(path) = self.src_path.clone() else { return };
+        // The door's own refusal, for a call that did not come through the
+        // (disabled) button: nothing is written, and the button's hover is
+        // where the reason is said.
+        if !self.can_export_xmp_beside() {
+            self.xmp_beside_confirm = false;
+            return;
+        }
+        // A canvas with no adjustments has nothing to export — and an .xmp
+        // written from it would, after the confirming second click, replace
+        // the adjustments another program keeps in the file beside the photo
+        // with neutral ones. The command line and the web refuse a neutral
+        // develop the same way (`pipeline::saved_develop_for_xmp_export`).
+        if self.recipe.is_noop() {
+            self.xmp_beside_confirm = false;
+            let t = tr(lang, "nothing to export — this variant has no adjustments");
+            self.status = t.to_string();
+            self.toast(ToastKind::Error, t);
+            return;
+        }
         let overwrite = self.xmp_beside_confirm;
-        match autoshade::store::export_xmp_beside(&path, overwrite) {
-            Ok(to) => {
+        let canvas = self.recipe.clone();
+        match autoshade::pipeline::export_xmp_beside(&path, &canvas, overwrite, autoshade::diag::stderr()) {
+            Ok(out) => {
                 self.xmp_beside_confirm = false;
                 // A file just landed in the user's PHOTO folder — the one place
                 // this app otherwise never writes. That is worth a toast, not
                 // just a status line that the next message scrolls away.
                 let mut t = trf(
                     lang,
-                    "Lightroom sidecar delivered → {path}",
-                    &[("path", &abs_display(&to))],
+                    ".xmp written beside the photo → {path}",
+                    &[("path", &abs_display(&out.path))],
                 );
+                // A file beside the photo that could not be MERGED was
+                // regenerated, dropping its own properties — said loudly.
+                if let Some(m) = &out.note {
+                    self.toast(ToastKind::Error, m.clone());
+                    t = format!("{t} — ⚠ {m}");
+                }
                 // Both directions of the Lightroom disclosure are said HERE and
-                // nowhere else (owner's ruling 2026-11-17): what the sidecar
+                // nowhere else (owner's ruling 2026-11-17): what the .xmp
                 // cannot carry, and what Lightroom renders that this canvas
                 // does not. AutoShade is an independent program, and this
                 // click is the one moment the user asks for a Lightroom file.
-                // Save and the Analyze landing write the projection but say
-                // nothing about Lightroom.
-                //
-                // So this line says BOTH halves. The file handed over is the
-                // projection of the SAVED develop, and the verdicts are the
-                // writer's own for that develop: the mask half re-runs the
-                // projection the save ran (`pipeline::xmp_projection_bytes` —
-                // same clamp, same photo frame, same raster embedding; the
-                // bytes are discarded, nothing is written), the global half
-                // is the registry's (`xmp::global_export_losses`). Nothing is
-                // remembered from the save itself, so a photo saved in an
-                // earlier session gets the same sentence. A projection that
-                // cannot be rebuilt falls back to the writer's frame-less
-                // verdict (`xmp::mask_export_losses`) rather than to silence.
-                let saved = &self.saved_recipe;
-                let losses = autoshade::pipeline::xmp_projection_bytes(
-                    &path,
-                    saved,
-                    autoshade::diag::silent(),
-                )
-                .map(|(_, _, losses)| losses)
-                .unwrap_or_else(|_| autoshade::xmp::mask_export_losses(saved));
-                let globals = autoshade::xmp::global_export_losses(saved);
+                // The verdicts are the writer's own for the develop it just
+                // wrote — the canvas (the mask half from the export itself, the
+                // global half from the registry).
+                let losses = out.losses;
+                let globals = autoshade::xmp::global_export_losses(&canvas);
                 // The two voices (`xmp_loss_interrupts`): a loss the user can
                 // act on interrupts — an Error toast plus a ⚠ on the line —
                 // while the stamped engine calibration alone rides the quiet
@@ -1074,11 +1080,8 @@ impl AutoShadeApp {
                 // Lightroom will render that this canvas does not. The file
                 // handed over is complete — it is the canvas that is missing
                 // something — so this is never a loss, never a toast, never a
-                // ⚠: the quiet middle dot only. Same saved develop as above.
-                if let Some(m) = render_gap_line(
-                    lang,
-                    &autoshade::xmp::global_render_gaps(&self.saved_recipe),
-                ) {
+                // ⚠: the quiet middle dot only. Same develop as above.
+                if let Some(m) = render_gap_line(lang, &autoshade::xmp::global_render_gaps(&canvas)) {
                     t = format!("{t} · {m}");
                 }
                 self.status = t.clone();
@@ -1113,12 +1116,11 @@ impl AutoShadeApp {
         }
     }
 
-    /// Save this photo's develop to the central store: recipe.json for every
-    /// source type + the Lightroom / Camera-Raw XMP projection for RAW.
-    /// An XMP reproduces a look via develop PARAMETERS; a Generated variant's
-    /// look lives in its pixels, not the recipe, so there's nothing faithful to
-    /// write — steer the user to 反推 (which produces a Fitted variant whose XMP
-    /// IS the look). Always keyed to the original RAW `src_path`.
+    /// Save this photo's develop to the central store: recipe.json, the
+    /// baked-pixels link and the strip record, in one commit. No .xmp is
+    /// written anywhere (2026-11-18): an .xmp is made only by 「Export .xmp
+    /// beside the photo」, and a save retires the projection older builds kept
+    /// in the develop folder. Always keyed to the original RAW `src_path`.
     pub(crate) fn save_xmp(&mut self) {
         // Flush every typed-but-uncommitted name FIRST (U10): a save entry
         // point (Ctrl+S, the Save develop button) must write the names the
@@ -1175,12 +1177,12 @@ impl AutoShadeApp {
                     self.forget_open_base();
                     match o.marker_warning {
                         // NEVER a plain success: the store copies are gone, but
-                        // without the marker a projection copied beside the RAW
-                        // out-ranks this clear and restores the edits on reopen.
+                        // without the stamp an .xmp beside the photo is news
+                        // again and the question may come back.
                         Some(w) => {
                             let t = trf(
                                 lang,
-                                "saved edits cleared, but the clear could not be marked ({err}) — a sidecar beside the RAW may restore them",
+                                "saved adjustments cleared, but that could not be recorded ({err}) — AutoShade may ask again about an .xmp beside this photo",
                                 &[("err", &w)],
                             );
                             self.status = t.clone();
@@ -1188,10 +1190,9 @@ impl AutoShadeApp {
                         }
                         None => {
                             self.status = if o.removed {
-                                tr(lang, "neutral recipe — saved edits cleared (saved files removed)")
-                                    .into()
+                                tr(lang, "saved adjustments cleared — this photo is back to untouched").into()
                             } else {
-                                tr(lang, "neutral recipe — nothing to save").into()
+                                tr(lang, "nothing to save — this photo has no adjustments").into()
                             };
                         }
                     }
@@ -1203,13 +1204,8 @@ impl AutoShadeApp {
             return;
         }
         // recipe.json is the source of truth for EVERY source type (the badge,
-        // batch render and reopening all read it; the XMP alone is lossy — no
-        // bitmap masks / exact recolour gains). The XMP is the RAW-only Lightroom
-        // projection on top. The recipe write ALONE decides the saved state:
-        // once it lands, reopening restores it regardless of the XMP — so the
-        // ● baseline must follow it even when the XMP half fails.
-        let raw = autoshade::decode::is_raw(&path);
-        // The WRITER's rule (api_xmp, produce_recipe, match, Save-all): a
+        // batch render and reopening all read it).
+        // The WRITER's rule (api_save, produce_recipe, match, Save-all): a
         // washed pre-era curve must not be re-persisted verbatim. The canvas
         // normally arrives repaired at open, but an open-time INABILITY (a
         // then-locked file) leaves it washed — and Ctrl+S then froze the
@@ -1265,8 +1261,8 @@ impl AutoShadeApp {
             self.dirty = true;
         }
         // ONE lock across the whole compound save: recipe.json, the
-        // pixels.json link, the strip record and the XMP projection publish
-        // as a unit, so another process cannot interleave between the halves.
+        // pixels.json link and the strip record publish as a unit, so another
+        // process cannot interleave between the halves.
         // NoWait — a busy develop postpones the save, ● stays lit, the canvas
         // loses nothing, and Ctrl+S retries.
         let locked_save = autoshade::store::with_develop_lock(
@@ -1309,21 +1305,6 @@ impl AutoShadeApp {
         } else {
             self.recipe.clone()
         };
-        // The Lightroom projection is a MEMBER of this commit (2026-09-13):
-        // it lands or clears with the recipe it projects, never after it.
-        // Built here so its merge base (the sidecar beside the RAW) is read
-        // under the same lock; a projection this build cannot produce
-        // degrades to Keep plus the failure toast below — the recipe write
-        // alone still decides the saved state.
-        let (xmp_member, xmp_outcome) = match autoshade::pipeline::xmp_projection_member(
-            &path,
-            &disk,
-            !generated,
-            autoshade::diag::stderr(),
-        ) {
-            Ok((m, note, losses)) => (m, Ok((note, losses))),
-            Err(e) => (autoshade::store::CommitMember::Keep, Err(e)),
-        };
         let committed: anyhow::Result<()> = (|| {
             let recipe_bytes = autoshade::pipeline::recipe_store_bytes(&path, &disk, autoshade::diag::stderr())?;
             let pixels = match &origin {
@@ -1353,7 +1334,9 @@ impl AutoShadeApp {
                     recipe: Some(recipe_bytes),
                     pixels,
                     variants,
-                    xmp: xmp_member,
+                    // The projection older builds kept in the develop folder
+                    // retires with this generation: no save writes an .xmp.
+                    xmp: autoshade::store::CommitMember::Clear,
                 },
             )?;
             Ok(())
@@ -1361,14 +1344,7 @@ impl AutoShadeApp {
         match committed {
             Ok(()) => {
                 self.open_unresolved = false;
-                let rp = autoshade::store::recipe_target(&path);
-                let pixel_note: Option<String> = origin.is_some().then(|| {
-                    tr(
-                        lang,
-                        " · retouched pixels: master linked — reopening restores them (the Lightroom XMP stays parametric-only)",
-                    )
-                    .to_string()
-                });
+                let retouched = origin.is_some();
                 // The strip mirror advances WITH the commit (all-or-nothing:
                 // a failed commit leaves it untouched and the
                 // background-variant unsaved protection armed).
@@ -1377,68 +1353,19 @@ impl AutoShadeApp {
                 self.saved_recipe = self.recipe.clone();
                 self.nav_stash.remove(&path);
                 self.pixels_on_disk = origin;
-                let mut s = if generated {
-                    // No sidecar reproduces AI pixels: the projection member
-                    // CLEARED, and the line says so instead of "XMP + recipe".
-                    trf(
+                // No save line names a path, a file format or Lightroom
+                // (2026-11-18): what was saved is the develop, and where it
+                // lives is the store's business. Lightroom is said only by
+                // 「Export .xmp beside the photo」 (owner's ruling 2026-11-17).
+                let mut s: String = if retouched {
+                    tr(
                         lang,
-                        "recipe saved → {path} (no Lightroom XMP: this card's look sits on AI-generated pixels)",
-                        &[("path", &rp.display().to_string())],
+                        "develop saved · the retouched image stays linked — reopening brings it back",
                     )
-                } else if raw {
-                    match xmp_outcome {
-                        // What the projection cannot carry (the writer's mask
-                        // verdicts, the second member) is NOT said here: owner's
-                        // ruling 2026-11-17 — an independent program does not
-                        // warn about Lightroom when no Lightroom file was asked
-                        // for. The sentence is said by 「Export .xmp beside the
-                        // photo」 (`export_xmp_beside`), the one moment the user
-                        // hands the file to Lightroom.
-                        Ok((merge_note, _)) => {
-                            let p = autoshade::pipeline::xmp_target(&path);
-                            // A sidecar we could not MERGE was regenerated, and
-                            // that drops the user's Lightroom-only properties.
-                            // Saying only "saved" is how that loss stayed
-                            // invisible until they reopened the catalog.
-                            if let Some(m) = &merge_note {
-                                self.toast(ToastKind::Error, m.clone());
-                            }
-                            let base = trf(
-                                lang,
-                                "XMP + recipe saved → {path}",
-                                &[("path", &p.display().to_string())],
-                            );
-                            // Neither direction of the Lightroom disclosure is
-                            // said here — not what the sidecar cannot carry, not
-                            // what Lightroom renders and this canvas does not
-                            // (「Carried to Lightroom, not rendered here」).
-                            // Both are said at the hand-off, `export_xmp_beside`
-                            // (owner's ruling 2026-11-17).
-                            match merge_note {
-                                Some(m) => format!("{base} — ⚠ {m}"),
-                                None => base,
-                            }
-                        }
-                        Err(e) => {
-                            let t = trf(
-                                lang,
-                                "recipe saved — but the Lightroom XMP failed: {err}",
-                                &[("err", &e.to_string())],
-                            );
-                            self.toast(ToastKind::Error, t.clone());
-                            t
-                        }
-                    }
+                    .into()
                 } else {
-                    trf(
-                        lang,
-                        "recipe saved → {path} (XMP applies to RAW only)",
-                        &[("path", &rp.display().to_string())],
-                    )
+                    tr(lang, "develop saved").into()
                 };
-                if let Some(n) = pixel_note {
-                    s.push_str(&n);
-                }
                 if relooked {
                     s.push_str(&format!(
                         " · {}",
@@ -1484,11 +1411,10 @@ impl AutoShadeApp {
 
     /// Paste the copied recipe onto every Ctrl+click-selected photo on a worker
     /// thread — Lightroom's "sync settings", without rendering anything: a
-    /// recipe.json per photo (central store) plus an XMP sidecar for RAWs.
+    /// recipe.json per photo in the central store, and no .xmp anywhere.
     /// Geometry (crop/straighten) is stripped unless `paste_geometry` is on,
     /// because composition rarely transfers between frames. Library files are
-    /// never touched (write_recipe / write_xmp land in the store, never beside
-    /// the photo).
+    /// never touched.
     pub(crate) fn start_paste(&mut self) {
         let Some(src) = self.copied.clone() else { return };
         if self.busy {
@@ -1622,21 +1548,14 @@ impl AutoShadeApp {
                 // removed the early bail — the per-target `step` closure
                 // owns the `?` scope.
                 let res: anyhow::Result<PasteOutcome> = {
-                    let (mut okn, mut xmpn) = (0usize, 0usize);
+                    let mut okn = 0usize;
                     let mut errs: Vec<String> = Vec::new();
-                    // XMP-half failures are partial successes (recipe-write-
-                    // decides), but their REASON used to reach stderr only —
-                    // the status said "n XMP" and left the user to notice the
-                    // shortfall by subtraction.
-                    let mut xmp_fails: Vec<String> = Vec::new();
-                    let mut xmp_notes: Vec<String> = Vec::new();
                     let mut written: Vec<PathBuf> = Vec::new();
                     for path in &targets {
-                        let mut step = || -> anyhow::Result<bool> {
+                        let step = || -> anyhow::Result<()> {
                             // Worker thread ⇒ Wait: queue behind whichever
                             // process holds this target's develop, exactly
-                            // like the CLI. ONE lock across gate → recipe →
-                            // XMP so the pasted pair publishes as a unit.
+                            // like the CLI. ONE lock across gate → commit.
                             autoshade::store::with_develop_lock(
                                 path,
                                 autoshade::store::DevelopLockMode::Wait,
@@ -1659,26 +1578,11 @@ impl AutoShadeApp {
                                 .map_err(|e| anyhow::anyhow!(
                                     "refusing to overwrite the saved develop: backing it up failed ({e})"
                                 ))?;
-                            // The projection is a member of the same
-                            // generation (2026-09-13). A paste replaces the
-                            // develop inside whatever card the target is on:
-                            // a persisted GENERATED master says that card
-                            // sits on AI pixels, and no sidecar may project
-                            // a develop over those — the member clears
-                            // instead of lying.
+                            // A persisted GENERATED master says the target's
+                            // card sits on AI pixels; the strip's word
+                            // follows the develop below.
                             let ai_master = autoshade::store::recorded_pixel_source(path)
                                 .and_then(|(o, g)| g.then_some(o));
-                            let on_source = ai_master.is_none();
-                            let (xmp_member, xmp_outcome) =
-                                match autoshade::pipeline::xmp_projection_member(
-                                    path,
-                                    &r,
-                                    on_source,
-                                    autoshade::diag::stderr(),
-                                ) {
-                                    Ok((m, note, _)) => (m, Ok(note)),
-                                    Err(e) => (autoshade::store::CommitMember::Keep, Err(e)),
-                                };
                             // ONE single-generation commit, like every other
                             // develop writer (R24-4): the paste used to call
                             // `pipeline::write_recipe` DIRECTLY — the fifth
@@ -1717,57 +1621,18 @@ impl AutoShadeApp {
                                             None => autoshade::store::ActiveWrite::Unknown,
                                         },
                                     )?,
-                                    xmp: xmp_member,
+                                    // No paste writes an .xmp; an older
+                                    // build's projection retires with it.
+                                    xmp: autoshade::store::CommitMember::Clear,
                                 },
                             )?;
-                            if autoshade::decode::is_raw(path) && on_source {
-                                // Recipe-write-decides: an XMP failure after
-                                // the recipe landed is a partial success —
-                                // reopening restores the paste regardless.
-                                // The third member (the M6a mask-loss list) is
-                                // deliberately dropped HERE: `xmp_notes` is
-                                // rendered under one fixed sentence about
-                                // regenerated-not-merged sidecars, so folding
-                                // another kind of loss into it would mislabel
-                                // both. A foreign target has had its bitmap
-                                // masks stripped (and said so) before this
-                                // worker started; the remaining per-target
-                                // losses reach stderr from write_xmp_doc. A
-                                // per-target UI list of them needs its own
-                                // PasteOutcome member — R23 work, not a
-                                // mislabelled fold into this one.
-                                match xmp_outcome {
-                                    Ok(None) => {}
-                                    // Regenerated-not-merged loses LR-only
-                                    // properties — collected for the paste
-                                    // summary (stderr already heard it in
-                                    // the builder).
-                                    Ok(Some(m)) => xmp_notes.push(format!(
-                                        "{}: {m}",
-                                        autoshade::pipeline::stem(path)
-                                    )),
-                                    Err(e) => {
-                                        eprintln!(
-                                            "⚠ {}: recipe pasted, but the Lightroom XMP failed: {e}",
-                                            autoshade::pipeline::stem(path)
-                                        );
-                                        xmp_fails.push(format!(
-                                            "{}: {e}",
-                                            autoshade::pipeline::stem(path)
-                                        ));
-                                        return Ok(false);
-                                    }
-                                }
-                                return Ok(true);
-                            }
-                            Ok(false)
+                            Ok(())
                                 },
                             )
                         };
                         match step() {
-                            Ok(wrote_xmp) => {
+                            Ok(()) => {
                                 okn += 1;
-                                xmpn += usize::from(wrote_xmp);
                                 written.push(path.clone());
                             }
                             Err(e) => errs.push(format!("{}: {e}", autoshade::pipeline::stem(path))),
@@ -1776,7 +1641,7 @@ impl AutoShadeApp {
                     // FACTS (L12#4): counts and detail lists render at the
                     // landing; a partial failure keeps riding the error
                     // channel there, so it never reads as a clean success.
-                    Ok(PasteOutcome { ok: okn, xmp: xmpn, errs, xmp_fails, xmp_notes, written })
+                    Ok(PasteOutcome { ok: okn, errs, written })
                 };
                 Msg::Pasted(res)
             },

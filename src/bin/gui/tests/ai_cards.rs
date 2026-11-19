@@ -807,7 +807,8 @@
     /// Ctrl+S on a card over AI pixels saves that card's develop — no
     /// refusal (until 2026-09-13 a generated card was refused outright) —
     /// with the RAW's calibration kept on disk, the canvas stripped, and no
-    /// Lightroom projection: the member CLEARS a standing one.
+    /// .xmp in the store: the save retires the projection an earlier build
+    /// left standing.
     #[test]
     fn ctrl_s_on_an_ai_pixel_card_saves_its_develop_and_retires_the_projection() {
         let (mut app, _ctx, _dir, src, master, _ai_px, _scrub) =
@@ -821,7 +822,7 @@
         // The pristine ✨ card saves as itself.
         app.save_xmp();
         assert!(!app.status.contains("Reverse-fit"), "no refusal: {}", app.status);
-        assert!(app.status.contains("AI-generated pixels"), "{}", app.status);
+        assert!(app.status.starts_with("develop saved"), "{}", app.status);
         assert!(!xp.exists(), "the stale projection is retired by the commit");
         assert!(!app.unsaved_marker_dirty(), "{}", app.status);
         assert_eq!(saved_strip_of(&src).active_kind, "generated");
@@ -835,7 +836,7 @@
             "{}",
             app.status
         );
-        assert!(app.status.starts_with("recipe saved"), "{}", app.status);
+        assert!(app.status.starts_with("develop saved"), "{}", app.status);
         let disk: EditRecipe = serde_json::from_str(
             &std::fs::read_to_string(autoshade::store::recipe_target(&src)).unwrap(),
         )

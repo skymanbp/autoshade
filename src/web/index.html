@@ -1628,7 +1628,7 @@ async function saveDevelop() {
     // The server writes recipe.json, so reopening this photo (here or in the
     // GUI) restores exactly this edit. A NEUTRAL recipe is not a save at all:
     // the server clears the develop instead (Reset + Save = "clear my edits")
-    // and answers "cleared …".
+    // and answers "cleared …" — or "nothing to save …" when nothing was stored.
     const stale = reqId !== state.id || reqSeq !== selectSeq;
     if (!r.ok) {
       const why = r.status === 412
@@ -1638,8 +1638,9 @@ async function saveDevelop() {
       return;
     }
     if (stale) { setStatus("save for another photo finished — its develop is on disk"); loadList(); return; }
-    // The server's reply is the whole status ("develop saved → …", or
-    // "cleared …" with why a clear could not be recorded): shown verbatim.
+    // The server's reply is the whole status ("develop saved → …", "nothing
+    // to save …", or "cleared …" with why a clear could not be recorded):
+    // shown verbatim.
     setStatus(body);
     // The recipe and the pixel link land in ONE commit (`commit_develop`), so
     // a 200 means both are on disk and the baseline is exactly what this

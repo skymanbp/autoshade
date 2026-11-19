@@ -1356,7 +1356,7 @@ impl AutoShadeApp {
                         // primary verb is the bar's last text verb — where the main
                         // action conventionally sits.
                         if action(ui, ready, save)
-                            .on_hover_text(tr(lang, "Ctrl+S · save this photo's develop (recipe + a Lightroom/ACR XMP for RAW; a baked retouch master is linked so reopening restores it) to your develop store"))
+                            .on_hover_text(tr(lang, "Ctrl+S · save this photo's develop"))
                             .clicked()
                         {
                             self.save_xmp();
@@ -1755,7 +1755,7 @@ impl AutoShadeApp {
                     let rows: [(&str, &str); 33] = [
                         ("Ctrl/⌘+O", tr(lang, "Open photo")),
                         ("Ctrl/⌘+Shift+E / Ctrl/⌘+E", tr(lang, "Export to the Destination (Destination + settings in the Export section)")),
-                        ("Ctrl/⌘+S", tr(lang, "Save develop (recipe + XMP for RAW)")),
+                        ("Ctrl/⌘+S", tr(lang, "Save develop")),
                         ("Ctrl/⌘+Z / +Shift+Z / +Y", tr(lang, "Undo / Redo")),
                         ("Ctrl/⌘+Shift+C / +Shift+V", tr(lang, "Copy recipe / paste to selected")),
                         ("← / →", tr(lang, "Step through the library")),

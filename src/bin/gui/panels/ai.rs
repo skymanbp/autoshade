@@ -958,7 +958,7 @@ impl AutoShadeApp {
                      Off = never spend extra.",
                     &[("limit", &format!("{:.2}", autoshade::fit::DIVERGENCE_GLOBAL))],
                 ));
-                explainer(ui, lang, tr(lang, "After generating, use 「Reverse-fit recipe」 to turn the look into sliders + XMP \
+                explainer(ui, lang, tr(lang, "After generating, use 「Reverse-fit recipe」 to turn the look into sliders \
                          (the full-resolution way)."));
                 // The way back from the fit prompt's 「Don't ask again」
                 // (v1.17.0). It sat in the reverse-fit fold until the stepped
@@ -1053,8 +1053,8 @@ impl AutoShadeApp {
     pub(crate) fn fit_explainer(lang: Lang) -> &'static str {
         tr(lang,
             "Statistical fit: reverse the freshly generated look into editable develop params \
-             (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes \
-             into this photo's develop store; hit Export to render the full-resolution result.",
+             (local, no API cost). Sliders update (undoable); hit Export to render the \
+             full-resolution result.",
         )
     }
 

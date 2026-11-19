@@ -485,12 +485,13 @@
     /// The owner's ruling of 2026-11-17: AutoShade is an independent program,
     /// so the sentence naming what the Lightroom sidecar cannot carry is said
     /// ONLY when the user hands that sidecar to Lightroom (「Export .xmp beside
-    /// the photo」). Save and the Analyze landing still WRITE the projection
-    /// and still say what they saved, but neither their status line nor any
-    /// toast mentions what Lightroom will not get. The hand-off then says the
-    /// WHOLE sentence — the mask half from the writer's verdicts on the saved
-    /// develop, the global half from the registry — and says it from an app
-    /// that never saw the save (a photo saved in an earlier session).
+    /// the photo」). Save and the Analyze landing write no .xmp at all
+    /// (2026-11-18) and say only that the develop was saved: neither their
+    /// status line nor any toast mentions Lightroom. The hand-off then says the
+    /// WHOLE sentence — the mask half from the writer's verdicts on the
+    /// develop it just wrote (the canvas), the global half from the registry
+    /// — and says it from an app that never saw the save (a photo saved in an
+    /// earlier session).
     ///
     /// MUTATIONS THIS CATCHES: (1) the loss line put back on Ctrl+S's status
     /// or toast in `save_xmp`; (2) the same on the Analyze landing in
@@ -499,8 +500,8 @@
     /// fails; (4) the hand-off dropping the global half — the base-curve
     /// assertion fails; (5) the hand-off losing its interrupting voice — no
     /// Error toast for a bitmap mask; (6) the mask verdicts taken from
-    /// anything the save left in the app rather than from the saved develop —
-    /// the fresh app below has none, and the mask half goes missing.
+    /// anything a save left in the app rather than from the export's own
+    /// write — the fresh app below has none, and the mask half goes missing.
     #[test]
     fn the_lightroom_loss_line_is_said_only_when_the_sidecar_is_handed_over() {
         use autoshade::recipe::{LocalAdjustment, MaskGeometry};
@@ -554,7 +555,7 @@
                 .find(|t| t.contains(head) || t.contains(gap_head))
         };
 
-        // (1) Ctrl+S writes the projection and says nothing about Lightroom.
+        // (1) Ctrl+S saves the develop and says nothing about Lightroom.
         let mut app = AutoShadeApp {
             lang,
             src_path: Some(raw.clone()),
@@ -562,8 +563,8 @@
             ..Default::default()
         };
         app.save_xmp();
-        assert!(app.status.starts_with("XMP + recipe saved"), "the save line stands: {}", app.status);
-        assert!(autoshade::store::xmp_target(&raw).exists(), "the projection is still written on save");
+        assert_eq!(app.status, "develop saved", "the save line stands");
+        assert!(!autoshade::store::xmp_target(&raw).exists(), "a save writes no .xmp");
         assert_eq!(
             loss_said(&app),
             None,
@@ -592,8 +593,9 @@
              Lightroom sidecar cannot carry — no Lightroom file was asked for"
         );
 
-        // (3) The hand-off, from an app that never saw either write: its saved
-        // develop is what an open would have loaded, and nothing else.
+        // (3) The hand-off, from an app that never saw either save: the
+        // develop on its canvas is what an open would have loaded, and
+        // nothing else.
         let mut fresh = AutoShadeApp {
             lang,
             src_path: Some(raw.clone()),
@@ -611,7 +613,7 @@
         assert!(
             fresh.status.contains(&trf(lang, "bitmap masks ×{n}", &[("n", "1")]))
                 && fresh.status.contains("(sky"),
-            "the MASK half, from the writer's verdicts on the saved develop: {}",
+            "the MASK half, from the writer's verdicts on the exported develop: {}",
             fresh.status
         );
         assert!(
@@ -646,8 +648,8 @@
     /// MUTATIONS THIS CATCHES: (1) the call put back on the Save path —
     /// a second call in export.rs, outside `export_xmp_beside`; (2) the call
     /// put back on the Analyze landing — any call in workers.rs; (3) the call
-    /// removed from `export_xmp_beside`; (4) it fed anything but the saved
-    /// develop the delivered file projects.
+    /// removed from `export_xmp_beside`; (4) it fed anything but the develop
+    /// the delivered file was built from (the canvas at the click).
     #[test]
     fn the_render_gap_line_is_wired_only_into_the_handoff() {
         let export = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/gui/export.rs"));
@@ -677,8 +679,8 @@
             "the render-gap line is said inside `export_xmp_beside`, the hand-off"
         );
         assert!(
-            handoff.contains("global_render_gaps(&self.saved_recipe)"),
-            "…from the SAVED develop the delivered file projects, not the live canvas"
+            handoff.contains("global_render_gaps(&canvas)"),
+            "…from the very develop the delivered file was built from: the canvas at the click"
         );
     }
 

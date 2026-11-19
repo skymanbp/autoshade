@@ -446,8 +446,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Recipe copied — Ctrl/⌘+click to pick several, then “Paste”", "配方已复制 — Ctrl/⌘+点击选多张，再「粘贴」"),
     ("Paste", "粘贴"),
     ("Paste ({n})", "粘贴 ({n})"),
-    ("Writes each photo's develop into your develop store (recipe JSON; RAW also gets a Lightroom XMP). Leaves library files untouched, renders nothing.",
-        "把每张照片的显影写入显影库（配方 JSON；RAW 另附 Lightroom XMP）。不动库文件、不渲染成品。"),
+    ("Writes each photo's develop into your develop store. Leaves library files untouched, renders nothing.",
+        "把每张照片的显影写入显影库。不动库文件、不渲染成品。"),
     ("Render", "渲染"),
     ("Render ({n})", "渲染 ({n})"),
     ("Each renders by its own saved develop from the store (neutral develop if none) → <Destination>/<name>.developed.*, using the current format / long-edge / sharpening / quality; AI Denoise sits out the batch.",
@@ -529,13 +529,13 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Reverse-fit recipe", "反推配方"),
     // The explainer is shared with the fit prompt (v1.17.0), so the fold's
     // own tail — the dial ABOVE the button — is a pair of its own.
-    ("Statistical fit: reverse the freshly generated look into editable develop params (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes into this photo's develop store; hit Export to render the full-resolution result.",
-        "统计拟合：把刚生成的观感反解成可编辑的 develop 参数（本地运算，无 API 费）。滑杆会更新（可 undo），RAW 会在该照片的显影库里生成 Lightroom XMP；再点「导出」可出全分辨率成品。"),
+    ("Statistical fit: reverse the freshly generated look into editable develop params (local, no API cost). Sliders update (undoable); hit Export to render the full-resolution result.",
+        "统计拟合：把刚生成的观感反解成可编辑的 develop 参数（本地运算，无 API 费）。滑杆会更新（可 undo）；再点「导出」可出全分辨率成品。"),
     ("Extract style", "提取风格提示词"),
     ("Compare the original / generated images and have the vision model write a reusable style prompt: auto-fills the Generate image prompt (ready to restyle other photos) and saves <stem>.style.txt in the delivery folder.",
         "对比 原图/生成图，让 vision 模型写一段可复用的风格 prompt：自动填入「AI 生成出片」提示词（可直接给别的照片重绘用）并把 <stem>.style.txt 存到成片文件夹。"),
-    ("After generating, use 「Reverse-fit recipe」 to turn the look into sliders + XMP (the full-resolution way).",
-        "生成后可「反推配方」把观感变成滑杆+XMP（全分辨率的正道）。"),
+    ("After generating, use 「Reverse-fit recipe」 to turn the look into sliders (the full-resolution way).",
+        "生成后可「反推配方」把观感变成滑杆（全分辨率的正道）。"),
     // 2026-09-27: every brush tool's fold carries its own arm / clear pair
     // and its own painted area (`BrushOwner`); the one shared 「Paint mask」
     // checkbox and 「Clear brush」 are retired.
@@ -1256,8 +1256,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Export to a one-off path…", "只把这一次导出写到你选的路径…"),
     ("Pick a path for THIS export only — the Destination setting is left as it is",
         "只为「这一次」导出选路径——不改「目标位置」设置"),
-    ("Ctrl+S · save this photo's develop (recipe + a Lightroom/ACR XMP for RAW; a baked retouch master is linked so reopening restores it) to your develop store",
-        "Ctrl+S · 把这张照片的显影保存到显影库（配方 + RAW 附带 Lightroom/ACR XMP；已烘焙的修饰母版会被关联，重新打开可恢复）"),
+    ("Ctrl+S · save this photo's develop", "Ctrl+S · 保存这张照片的显影"),
 
     // ── Empty-state landing screen (update()) ────────────────────────────────
     ("AI auto-edit · RAW processing", "AI 自动出片 · RAW 显影"),
@@ -1403,22 +1402,21 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" · {n} base look(s) re-estimated (saved by an earlier version)", " · {n} 张的相机默认色调已重估（旧版本保存）"),
     ("Batch-rendering {done}/{total} …", "批量渲染 {done}/{total} …"),
     ("Pasting recipe to {n} photos…", "粘贴配方到 {n} 张…"),
-    ("Recipe pasted to {ok} photos ({xmp} XMP) → develop store", "配方已粘贴到 {ok} 张（{xmp} 个 XMP）→ 显影库"),
+    ("Adjustments pasted to {ok} photo(s)", "调整已粘贴到 {ok} 张照片"),
     ("{ok} succeeded, {fail} failed: {detail}", "{ok} 成功、{fail} 失败：{detail}"),
     ("batch paste", "批量粘贴"),
     ("Preview resolution {px}px — re-decoded", "预览分辨率 {px}px — 已重解码"),
 
-    // ── Status bar · XMP save ────────────────────────────────────────────────
-    // Terminology: sidecar/边车 is reserved for the RAW-adjacent .xmp; the
-    // store's recipe.json is "the saved develop / 已保存的显影" (it no longer
-    // sits beside anything).
-    ("XMP + recipe saved → {path}", "XMP + 配方已保存 → {path}"),
-    ("recipe saved → {path} (no Lightroom XMP: this card's look sits on AI-generated pixels)",
-        "配方已保存 → {path}（不出 Lightroom XMP：这个变体的观感在 AI 生成的像素上）"),
-    ("recipe saved → {path} (XMP applies to RAW only)",
-        "配方已保存 → {path}（XMP 仅适用于 RAW）"),
-    ("recipe saved — but the Lightroom XMP failed: {err}",
-        "配方已保存 — 但 Lightroom XMP 写入失败：{err}"),
+    // ── Status bar · Ctrl+S (export.rs save_xmp) ─────────────────────────────
+    // No save line names a path, a file format or Lightroom (2026-11-18).
+    ("develop saved", "显影已保存"),
+    ("develop saved · the retouched image stays linked — reopening brings it back",
+        "显影已保存 · 修过的图仍然关联着——重新打开会带回来"),
+    ("nothing to save — this photo has no adjustments", "这张照片没有调整，不用保存"),
+    ("saved adjustments cleared — this photo is back to untouched",
+        "已清掉存过的调整——这张照片回到没编辑的样子"),
+    ("saved adjustments cleared, but that could not be recorded ({err}) — AutoShade may ask again about an .xmp beside this photo",
+        "已清掉存过的调整，但这件事没能记下（{err}）——之后可能会再问到照片旁的 .xmp"),
     // M6a export-side lossy-projection disclosure (util::xmp_loss_line): the
     // counts come from the writer's own per-mask verdicts, so these are pure
     // labels — an empty list prints nothing at all. Said only by 「Export .xmp
@@ -1498,23 +1496,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("could not clear the saved edits: {err}", "无法清除已保存的编辑：{err}"),
     ("save postponed: this photo is being changed by another AutoShade process ({err}); your canvas remains unsaved — retry",
         "保存已推迟：另一个 AutoShade 进程正在修改这张照片（{err}）；画布上的编辑尚未保存 — 请稍后重试"),
-    ("{n} Lightroom XMP projection(s) failed (those develops ARE saved): {detail}",
-        "{n} 个 Lightroom XMP 投影写入失败（显影本身已保存）：{detail}"),
-    ("{n} clear(s) could not be marked: {detail} — a sidecar beside the RAW may restore those edits on the next open",
-        "{n} 次清除成功但清除标记写入失败：{detail} — RAW 旁的 sidecar 可能在下次打开时恢复这些编辑"),
+    ("{n} clear(s) could not be recorded: {detail} — AutoShade may ask again about an .xmp beside those photos",
+        "有 {n} 次清除没能记下：{detail}——之后可能会再问到这些照片旁的 .xmp"),
     ("saved with warnings — the window stays open so they can be read; quit again to close: {detail}",
         "已保存，但有警告 — 窗口保持打开以便阅读；再次退出即可关闭：{detail}"),
-    (" — ⚠ {n} XMP projection(s) failed (those pastes ARE saved): {detail}",
-        " — ⚠ {n} 个 XMP 投影写入失败（粘贴本身已保存）：{detail}"),
-    (" — {n} sidecar(s) regenerated rather than merged (Lightroom-only properties dropped): {detail}",
-        " — {n} 个 XMP 文件因无法合并而重建（Lightroom 专有属性已丢失）：{detail}"),
-    ("neutral recipe — saved edits cleared (saved files removed)",
-        "中性配方 — 已清除保存的编辑（存档文件已删除）"),
-    ("neutral recipe — nothing to save", "中性配方 — 无需保存"),
-    ("saved edits cleared, but the clear could not be marked ({err}) — a sidecar beside the RAW may restore them",
-        "已清除保存的编辑，但清除标记写入失败（{err}）— RAW 旁的 sidecar 可能在重新打开时恢复这些编辑"),
-    (" · retouched pixels: master linked — reopening restores them (the Lightroom XMP stays parametric-only)",
-        " · 修饰像素：已关联烘焙母版 — 重新打开会恢复（Lightroom XMP 仍只含参数化显影）"),
     ("cancelled — the app is free again and the late result is discarded; a generative call stops at its next checkpoint, while an AI analyze keeps running (and billing) until it finishes or times out",
         "已取消 — 应用已解锁，迟到结果将被丢弃；生成类调用会在下一检查点停止，而 AI 分析会一直跑到完成或超时（仍然计费）"),
     ("✕ Cancel", "✕ 取消"),
@@ -1553,11 +1538,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Revise", "修订"),
     ("Reject", "驳回"),
     ("{decision} — {reasons}", "{decision} — {reasons}"),
-    ("AI develop applied · saved to recipe.json", "AI 显影已应用 · 已保存到 recipe.json"),
+    ("AI develop applied · saved", "AI 显影已应用 · 已保存"),
     ("AI develop applied · saved (previous save backed up as v{n})",
         "AI 显影已应用 · 已保存（之前的保存已备份为 v{n}）"),
-    ("AI develop applied — but saving the sidecar failed: {err}",
-        "AI 显影已应用 — 但显影保存失败：{err}"),
+    ("AI develop applied — but saving it failed: {err}",
+        "AI 显影已应用——但保存失败：{err}"),
     ("AI develop applied — but NOT saved: backing up your existing save failed ({err}); Ctrl+S overwrites explicitly",
         "AI 显影已应用 — 但未保存：备份你已有的保存失败（{err}）；Ctrl+S 可显式覆盖"),
     (" · NOT persisted: backing up your existing save failed ({err}) — Ctrl+S to save explicitly",
@@ -1818,8 +1803,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Segmentation helper", "分割脚本"),
     ("Set with the AUTOSHADE_SEGMENT_SCRIPT environment variable (not editable here, because the app runs this file)",
         "用环境变量 AUTOSHADE_SEGMENT_SCRIPT 设置（此处不能改，因为程序会运行这个文件）"),
-    ("Where saved develops live: recipes, Lightroom XMP, version snapshots and mask rasters — one folder per photo, keyed by its absolute path. Override the location with the AUTOSHADE_DATA_DIR environment variable.",
-        "已保存显影的存放地：配方、Lightroom XMP、版本快照与蒙版栅格 — 每张照片一个文件夹，按其绝对路径键控。可用 AUTOSHADE_DATA_DIR 环境变量改存放位置。"),
+    ("Where saved develops live: recipes, saved versions and mask rasters — one folder per photo, keyed by its absolute path. Override the location with the AUTOSHADE_DATA_DIR environment variable.",
+        "已保存显影的存放地：配方、存下的版本与蒙版栅格 — 每张照片一个文件夹，按其绝对路径键控。可用 AUTOSHADE_DATA_DIR 环境变量改存放位置。"),
     // R22-8 · SF8-C: the row shows the OPEN photo's hash subdirectory, so it
     // needs a way in — the folder name is a hash nobody can retype.
     ("🗂 Show in file manager", "🗂 在文件管理器中打开"),
@@ -1891,7 +1876,6 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "导出到「目标位置」（目标位置与设置都在「导出」一节）"),
     ("Format", "格式"),
     ("Save develop", "保存显影"),
-    ("Save develop (recipe + XMP for RAW)", "保存显影（recipe + RAW 的 XMP）"),
     ("Ctrl+Shift+E (or Ctrl+E) · full-resolution render to the Destination below (follows the current variant's pixels); Destination + settings live in the Export section",
         "Ctrl+Shift+E（或 Ctrl+E）· 全分辨率渲染到下方「目标位置」（跟随当前变体的像素）；目标位置与其余设置都在「导出」一节"),
     ("Applied by 「Export」 in the toolbar (Ctrl+Shift+E, or Ctrl+E) and by 「Render」 in the library. The ▾ beside Export delivers one file to a path you pick without touching the Destination.",
@@ -1901,13 +1885,16 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // .xmp — see the terminology note in the XMP-save block.
     ("Export .xmp beside the photo", "导出 .xmp 到照片旁"),
     ("⚠ Overwrite the .xmp already there", "⚠ 覆盖已存在的 .xmp"),
-    ("Copy this photo's stored Lightroom/ACR sidecar into the photo's own folder, where Lightroom reads it. Save the develop first — this delivers what is stored, not what is unsaved on the canvas.",
-        "把这张照片在显影库里的 Lightroom/ACR 边车复制到照片自己的文件夹，Lightroom 就是在那里读它。请先保存显影——这里给出的是已保存的内容，不是画布上未保存的改动。"),
+    ("Write this variant's current adjustments as an .xmp into the photo's own folder, where Lightroom reads it. Changes you have not saved are included.",
+        "把这个变体现在的调整写成 .xmp，放到照片所在的文件夹（Lightroom 从那里读）。还没保存的改动也算在内。"),
+    ("This variant's look sits in an AI-generated image — an .xmp cannot carry it",
+        "这个变体的效果在 AI 生成的图里——.xmp 带不走"),
+    ("nothing to export — this variant has no adjustments", "这个变体没有调整，不用导出"),
     ("RAW only — a baked PNG/TIFF has no Lightroom sidecar convention, so its neighbouring .xmp belongs to another program",
         "仅 RAW —— 烘焙好的 PNG/TIFF 没有 Lightroom 边车约定，旁边的 .xmp 属于别的程序"),
     ("A .xmp already sits beside this photo (Lightroom's own, or an earlier copy) — clicking again replaces it",
         "这张照片旁已有 .xmp（Lightroom 自己的，或早先复制的）—— 再点一次会替换它"),
-    ("Lightroom sidecar delivered → {path}", "Lightroom 边车已写到照片旁 → {path}"),
+    (".xmp written beside the photo → {path}", ".xmp 已写到照片旁 → {path}"),
     ("a .xmp already sits beside this photo ({path}) — click again to replace it",
         "这张照片旁已有 .xmp（{path}）—— 再点一次会替换它"),
     ("the .xmp could not be delivered: {err}", "无法写出 .xmp：{err}"),
@@ -2735,10 +2722,6 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       ({max_spots} regions / {max_bbox}x bbox / {max_disk}x \
       heal coverage) and were left UNTOUCHED; paint fewer or smaller regions",
         "已修复 {n}/{total} 个手绘区域——其余超出修饰预算（{max_spots} 区 / {max_bbox}x 包围盒 / {max_disk}x 修复覆盖），保持未动；请少画或画小一些"),
-
-    // ── Round-12 L12#4: reverse-fit landing facts rendered at landing ────────
-    (" · XMP → {path}", " · XMP → {path}"),
-    (" · ⚠ {note}", " · ⚠ {note}"),
 
     // ── Round-12 L12#3: tofu disclosure for uncovered writing scripts ────────
     ("some file names use characters no installed font can draw ({sample}) — they show as boxes",

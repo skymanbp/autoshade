@@ -26,7 +26,8 @@ fn mark_develop_cleared_in(root: &Path, src: &Path) -> std::io::Result<()> {
 /// open is the same lie the deliverable paths already outlawed — so the
 /// failure rides back to the surface, which shows it.
 pub struct ClearOutcome {
-    /// Did any saved file actually go away (else: "nothing to save").
+    /// Did any saved file actually go away (else: "nothing to save" — and
+    /// then nothing was written either, no marker and no stamp).
     pub removed: bool,
     /// The develop IS cleared, but [`mark_develop_cleared`] failed: a sidecar
     /// beside the RAW can still out-rank the clear and restore the edits.
@@ -47,6 +48,9 @@ pub struct ClearOutcome {
 ///
 /// A file already missing IS the desired end state; any OTHER removal failure
 /// reaches the caller — a surviving sidecar resurrects the edits on reopen.
+///
+/// A photo with NOTHING stored is left exactly as it was: no marker, no
+/// stamp, `removed: false` ([`clear_has_work_in`] says why).
 pub fn clear_develop(src: &Path) -> std::io::Result<ClearOutcome> {
     let root = store_root();
     let legacy_roots = legacy_out_roots();
@@ -68,6 +72,9 @@ fn clear_develop_unlocked_in(
     legacy_roots: &[PathBuf],
     src: &Path,
 ) -> std::io::Result<ClearOutcome> {
+    if !clear_has_work_in(root, legacy_roots, src) {
+        return Ok(ClearOutcome { removed: false, marker_warning: None });
+    }
     // TRANSACTION MARKER FIRST (L03): a kill mid-sweep used to leave a
     // half-cleared develop — recipe gone, XMP or variants alive — that
     // every reader took for a real partial develop, resurrecting edits the
@@ -91,6 +98,50 @@ fn clear_develop_unlocked_in(
         settle_consumed_marker(&clear_pending_in(root, src));
     }
     Ok(ClearOutcome { removed, marker_warning })
+}
+
+/// The central files an explicit clear removes, in the order it removes them
+/// — the ONE list the sweep walks and [`clear_has_work_in`] probes.
+fn clear_targets_in(root: &Path, src: &Path) -> [PathBuf; 5] {
+    [
+        develop_dir_in(root, src).join("recipe.json.bak"),
+        recipe_target_in(root, src),
+        xmp_target_in(root, src),
+        // The strip record goes with the develop it describes — a surviving
+        // variants.json would resurrect background variants over a develop
+        // the user explicitly cleared.
+        develop_dir_in(root, src).join("variants.json.bak"),
+        variants_path_in(root, src),
+    ]
+}
+
+/// A pre-store ./out develop this photo's stem still answers to: present in
+/// some legacy root and not yet suppressed by an earlier clear's tombstone.
+fn legacy_visible_in(root: &Path, legacy_roots: &[PathBuf], src: &Path) -> bool {
+    let stem = crate::pipeline::stem(src);
+    !legacy_suppressed_in(root, src)
+        && legacy_roots.iter().any(|legacy_root| {
+            legacy_root.join(format!("{stem}.recipe.json")).exists()
+                || legacy_root.join(format!("{stem}.xmp")).exists()
+        })
+}
+
+/// Does an explicit clear have anything to do — a stored file the sweep would
+/// remove, a legacy develop to suppress, or a clear / commit left half-done?
+///
+/// With nothing there the clear writes NOTHING (2026-11-18). Its marker and
+/// its stamp are this app's newest word about the photo: [`external_xmp`]
+/// ranks an .xmp beside the photo against their time, and a packet inside the
+/// RAW is not asked about once the stamp exists. Stamping a photo that was
+/// never saved — Ctrl+S on an untouched photo does exactly that — would
+/// silence the question about a file the user was never asked about, and
+/// leave marker files behind for a save that saved nothing.
+fn clear_has_work_in(root: &Path, legacy_roots: &[PathBuf], src: &Path) -> bool {
+    clear_pending_in(root, src).exists()
+        || commit_dir_in(root, src).exists()
+        || clear_targets_in(root, src).iter().any(|p| p.exists())
+        || has_pixel_source_in(root, src)
+        || legacy_visible_in(root, legacy_roots, src)
 }
 
 /// The sweep half of [`clear_develop_in`], IDEMPOTENT so recovery may
@@ -138,12 +189,7 @@ fn clear_sweep_in(
     // legacy layout's own, and it is exactly why the central store keys by
     // path; leaving a root unswept does not avoid it, it only makes the clear
     // fail while the same shared file resurrects the edits on the next read.
-    let stem = crate::pipeline::stem(src);
-    let legacy_was_visible = !legacy_suppressed_in(root, src)
-        && legacy_roots.iter().any(|legacy_root| {
-            legacy_root.join(format!("{stem}.recipe.json")).exists()
-                || legacy_root.join(format!("{stem}.xmp")).exists()
-        });
+    let legacy_was_visible = legacy_visible_in(root, legacy_roots, src);
     // The tombstone lands BEFORE central files are removed. A crash can
     // therefore leave the old central develop visible, or leave it cleared
     // with legacy already suppressed, but cannot expose the ambiguous
@@ -165,16 +211,7 @@ fn clear_sweep_in(
         }
     }
 
-    for p in [
-        develop_dir_in(root, src).join("recipe.json.bak"),
-        recipe_target_in(root, src),
-        xmp_target_in(root, src),
-        // The strip record goes with the develop it describes — a surviving
-        // variants.json would resurrect background variants over a develop
-        // the user explicitly cleared.
-        develop_dir_in(root, src).join("variants.json.bak"),
-        variants_path_in(root, src),
-    ] {
+    for p in clear_targets_in(root, src) {
         match del(&p) {
             Ok(b) => removed |= b,
             Err(e) => {

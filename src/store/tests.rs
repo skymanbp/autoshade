@@ -4056,6 +4056,60 @@ fn a_newer_own_save_or_clear_silences_an_older_external_xmp() {
     let _ = std::fs::remove_dir_all(&dev);
 }
 
+/// An explicit clear of a photo with NOTHING stored writes nothing — no
+/// marker, no stamp. The stamp is this app's newest word about the photo, so
+/// one left by a neutral save of an untouched photo silenced an older .xmp
+/// beside it that the user had never been asked about. A clear that DID
+/// remove a develop still stamps, and that one outranks the older file.
+///
+/// MUTATION: the `clear_has_work_in` early return removed from
+/// `clear_develop_unlocked_in`.
+#[test]
+fn a_clear_with_nothing_stored_writes_nothing() {
+    use std::time::{Duration, SystemTime};
+    let (dir, raw, dev) = external_fixture("clearnothing");
+    let beside = raw.with_extension("xmp");
+    std::fs::write(
+        &beside,
+        crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 30.0, ..Default::default() }),
+    )
+    .unwrap();
+    set_mtime(&beside, SystemTime::now() - Duration::from_secs(7200));
+    assert!(matches!(external_xmp(&raw), ExternalXmp::Beside { .. }), "premise: an unanswered file");
+    let written = |d: &Path| {
+        let mut names: Vec<String> = std::fs::read_dir(d)
+            .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+            .unwrap_or_default();
+        names.retain(|n| n != ".develop.lock");
+        names.sort();
+        names
+    };
+
+    let out = clear_develop(&raw).unwrap();
+    assert!(!out.removed && out.marker_warning.is_none(), "nothing was stored");
+    assert!(written(&dev).is_empty(), "nothing written: {:?}", written(&dev));
+    assert!(
+        matches!(external_xmp(&raw), ExternalXmp::Beside { .. }),
+        "the question about the older file still stands"
+    );
+
+    std::fs::write(
+        recipe_target(&raw),
+        serde_json::to_string(&EditRecipe { contrast: 5.0, ..Default::default() }).unwrap(),
+    )
+    .unwrap();
+    let out = clear_develop(&raw).unwrap();
+    assert!(out.removed, "a stored develop was removed");
+    assert!(dev.join("cleared.txt").exists(), "…and that clear is stamped");
+    assert!(
+        matches!(external_xmp(&raw), ExternalXmp::None),
+        "the user's own newer clear outranks the older file"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dev);
+}
+
 /// The ranking may only describe the file it actually read: an identity that
 /// no longer matches the path (swapped or rewritten after the read) is not
 /// asked about — the next look reads the new file.

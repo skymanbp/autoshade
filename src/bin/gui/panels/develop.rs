@@ -3634,33 +3634,34 @@ impl AutoShadeApp {
                     );
                 });
                 explainer(ui, lang, tr(lang, "Applied by 「Export」 in the toolbar (Ctrl+Shift+E, or Ctrl+E) and by 「Render」 in the library. The ▾ beside Export delivers one file to a path you pick without touching the Destination."));
-                // --- SF8-A: hand the Lightroom sidecar over ----------------
-                // The XMP projection has always been written INSIDE the hashed
-                // develop folder, which is the right home for state — but the
-                // one thing users do with an XMP is give it to Lightroom, and
-                // Lightroom only looks for it beside the photo. That left the
-                // hand-off as "browse into %LOCALAPPDATA% yourself".
+                // --- The .xmp export (2026-11-18) --------------------------
+                // An .xmp is an external source: the app writes one only
+                // here, at the user's click, beside the photo where Lightroom
+                // reads it — built from the canvas at that moment.
                 ui.add_space(SPACE_LG);
-                let raw = self.can_export_xmp_beside();
+                let exportable = self.can_export_xmp_beside();
+                let is_raw = self.src_path.as_deref().is_some_and(autoshade::decode::is_raw);
                 let label = if self.xmp_beside_confirm {
                     tr(lang, "⚠ Overwrite the .xmp already there")
                 } else {
                     tr(lang, "Export .xmp beside the photo")
                 };
-                let hint = if !raw {
+                let hint = if !is_raw {
                     // The disabled REASON, not a repeat of the label: only a
-                    // camera RAW has the sidecar convention (store::
-                    // lightroom_sidecar and pipeline::write_xmp draw the same
-                    // line), so a baked PNG/TIFF's neighbouring .xmp belongs to
-                    // some other program and must not be written over.
+                    // camera RAW has the sidecar convention, so a baked
+                    // PNG/TIFF's neighbouring .xmp belongs to some other
+                    // program and must not be written over.
                     tr(lang, "RAW only — a baked PNG/TIFF has no Lightroom sidecar convention, so its neighbouring .xmp belongs to another program")
+                } else if !exportable {
+                    tr(lang, "This variant's look sits in an AI-generated image — an .xmp cannot carry it")
                 } else if self.xmp_beside_confirm {
                     tr(lang, "A .xmp already sits beside this photo (Lightroom's own, or an earlier copy) — clicking again replaces it")
                 } else {
-                    tr(lang, "Copy this photo's stored Lightroom/ACR sidecar into the photo's own folder, where Lightroom reads it. Save the develop first — this delivers what is stored, not what is unsaved on the canvas.")
+                    tr(lang, "Write this variant's current adjustments as an .xmp into the photo's own folder, where Lightroom reads it. Changes you have not saved are included.")
                 };
-                if action_row(ui, raw && !self.busy, label)
+                if action_row(ui, exportable && !self.busy, label)
                     .on_hover_text(hint)
+                    .on_disabled_hover_text(hint)
                     .clicked()
                 {
                     self.export_xmp_beside();

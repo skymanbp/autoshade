@@ -364,7 +364,7 @@ impl AutoShadeApp {
                         &abs_display(&shown),
                         Some(tr(
                             lang,
-                            "Where saved develops live: recipes, Lightroom XMP, version snapshots and mask rasters — one folder per photo, keyed by its absolute path. Override the location with the AUTOSHADE_DATA_DIR environment variable.",
+                            "Where saved develops live: recipes, saved versions and mask rasters — one folder per photo, keyed by its absolute path. Override the location with the AUTOSHADE_DATA_DIR environment variable.",
                         )),
                     );
                     // Enabled only when the folder EXISTS: an unsaved photo has no develop

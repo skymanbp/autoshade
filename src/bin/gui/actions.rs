@@ -3442,7 +3442,6 @@ impl AutoShadeApp {
         if save_quit {
             let mut failed: Option<String> = None;
             // Collected, not fatal — reported on the way out (see below).
-            let mut xmp_warns: Vec<String> = Vec::new();
             let mut clear_warns: Vec<String> = Vec::new();
             for PendingSave { photo: p, recipe: r, pixels: pix, strip } in &pending {
                 // ONE NoWait lock per photo across its whole persist compound
@@ -3471,9 +3470,9 @@ impl AutoShadeApp {
                             if self.src_path.as_deref() == Some(p.as_path()) {
                                 self.saved_strip = None;
                             }
-                            // Cleared, but not MARKED — same channel as the XMP
-                            // half: quitting silently would let a projection
-                            // copied beside the RAW undo this clear unannounced.
+                            // Cleared, but not RECORDED: quitting silently
+                            // would let an .xmp beside the photo be asked about
+                            // again with no word of why.
                             if let Some(w) = o.marker_warning {
                                 clear_warns.push(format!("{}: {w}", autoshade::pipeline::stem(p)));
                             }
@@ -3503,7 +3502,7 @@ impl AutoShadeApp {
                     let cal = autoshade::pipeline::photo_calibration(p);
                     autoshade::pipeline::stamp_fit_calibration(&mut disk, cal);
                 }
-                // The WRITER's rule (Ctrl+S, api_xmp): a stashed canvas whose
+                // The WRITER's rule (Ctrl+S, api_save): a stashed canvas whose
                 // open-time estimate failed still carries the washed pre-era
                 // curve — repaired before it is persisted. Memo-cheap when
                 // already repaired, and it also covers the generated arm
@@ -3516,22 +3515,6 @@ impl AutoShadeApp {
                 // then hid a mutation that IS on disk (the Ctrl+S rule: the
                 // disclosure travels with the mutation).
                 let relook_note = autoshade::pipeline::repair_pre_era_base_curve(p, &mut disk);
-                let generated = pix.as_ref().is_some_and(|(_, g)| *g);
-                // The projection is a member of the same generation
-                // (2026-09-13): written for a source develop, CLEARED for a
-                // generated entry. Skipping the write alone (the rule below)
-                // left a sidecar written for an earlier card standing — it
-                // outlived the card and the recipe it projected, and the
-                // open path restored it over the pristine generated pixels.
-                let (xmp_member, xmp_outcome) = match autoshade::pipeline::xmp_projection_member(
-                    p,
-                    &disk,
-                    !generated,
-                    autoshade::diag::stderr(),
-                ) {
-                    Ok((m, note, _)) => (m, Ok(note)),
-                    Err(e) => (autoshade::store::CommitMember::Keep, Err(e)),
-                };
                 // ONE single-generation commit per photo (the Ctrl+S rule,
                 // L03): recipe + baked-pixels link + strip record land whole
                 // or not at all — the background variants this dialog just
@@ -3556,7 +3539,9 @@ impl AutoShadeApp {
                             recipe: Some(recipe_bytes),
                             pixels,
                             variants,
-                            xmp: xmp_member,
+                            // No save writes an .xmp (2026-11-18); an older
+                            // build's projection retires with this generation.
+                            xmp: autoshade::store::CommitMember::Clear,
                         },
                     )?;
                     Ok(())
@@ -3585,36 +3570,6 @@ impl AutoShadeApp {
                         return Ok(());
                     }
                 }
-                // NO XMP for a generated entry: the look lives in baked
-                // pixels no parametric sidecar can reproduce, and writing one
-                // here overwrote a real Lightroom sidecar with a lie — the
-                // member above CLEARS the projection for such an entry in the
-                // same generation. The recipe + pixels pair alone restores
-                // faithfully.
-                //
-                // OUTSIDE the fatal result: the recipe write alone decides the
-                // saved state (cross-surface rule), so a failed XMP projection
-                // must not abort the remaining photos or refuse to quit over a
-                // develop that IS durably saved.
-                if autoshade::decode::is_raw(p) && !generated {
-                    // The M6a mask-loss list is dropped HERE for the same
-                    // reason as in the batch paste: `xmp_warns` renders under
-                    // one fixed "projection(s) failed" sentence, which a
-                    // lossy-but-successful projection is not. stderr carries
-                    // the per-photo line from the builder.
-                    match xmp_outcome {
-                        Ok(None) => {}
-                        // A regenerated (unmerged) sidecar loses LR-only
-                        // properties — Save-all's warning list is exactly
-                        // where that belongs (round-12 disclosure threading).
-                        Ok(Some(n)) => {
-                            xmp_warns.push(format!("{}: {n}", autoshade::pipeline::stem(p)));
-                        }
-                        Err(e) => {
-                            xmp_warns.push(format!("{}: {e}", autoshade::pipeline::stem(p)));
-                        }
-                    }
-                }
                         Ok(())
                     },
                 );
@@ -3637,33 +3592,18 @@ impl AutoShadeApp {
             // stderr keeps the full list for logs; the USER-facing copy is
             // below — an eprintln alone vanished with the closing window,
             // which is exactly the silence W3 exists to end.
-            if !xmp_warns.is_empty() {
-                eprintln!(
-                    "⚠ {} Lightroom XMP projection(s) failed for develop(s) that ARE saved: {}",
-                    xmp_warns.len(),
-                    xmp_warns.join("; ")
-                );
-            }
             if !clear_warns.is_empty() {
                 eprintln!(
-                    "⚠ {} clear(s) succeeded but could not be marked: {} — a sidecar \
-                     beside the RAW may restore those edits on the next open",
+                    "⚠ {} clear(s) succeeded but could not be recorded: {}",
                     clear_warns.len(),
                     clear_warns.join("; ")
                 );
             }
             let mut quit_warns: Vec<String> = Vec::new();
-            if !xmp_warns.is_empty() {
-                quit_warns.push(trf(
-                    lang,
-                    "{n} Lightroom XMP projection(s) failed (those develops ARE saved): {detail}",
-                    &[("n", &xmp_warns.len().to_string()), ("detail", &brief_list(&xmp_warns))],
-                ));
-            }
             if !clear_warns.is_empty() {
                 quit_warns.push(trf(
                     lang,
-                    "{n} clear(s) could not be marked: {detail} — a sidecar beside the RAW may restore those edits on the next open",
+                    "{n} clear(s) could not be recorded: {detail} — AutoShade may ask again about an .xmp beside those photos",
                     &[("n", &clear_warns.len().to_string()), ("detail", &brief_list(&clear_warns))],
                 ));
             }
@@ -4456,21 +4396,6 @@ impl AutoShadeApp {
                               // pixels, the ◭ card lands on them, and the
                               // link records them as the ▣ card's own Ctrl+S
                               // would (`inplace`, never `generated`).
-                              // The projection rides the same generation
-                              // (2026-09-13): a fit is a source develop, so
-                              // it always projects; a projection this build
-                              // cannot produce degrades to Keep + the
-                              // XmpFailed note, the recipe still landing.
-                              let (xmp_member, xmp_outcome) =
-                                  match autoshade::pipeline::xmp_projection_member(
-                                      p,
-                                      &rep.recipe,
-                                      true,
-                                      autoshade::diag::stderr(),
-                                  ) {
-                                      Ok((m, note, _)) => (m, Ok(note)),
-                                      Err(e) => (autoshade::store::CommitMember::Keep, Err(e)),
-                                  };
                               let commit_res: anyhow::Result<()> = (|| {
                                   autoshade::store::commit_develop(
                                       p,
@@ -4503,7 +4428,9 @@ impl AutoShadeApp {
                                               p,
                                               autoshade::store::ActiveWrite::Kind("fitted"),
                                           )?,
-                                          xmp: xmp_member,
+                                          // A fit lands as a develop, never
+                                          // as an .xmp (2026-11-18).
+                                          xmp: autoshade::store::CommitMember::Clear,
                                       },
                                   )?;
                                   Ok(())
@@ -4519,35 +4446,6 @@ impl AutoShadeApp {
                               }
                               Ok(()) => {
                                 persisted = true;
-                                if autoshade::decode::is_raw(p) {
-                                    // The recipe write ALONE decides the saved
-                                    // state (same rule as Ctrl+S / Analyze):
-                                    // an XMP failure must not collapse an
-                                    // already-persisted fit into an error —
-                                    // reopening WOULD restore it, so the UI
-                                    // must agree that it saved.
-                                    // The M6a list is dropped HERE: the zoned
-                                    // fit's own rationale already states that
-                                    // its corrections are bitmap masks the
-                                    // Lightroom sidecar cannot carry (the
-                                    // ZONE_ATTACHED note), so a second copy
-                                    // would say it twice for the same masks.
-                                    match xmp_outcome {
-                                        Ok(merge_note) => {
-                                            status.push(FitNote::XmpWritten(
-                                                autoshade::pipeline::xmp_target(p),
-                                            ));
-                                            // Regenerated-not-merged: same
-                                            // disclosure as Ctrl+S.
-                                            if let Some(m) = merge_note {
-                                                status.push(FitNote::XmpMergeNote(m));
-                                            }
-                                        }
-                                        Err(e) => {
-                                            status.push(FitNote::XmpFailed(e.to_string()));
-                                        }
-                                    }
-                                }
                                 if let Some(n) = backed {
                                     status.push(FitNote::BackedUpAs(*n));
                                 }

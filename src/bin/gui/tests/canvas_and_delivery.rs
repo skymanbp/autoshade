@@ -424,10 +424,11 @@
         );
     }
 
-    /// R22-8 / SF8-A: the two-click confirm. A sidecar already beside the photo
+    /// R22-8 / SF8-A: the two-click confirm. An .xmp already beside the photo
     /// (Lightroom's own) ARMS the button instead of being overwritten; the
-    /// second click replaces it and disarms. Runs against the real develop store
-    /// for a temp fixture photo, like every other store-touching GUI test.
+    /// second click replaces it with the canvas's adjustments and disarms.
+    /// Runs against the real develop store for a temp fixture photo, like
+    /// every other store-touching GUI test.
     #[test]
     fn handing_the_sidecar_to_lightroom_never_overwrites_in_silence() {
         let dir = std::env::temp_dir()
@@ -438,17 +439,25 @@
         std::fs::write(&raw, b"raw").unwrap();
         let dev = autoshade::store::develop_dir(&raw);
         let _ = std::fs::remove_dir_all(&dev);
-        std::fs::create_dir_all(&dev).unwrap();
-        std::fs::write(autoshade::store::xmp_target(&raw), b"<x:xmpmeta>ours</x:xmpmeta>").unwrap();
         let beside = raw.with_extension("xmp");
+        let in_file = |p: &std::path::Path| {
+            let r = autoshade::xmp::xmp_to_recipe(&std::fs::read_to_string(p).unwrap());
+            (r.contrast, r.saturation)
+        };
 
-        let mut app = AutoShadeApp { src_path: Some(raw.clone()), ..Default::default() };
-        assert!(app.can_export_xmp_beside(), "a RAW can hand its sidecar over");
+        // The canvas holds an adjustment that was never saved: the export is
+        // built from it at the click, not from anything in the store.
+        let mut app = AutoShadeApp {
+            src_path: Some(raw.clone()),
+            recipe: EditRecipe { contrast: 7.0, ..Default::default() },
+            ..Default::default()
+        };
+        assert!(app.can_export_xmp_beside(), "a RAW's adjustments can go out as an .xmp");
 
-        // First delivery: nothing in the way, so it lands with no confirmation.
+        // First export: nothing in the way, so it lands with no confirmation.
         app.export_xmp_beside();
-        assert!(!app.xmp_beside_confirm, "an unobstructed hand-off needs no confirm");
-        assert_eq!(std::fs::read(&beside).unwrap(), b"<x:xmpmeta>ours</x:xmpmeta>");
+        assert!(!app.xmp_beside_confirm, "an unobstructed export needs no confirm");
+        assert_eq!(in_file(&beside), (7.0, 0.0), "the canvas is in the file");
         assert!(
             app.status.contains(&abs_display(&beside)),
             "the status names where it landed: {}",
@@ -456,13 +465,14 @@
         );
 
         // Lightroom's own file appears there. One click must ARM, not write.
-        std::fs::write(&beside, b"<x:xmpmeta>LIGHTROOM</x:xmpmeta>").unwrap();
+        let theirs = autoshade::xmp::recipe_to_xmp(&EditRecipe { saturation: 40.0, ..Default::default() });
+        std::fs::write(&beside, &theirs).unwrap();
         app.export_xmp_beside();
         assert!(app.xmp_beside_confirm, "the armed state is the confirmation");
         assert_eq!(
-            std::fs::read(&beside).unwrap(),
-            b"<x:xmpmeta>LIGHTROOM</x:xmpmeta>",
-            "the first click left their sidecar untouched"
+            std::fs::read_to_string(&beside).unwrap(),
+            theirs,
+            "the first click left their file untouched"
         );
         assert!(
             app.toasts.iter().any(|t| matches!(t.kind, ToastKind::Error)),
@@ -472,7 +482,7 @@
         // Second click: armed ⇒ overwrite, then disarm.
         app.export_xmp_beside();
         assert!(!app.xmp_beside_confirm, "the arm is spent");
-        assert_eq!(std::fs::read(&beside).unwrap(), b"<x:xmpmeta>ours</x:xmpmeta>");
+        assert_eq!(in_file(&beside), (7.0, 0.0), "the canvas's adjustments replaced theirs");
 
         // A non-RAW cannot: its neighbouring .xmp is another program's file.
         let baked = dir.join("_r22_handoff.png");

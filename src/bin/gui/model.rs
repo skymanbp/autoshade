@@ -685,10 +685,7 @@ pub(crate) enum OutName {
 /// the landing must keep routing that through the error channel.
 pub(crate) struct PasteOutcome {
     pub(crate) ok: usize,
-    pub(crate) xmp: usize,
     pub(crate) errs: Vec<String>,
-    pub(crate) xmp_fails: Vec<String>,
-    pub(crate) xmp_notes: Vec<String>,
     /// The photos whose recipe the paste wrote — the landing drops their
     /// navigation stash, which the written look replaced.
     pub(crate) written: Vec<PathBuf>,
@@ -920,12 +917,6 @@ pub(crate) enum FitNote {
     MaskRefinement { kept: usize, abstained: usize },
     /// `commit_develop` failed — the fit stays on the canvas unsaved.
     NotPersistedCommit(String),
-    /// The Lightroom XMP sidecar landed at this path.
-    XmpWritten(std::path::PathBuf),
-    /// write_xmp's regenerated-not-merged disclosure (library English).
-    XmpMergeNote(String),
-    /// recipe.json persisted but the XMP write failed.
-    XmpFailed(String),
     /// The previous explicit save was snapshotted as v{n} first.
     BackedUpAs(u32),
     /// The backup gate refused — nothing was written.

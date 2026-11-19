@@ -796,11 +796,11 @@
         assert_eq!(app.variants[0].recipe.contrast, 4.0, "the ▣ card keeps its own develop");
     }
 
-    /// Ctrl+S publishes the Lightroom projection in the recipe's own
-    /// generation — a projection standing from an earlier develop is
-    /// replaced by the commit, not by a write that runs after it.
+    /// Ctrl+S writes no .xmp, and the projection an earlier build kept in the
+    /// develop folder is retired in the recipe's own generation — by the
+    /// commit, not by a delete that runs after it.
     #[test]
-    fn ctrl_s_publishes_the_projection_in_the_recipes_generation() {
+    fn ctrl_s_retires_an_older_builds_projection_in_the_recipes_generation() {
         let src = std::path::Path::new("D:/library/_gui_ctrl_s_projection.ARW"); // never touched
         let dev = autoshade::store::develop_dir(src);
         let _ = std::fs::remove_dir_all(&dev);
@@ -819,10 +819,8 @@
         };
         app.save_xmp();
         assert!(autoshade::store::recipe_target(src).exists(), "{}", app.status);
-        let back = autoshade::xmp::xmp_to_recipe(&std::fs::read_to_string(&xp).unwrap());
-        assert_eq!(back.contrast, 7.0, "the projection is this generation's");
-        assert_eq!(back.saturation, 0.0, "…and the stale one is gone");
-        assert!(app.status.starts_with("XMP + recipe saved"), "{}", app.status);
+        assert!(!xp.exists(), "the older build's projection is retired, and none is written");
+        assert_eq!(app.status, "develop saved");
         assert!(!dev.join(".commit").exists(), "the stage is consumed");
     }
 

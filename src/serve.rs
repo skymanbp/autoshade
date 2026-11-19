@@ -2590,12 +2590,18 @@ fn api_save(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
                 // Said, never swallowed: the store copies ARE gone, but
                 // without the marker an .xmp beside the RAW that predates the
                 // clear may be offered again.
-                let note = match &outcome.marker_warning {
-                    Some(w) => format!(" - but the clear could not be recorded ({w})"),
-                    None => String::new(),
+                let text = match (&outcome.marker_warning, outcome.removed) {
+                    (Some(w), _) => format!(
+                        "cleared — saved edits removed - but the clear could not be recorded ({w})"
+                    ),
+                    (None, true) => "cleared — saved edits removed".to_string(),
+                    // Nothing was stored, so nothing was cleared and the
+                    // store wrote nothing: the reply says what is true, in
+                    // the desktop app's own words for the same moment.
+                    (None, false) => "nothing to save — this photo has no adjustments".to_string(),
                 };
                 Ok(with_revision(
-                    text_response(&format!("cleared — saved edits removed{note}")),
+                    text_response(&text),
                     crate::store::recipe_revision(&raw).as_deref(),
                 ))
             }
@@ -4079,6 +4085,51 @@ mod tests {
         assert!(crate::store::recipe_target(&raw).exists(), "the develop landed");
         assert!(!crate::store::xmp_target(&raw).exists(), "no .xmp in the store");
         assert!(!raw.with_extension("xmp").exists(), "none beside the photo");
+
+        let _ = std::fs::remove_dir_all(&dev);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A neutral web Save of a photo with nothing stored says so — "nothing
+    /// to save" — and writes nothing; the "cleared" sentence is kept for a
+    /// clear that did remove a saved develop.
+    ///
+    /// MUTATION: answer "cleared — saved edits removed" whatever
+    /// `ClearOutcome::removed` says, and the first sentence assertion fails.
+    #[test]
+    fn a_neutral_web_save_with_nothing_stored_says_nothing_to_save() {
+        let (dir, raw, state) = one_photo_state("neutral-nothing", "_serve_neutral.arw");
+        let dev = crate::store::develop_dir(&raw);
+        let save = |recipe: serde_json::Value| {
+            let body = serde_json::json!({ "id": 0, "recipe": recipe }).to_string();
+            let mut raw_http = format!(
+                "POST /api/save HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\
+                 X-AutoShade-Gen: 0\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            )
+            .into_bytes();
+            raw_http.extend_from_slice(body.as_bytes());
+            let (_s, mut request, client) = loopback_request(raw_http);
+            let resp = api_save(&mut request, &state).unwrap();
+            let code = resp.status_code().0;
+            let text = String::from_utf8(body_of(resp)).unwrap();
+            drop(request);
+            client.join().unwrap();
+            (code, text)
+        };
+
+        let (code, text) = save(serde_json::json!({}));
+        assert_eq!(code, 200);
+        assert_eq!(text, "nothing to save — this photo has no adjustments");
+        assert!(!crate::store::recipe_target(&raw).exists());
+        assert!(!dev.join("cleared.txt").exists(), "a clear of nothing leaves no stamp");
+
+        let (_, text) = save(serde_json::json!({ "exposure_ev": 0.4 }));
+        assert!(text.starts_with("develop saved"), "{text}");
+        let (code, text) = save(serde_json::json!({}));
+        assert_eq!(code, 200);
+        assert!(text.starts_with("cleared — saved edits removed"), "{text}");
+        assert!(!crate::store::recipe_target(&raw).exists(), "the saved develop is gone");
 
         let _ = std::fs::remove_dir_all(&dev);
         let _ = std::fs::remove_dir_all(&dir);

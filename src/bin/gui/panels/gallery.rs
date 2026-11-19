@@ -151,7 +151,7 @@ impl AutoShadeApp {
             }
             let ready = self.copied.is_some() && n > 0;
             let paste = action_in(ui, cell, ready && !self.busy, paste)
-                .on_hover_text(tr(lang, "Writes each photo's develop into your develop store (recipe JSON; RAW also gets a Lightroom XMP). Leaves library files untouched, renders nothing."));
+                .on_hover_text(tr(lang, "Writes each photo's develop into your develop store. Leaves library files untouched, renders nothing."));
             let paste = if ready {
                 paste
             } else {
