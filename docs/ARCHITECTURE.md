@@ -3372,12 +3372,14 @@ The recipe written as an ACR/Lightroom `.xmp` sidecar (`crs:` keys like
 edit appears as fully-adjustable sliders in Lightroom — the "AI does 90%, I
 nudge the last 10%" workflow.
 
-Since v0.13.0 AutoShade does **not** write it next to the photo: the source
-library is read-only, so the projection lands in the per-user develop store
-(`<AUTOSHADE_DATA_DIR | %LOCALAPPDATA%/autoshade |
+An .xmp is an EXTERNAL source: AutoShade reads one only when the user asks
+(an import) and writes one only when the user asks (an export). Nothing is
+ever written next to the photo by a save — the source library is read-only —
+and a save writes no .xmp anywhere. The develop lives in the per-user develop
+store (`<AUTOSHADE_DATA_DIR | %LOCALAPPDATA%/autoshade |
 $HOME/Library/Application Support/AutoShade | $XDG_DATA_HOME/autoshade |
 $HOME/.local/share/autoshade>/develops/<stem>-<hash of the absolute
-path>/<stem>.xmp` — see `store::store_root_with_trust`, and the trust bullet in
+path>/` — see `store::store_root_with_trust`, and the trust bullet in
 §3 for why the shared-temp last resort is labelled rather than
 trusted; and `store::adopt_pre_rename_root` for the one-time adoption of a
 pre-rename `autoshop` store — a single same-volume `rename`, never a copy,
@@ -3385,8 +3387,8 @@ because a copy that dies half-way through gigabytes of mask rasters leaves two
 divergent stores with no way to tell which is real. Both names present means
 the current one is used and the old one is left untouched: merging two stores
 decides which of two develops of the same photo the user meant to keep. A
-failed rename keeps the OLD folder in use, so the edits stay reachable),
-alongside `recipe.json` (the authoritative develop
+failed rename keeps the OLD folder in use, so the edits stay reachable):
+`recipe.json` (the authoritative develop
 state), version snapshots (a deleted snapshot registers its number + content
 fingerprints in the develop's permanent `.deleted-versions.json`: the number
 is never re-issued and the backup gate stops auto-preserving the discarded
@@ -3515,38 +3517,47 @@ one: the two halves live in different files under deliberately different
 lifecycle rules (`variants.json` is a generation member a develop clear
 sweeps; the `v<n>` family is kept). A live editor's in-memory strip outranks
 the variant half, so the GUI consumes the version half and keeps rendering its
-own cards; for every non-GUI surface this IS the list. Copy the XMP beside the RAW when
-you want Lightroom to pick it up. A Lightroom sidecar that already sits beside
-the RAW is READ on open — the newer intent wins — and never overwritten.
+own cards; for every non-GUI surface this IS the list.
 
-**The projection is a commit member, and a present `recipe.json` ends the
-read.** `<stem>.xmp` in the store is DERIVED from `recipe.json` — it is what
-the recipe looks like in Lightroom's vocabulary, and it can only ever be
-stale, never newer. Until 2026-09-13 it was nevertheless written by a
-separate call after each commit, and two writers did not keep it truthful:
-the quit dialog's Save-all skipped the call for a generated card without
-retiring the file, and the Analyze landing published one even over a card
-whose pixels are AI-generated. Every reader then fell through a *neutral*
-`recipe.json` into that file, as if a neutral recipe were an absent one. The
-measured case: a 「◭ Reverse-fit」 card was deleted, its +90-saturation
+**An .xmp beside the photo is asked about, never adopted.** Opening a photo
+restores exactly what this app saved. `store::external_xmp` reports an .xmp
+beside the RAW (or, with nothing beside it and nothing saved, the packet baked
+into the RAW) that holds adjustments, is NEWER than every file this app wrote
+about the photo — the recipe, an older build's projection, the legacy pair,
+the explicit-clear markers — and has not been answered; the surface then asks
+whether to read it. It is side-effect free (no lock, the silent reader that
+never places a payload's rasters), so looking cannot create or change a develop
+dir. The answer — read, declined, or a file this app's own export wrote
+(`store::deliver_xmp_beside`) — is recorded by content tag
+(`store::xmp_tag`) in `external-xmp.answered`, so each version of the file is
+asked about once. That stamp is not a develop: `has_develop` (the badge, the web
+list, the CLI batch filter) ignores it, and a clear keeps it. An older build's
+export, copied beside the RAW with no stamp, is recognised by its bytes. The
+import (`pipeline::import_xmp`) is the disclosing read plus the steps an
+adopting open used to take — the import's start, the sidecar-aware lens
+profile, the as-shot anchor; the export (`pipeline::export_xmp_beside`, or the
+CLI's `export-xmp -o` through `pipeline::write_xmp_at`) builds the file at the
+moment it is asked for, merged over the file it replaces
+(`pipeline::xmp_export_bytes`), and is refused for a develop on AI-generated
+pixels or a non-RAW (`pipeline::xmp_export_refusal`).
+
+**Every recipe commit retires the projection, and a present `recipe.json`
+ends the read.** `<stem>.xmp` in the store is the Lightroom projection earlier
+builds wrote beside `recipe.json` on every save. It is DERIVED from the recipe
+and can only ever be stale, never newer, so no save writes one any more and
+the commit that writes a recipe retires it in the same single-generation
+commit (`store::commit_develop`, the projection staged as `projection.xmp` in
+the `.commit/` generation and replayed by `resolve_pending_commit_unlocked`;
+an older manifest without the member replays as `Keep`, and an older build's
+crashed stage that still carries one lands beside its recipe, is never read,
+and goes with the next commit). The CLI `analyze` / `auto` / `match`, the
+batch (`pipeline::write_recipe`), the web save and the web Analyze
+(`pipeline::commit_analyzed_develop`) commit with the projection cleared. The
+rule that a stale projection never answers comes from a measured case
+(2026-09-13): a 「◭ Reverse-fit」 card was deleted, its +90-saturation
 projection stayed, and the pristine 「✨ AI generated」 card that remained
-reopened cooked in the deleted card's grade with no user action. Two rules
-close both halves: (1) `DevelopCommit.xmp` is the commit's fourth member —
-`pipeline::xmp_projection_member` produces `Write(bytes)` for a source
-develop of a RAW (merged over a Lightroom sidecar beside the RAW when one
-exists, else over the previous projection, exactly what `write_xmp`
-publishes), `Clear` for a develop that sits on AI-generated pixels or on a
-baked image, and `Keep` only when the writer learned nothing (a failed
-projection keeps the previous file rather than publishing a half-truth) —
-staged as `projection.xmp` in the same `.commit/` generation, named in the
-manifest (an older manifest without the member replays as `Keep`), landed
-after the three JSON members and replayed by `resolve_pending_commit_unlocked`, so the
-file cannot outlive the recipe it projects; every surface that commits a
-develop (GUI Ctrl+S, quit-time Save-all, the Analyze landing, the paste
-worker, the reverse-fit worker, the CLI `match`, the web save, and since
-2026-10-26 the CLI `analyze` / `auto` and the web Analyze through
-`pipeline::commit_analyzed_develop` — they used to write the recipe and the
-projection separately, and projected over AI pixels) hands the member over. (2) The four readers — the GUI open path
+reopened cooked in the deleted card's grade with no user action. The four
+readers — the GUI open path
 (`persist::read_saved_develop_locked`), the web `api_recipe`, the GUI batch
 resolver and `store::read_develop_snapshot` — consult the projection only
 when the develop has NO `recipe.json`: a neutral recipe is a saved fact (the
@@ -3924,12 +3935,12 @@ the result a re-derivation (see 「AI masks are a RECOMPUTATION」 above). With 
 **Every front-end hears it, the CLI included (R27).** `xmp::import_losses` →
 `xmp::describe_import_losses` is the one producer; the GUI localises it into the
 open banner (`bin/gui/export.rs`, `bin/gui/persist.rs`), and the CLI prints the
-English sentence on stderr beside its `xmp -> …` line
-(`main::lightroom_import_note`, from `analyze` / `auto` / `match`). Until R27
-that producer had GUI callers only, so a headless run over a photo whose sidecar
-held a brush mask said nothing at all about it. `batch` is deliberately silent:
-its work list is filtered by `store::has_develop_or_sidecar`, so a photo that has
-a Lightroom sidecar never enters it. `eval.rs` stays narrower on purpose — it
+English sentence on stderr when `apply` imports an .xmp the user named
+(`main::xmp_import_note`). Until R27 that producer had GUI callers only, so a
+headless run over a photo whose sidecar held a brush mask said nothing at all
+about it. `analyze` / `auto` / `match` / `batch` import nothing, so they say
+nothing: an .xmp beside the photo is not read by them, and `batch`'s work list
+is filtered by `store::has_develop` alone. `eval.rs` stays narrower on purpose — it
 counts `unsupported_corrections`, i.e. DROPS only, because its ruler needs
 「imported + refused」 to equal the size of the user's local work.
 
@@ -3986,17 +3997,16 @@ the writer's own, produced by the ONE loop that emits the mask block (so the cla
 cannot drift from the file) and handed back with the document itself —
 `xmp::recipe_to_xmp_with_losses` / `MergeOutcome::losses`, one pass per save;
 `xmp::mask_export_losses` is the same list for a surface that only wants the
-disclosure and writes nothing. It rides `pipeline::write_xmp`'s return value to
-every surface: the web reply carries it in the note it already had, and stderr
-gets one line from `write_xmp_doc` for the CLI. The GUI says it at ONE moment
-only — **Export .xmp beside the photo** (`export_xmp_beside`), the click that
-hands the file to Lightroom — and not on Save or an Analyze landing, which
-write the projection without being asked for a Lightroom file (the owner's
-ruling of 2026-11-17: an independent program does not warn about Lightroom
-unasked). That click re-runs the save's projection on the saved develop
-(`pipeline::xmp_projection_bytes`, bytes discarded) for the writer's own mask
-verdicts, so nothing is carried over from the save and a photo saved in an
-earlier session gets the same sentence; `gui::util::xmp_loss_interrupts`
+disclosure and writes nothing. It rides `pipeline::xmp_export_bytes`'s return
+value to every export: stderr gets one line from `build_xmp_doc` for the CLI's
+`export-xmp`, and the web's export download carries the lines in an
+`X-Export-Warning` header. The GUI says it at ONE moment only — **Export .xmp
+beside the photo** (`export_xmp_beside`), the click that hands the file to
+Lightroom — and never on Save or an Analyze landing, which write no .xmp (the
+owner's ruling of 2026-11-17: an independent program does not warn about
+Lightroom unasked). The verdicts are the export's own, from the very document
+it delivers, so a photo saved in an earlier session gets the same sentence;
+`gui::util::xmp_loss_interrupts`
 decides between a toast plus ⚠ and the quiet status note. `recipe.json`
 remains the lossless sidecar, which is what the disclosure says. Since v0.30.0 the GUI's line NAMES the masks
 rather than counting them (the CLI's has since M6a; 「which of my twelve?」 was
@@ -4425,7 +4435,7 @@ an unknown recipe field — is disclosed and the crs reading stands alone.
 
 Why W is the record (v1.17.1): a merge keeps every key of its base this
 writer does not own — the camera profile, the creative Look and the
-lens-profile switch of the Lightroom sidecar beside the RAW (since v1.18.0
+lens-profile switch of the Lightroom file an export replaces (since v1.18.0
 the writer states `LensProfileEnable` itself whenever the develop carries a
 lens profile, `EditRecipe::lightroom_lens_profile_enable`) — and the bare
 projection never had them, so on AutoShade's own unedited sidecar every
@@ -4550,9 +4560,10 @@ another's edit on a case-sensitive volume. Listings are memoised per folder, so
 a 2,000-photograph library pays one `read_dir` per folder rather than per
 photograph. The module is READ-ONLY by contract — nothing is ever written to a
 path it returns — which is why the develop chain's own beside-the-RAW sites that
-are also a WRITE target (`store::xmp_beside_target`, and the restore ranking
-around it) deliberately stay on the old spelling; `pipeline::write_xmp`'s merge
-base, which only reads, moved with the note that discloses it. The build now
+are also a WRITE target (`store::xmp_beside_target`, and `store::external_xmp`,
+which must recognise this app's own export under the very name it was written
+to) deliberately stay on the old spelling. An export's merge base is the file
+it replaces, so it needs no pairing of its own. The build now
 also discloses the RAWs it could not pair (count, first ten stems), so "you
 pointed me at the wrong folder" no longer reads as "you have edited 40
 photographs".
@@ -8282,25 +8293,22 @@ the user's own browser*, and the guarantees are:
   the user's library. The strings mattered on their own: an upstream HTTP error
   body reaches `rationale` verbatim, so a merely broken endpoint could write
   megabytes into `recipe.json` and into the XMP.
-- **Clamping never decides a deletion.** `POST /api/xmp` treats a neutral
+- **Clamping never decides a deletion.** `POST /api/save` treats a neutral
   recipe as "clear my edits" and unlinks the develop, so that branch is decided
   on the recipe **as sent**, before clamping. Clamp drops whole components
   (a zero-area crop becomes `None`), so a body carrying only a degenerate crop
   clamped to exactly `EditRecipe::default()` and deleted saved work that the
   same request would have *saved* before the clamp was added.
 - **Two tabs cannot silently destroy each other's saves.** `GET /api/recipe`
-  answers with an `ETag` naming the saved *develop* (`store::develop_revision`):
+  answers with an `ETag` naming the saved *develop* (`store::recipe_revision`):
   the recipe.json bytes (`"none"` when no save exists — absence is a real
-  revision, so two tabs racing the *first* save still collide), **with the
-  Lightroom sidecar's content hash folded in whenever that sidecar currently
-  out-ranks the store** — it is then the very body the GET serves, and tagging
-  only the store file let a stale tab pass the precondition while the sidecar
-  its answer came from had changed (round-12 L04-4). `POST /api/xmp` honours
+  revision, so two tabs racing the *first* save still collide). No file beside
+  the RAW ever answers the GET, so none joins the tag. `POST /api/save` honours
   `If-Match` against the same tag: a stale one gets **412** and writes nothing
   — the clear branch included, since a clear destroys a lost update just as
   surely. The bundled client always sends the tag it loaded and adopts the one
   each save/analyze answers with (the save reply computes its tag *after* the
-  projection write, so the adopted tag describes the compared state); a
+  commit, so the adopted tag describes the compared state); a
   request without the header (curl, the CLI, older pages) stays unconditional.
   pixels.json and mask rasters stay outside the tag by design.
 - **Bounded concurrency, released on unwind.** Eight request slots, each held

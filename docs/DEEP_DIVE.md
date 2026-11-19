@@ -391,10 +391,10 @@ and pan it at [autoshade.dev/architecture.html](https://autoshade.dev/architectu
   histogram; the advisor in [`src/advisor/`](../src/advisor/) turns those into an
   `EditRecipe` ([`src/recipe.rs`](../src/recipe.rs)), which a verifier checks
   from recipe, EXIF, histogram and clipping data — never pixels.
-- [`src/render/`](../src/render/) applies it; the image, the recipe and a
-  Lightroom-readable sidecar ([`src/xmp.rs`](../src/xmp.rs)) go to the per-user
-  develop store, and local masks, style retrieval, reverse-fit and the
-  generative tools hang off that path unchanged.
+- [`src/render/`](../src/render/) applies it; the recipe goes to the per-user
+  develop store, a Lightroom-readable .xmp ([`src/xmp.rs`](../src/xmp.rs)) is
+  written only when the user exports one, and local masks, style retrieval,
+  reverse-fit and the generative tools hang off that path unchanged.
 - `EditRecipe` is the **only** channel between the AI and the pixels: strict
   `json_schema`, every control bounded and clamped on entry, missing fields
   defaulted so older recipes stay readable, one struct behind GUI, CLI, web
@@ -436,8 +436,8 @@ the tests [`scripts/check_docs.py`](../scripts/check_docs.py) re-derives.
 - **Measured, not assumed** — every rendering law is written down with its
   constants and held by a test; release claims are re-derived by a script.
 - **Non-destructive, interoperable, local first** — the source library stays
-  read-only, develops live in a per-user store, and sidecars are merged so a
-  Lightroom catalogue survives.
+  read-only, develops live in a per-user store, and an exported .xmp is
+  merged into Lightroom's own so a Lightroom catalogue survives.
 - **Eight local sidecars** — segmentation, two denoisers (one on the RAW sensor
   mosaic, one on baked pixels), correspondence, look descriptions, style
   embeddings, depth for the lens blur and the face finder run on the machine; pixels leave it only for an AI operation you

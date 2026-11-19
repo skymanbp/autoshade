@@ -1589,14 +1589,14 @@ read an explicit operation at the call site. On write, AutoShade replaces the
 fields it owns and merges the edited tree back into the original document so
 unknown namespaces, attributes, and unmodeled corrections survive.
 
-Ordinary Save writes the projection into the per-user develop store — as one
-member of the develop's single-generation commit, so a develop whose pixels
-are AI-generated retires the file instead of leaving a stale one behind — and
-never modifies the photographer's source library. “Export sidecar beside RAW”
-is a separate explicit action; an adjacent Lightroom XMP can be read as the
-newer merge base but is not overwritten by ordinary Save. On open, a present
-`recipe.json` is the develop; the store's projection is consulted only when
-there is none. Mask parsing carries
+An .xmp is an external source: Save writes none, and every recipe commit
+retires the projection earlier builds kept in the develop store. Import and
+export are explicit. An .xmp beside the photo is never adopted on open — the
+desktop app asks once per version of the file whether to read it, and the
+answer is remembered — and the export writes one beside the RAW only when the
+user asks, merged over the file it replaces. On open, a present `recipe.json`
+is the develop; an older build's projection is consulted only when there is
+none. Mask parsing carries
 unsupported semantics with named disclosures and imports `MaskBrushTable`
 through the strict binary path described above.
 

@@ -71,7 +71,7 @@ An editable, Lightroom-ready recipe instead of AI pixels.
 <td valign="top">
 
 **🔁 Round-trips through Lightroom**<br />
-<sub>Sidecar XMP is merged byte for byte; the full develop survives a Lightroom rewrite and reopens exactly.</sub>
+<sub>An exported .xmp is merged byte for byte into Lightroom's own; the full develop survives a Lightroom rewrite and imports back exactly.</sub>
 
 </td>
 </tr>
