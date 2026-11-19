@@ -1445,6 +1445,66 @@ impl AutoShadeApp {
         changed
     }
 
+    /// The base-negative invariant applied to a strip that arrived from disk
+    /// or from the stash (2026-11-18): a strip has at most ONE base negative
+    /// ([`crate::model::base_negative_index`]). Until this date the open
+    /// landing re-derived the ACTIVE card's kind instead of restoring it, so a
+    /// ◈ / ▦ card — or any card whose master did not load — came back as
+    /// 「▣ Original」 and the next save wrote `"original"` under the card's
+    /// minted id. Those records are on users' disks. Every Original-kind card
+    /// other than the base is a card whose word was lost, and one pass sorts
+    /// each into one of three cases:
+    ///
+    /// (a) its master's own file name says what made it (a denoise or a stack
+    ///     master — [`crate::model::kind_named_by_master`]): the word comes
+    ///     back; id, name, develop and master are untouched;
+    /// (b) no master, no name and no develop of its own (neutral, or the
+    ///     base's): an empty duplicate of the base — removed. Nothing is lost
+    ///     by construction: it holds no pixels, no name and no edit the base
+    ///     does not hold. If it was the active card, the base becomes active;
+    /// (c) anything else stays as it is — and the strip's ✕ offers it, since
+    ///     the guard asks "is this the base?", not "is this Original-kind?".
+    ///
+    /// Same contract as [`Self::normalize_ai_cards`], beside which it runs:
+    /// the door does not write (the repair is unsaved work, Ctrl+S persists
+    /// it) and the caller says once, by toast, what changed. Idempotent: after
+    /// one pass every extra Original-kind card is a (c).
+    pub(crate) fn repair_lost_card_kinds(&mut self) -> LostKindRepair {
+        let mut repair = LostKindRepair::default();
+        let Some(mut base) = crate::model::base_negative_index(&self.variants) else { return repair };
+        let base_recipe = self.variants[base].recipe.clone();
+        let mut i = 0;
+        while i < self.variants.len() {
+            let v = &self.variants[i];
+            if i == base || v.kind != VariantKind::Original {
+                i += 1;
+                continue;
+            }
+            if let Some(kind) = v.origin.as_deref().and_then(crate::model::kind_named_by_master) {
+                self.variants[i].kind = kind;
+                repair.restored.push(kind);
+            } else if v.origin.is_none()
+                && v.name.is_none()
+                && (v.recipe.is_noop() || !dirty_vs(&v.recipe, &base_recipe))
+            {
+                self.variants.remove(i);
+                repair.removed += 1;
+                if base > i {
+                    base -= 1;
+                }
+                if self.active == i {
+                    repair.active_removed = true;
+                    self.active = base;
+                } else if self.active > i {
+                    self.active -= 1;
+                }
+                continue; // `i` now names the card after the removed one
+            }
+            i += 1;
+        }
+        repair
+    }
+
     /// How card `idx` names itself in a sentence: the user's own name when
     /// it has one, else its localized kind label. Owned, so callers can hand
     /// it to `trf` while `self` is borrowed mutably.
@@ -1459,9 +1519,12 @@ impl AutoShadeApp {
     /// strip has none. Not a hypothetical: a cold restore whose record named
     /// a `fitted` active card and listed no Original entry rebuilds exactly
     /// that, so every caller must say something honest instead of assuming
-    /// card 0 is the negative.
+    /// card 0 is the negative. The BASE negative, not merely the first
+    /// Original-kind card: a strip that kept a card whose word was lost has
+    /// two, and only one of them is the negative
+    /// ([`crate::model::base_negative_index`]).
     pub(crate) fn original_index(&self) -> Option<usize> {
-        self.variants.iter().position(|v| v.kind == VariantKind::Original)
+        crate::model::base_negative_index(&self.variants)
     }
 
     /// The baked master the photo's NEGATIVE carries, if any. Every consumer
@@ -1964,7 +2027,7 @@ impl AutoShadeApp {
         if self.active_variant().is_some_and(|v| v.kind == VariantKind::Generated) {
             let t = tr(
                 lang,
-                "A pristine ✨ AI generated card has no develop to snapshot — move a slider to start an ✎ Edited AI image card, or run 「Reverse-fit」",
+                "A pristine ✨ AI generated card has no adjustments to save as a version — move a slider to start an ✎ Edited AI image card, or run 「Reverse-fit」",
             );
             self.status = t.into();
             self.toast(ToastKind::Error, t);
@@ -2190,7 +2253,7 @@ impl AutoShadeApp {
                         ToastKind::Success,
                         tr(
                             lang,
-                            "this snapshot was taken on a generated variant, whose look lives in its pixels — the photo's own camera base look was applied so it renders on the negative",
+                            "this version was saved on a generated variant, whose look lives in its pixels — the photo's own camera base look was applied so it renders on the negative",
                         )
                         .to_string(),
                     );

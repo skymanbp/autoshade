@@ -155,9 +155,10 @@ pub(crate) fn adopt_pre_rename_root(
 }
 
 /// Per-user store root and its trust label. Resolution order:
-/// `AUTOSHADE_DATA_DIR` (env override for tests / portable setups) → the
-/// platform's own per-account data directory → `<temp>/autoshade`. Absolute, so
-/// keys and targets never depend on the process cwd.
+/// `AUTOSHADE_DATA_DIR` (env override for tests / portable setups) → a TEST
+/// executable's own `<target>/<profile>/test-store` → the platform's own
+/// per-account data directory → `<temp>/autoshade`. Absolute, so keys and
+/// targets never depend on the process cwd.
 ///
 /// The per-account step used to be `%LOCALAPPDATA%` on EVERY platform — a
 /// variable Unix does not set. So every Linux/macOS build fell through to
@@ -166,11 +167,22 @@ pub(crate) fn adopt_pre_rename_root(
 /// write first. Each platform now names its own directory, and the shared
 /// fallback is LABELLED rather than trusted (the loader downgrades it).
 ///
+/// The test step (2026-11-18): a test executable used to resolve the
+/// per-account root whenever the variable was unset — the release battery
+/// sets it, an ad-hoc test run did not — so such runs wrote fixture develops
+/// into the user's real store (hundreds of folders were found there) and
+/// could read the user's real settings file, key and endpoint included, from
+/// it. A `#[cfg(test)]` default reached only the library's own unit tests:
+/// the desktop app's tests and `tests/*.rs` link the library's normal build.
+/// What every test executable shares is where cargo puts it
+/// ([`test_executable_root`]).
+///
 /// An explicit `AUTOSHADE_DATA_DIR` names the directory outright and is never
 /// second-guessed — it is how tests and portable setups site the store, and
-/// adopting some sibling of it would be an ambush. The two DERIVED roots go
-/// through [`adopt_pre_rename_root`], which is where an existing Autoshop
-/// install becomes an AutoShade one.
+/// adopting some sibling of it would be an ambush. The same holds for the
+/// test step. The two per-user DERIVED roots go through
+/// [`adopt_pre_rename_root`], which is where an existing Autoshop install
+/// becomes an AutoShade one.
 pub fn store_root_with_trust() -> (PathBuf, RootTrust) {
     // First caller of the process gets to rename and to disclose; every later
     // one reads the result off the filesystem.
@@ -178,6 +190,8 @@ pub fn store_root_with_trust() -> (PathBuf, RootTrust) {
     let latch = || ADOPTED.set(()).is_ok();
     let (root, trust) = crate::config::live_env_os("AUTOSHADE_DATA_DIR")
         .map(|d| (PathBuf::from(d), RootTrust::PerUser))
+        // The developer's own target folder: trusted like the per-user root.
+        .or_else(|| test_executable_root().map(|d| (d, RootTrust::PerUser)))
         .or_else(|| {
             per_user_data_dir()
                 .map(|d| {
@@ -195,6 +209,36 @@ pub fn store_root_with_trust() -> (PathBuf, RootTrust) {
 
 pub fn store_root() -> PathBuf {
     store_root_with_trust().0
+}
+
+/// The store a TEST executable uses when no root is named: the folder
+/// `test-store` beside its own `deps` folder (`<target>/<profile>/test-store`).
+///
+/// Cargo puts every test and bench executable — the library's unit tests, the
+/// desktop app's tests, `tests/*.rs`, and the children a test re-spawns from
+/// `current_exe()` — into `<target>/<profile>/deps/`; a program a person runs
+/// (`cargo run`, an installed or trial build) never starts from a folder named
+/// `deps`. `None` (the order goes on as before) when the executable cannot be
+/// named or its folder is not named exactly `deps`. Asked once per process,
+/// and silent: tests read the stderr of the children they spawn.
+pub(crate) fn test_executable_root() -> Option<PathBuf> {
+    static ROOT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        let exe = std::env::current_exe().ok()?;
+        let deps = exe.parent()?;
+        if deps.file_name()? != "deps" {
+            return None;
+        }
+        Some(deps.parent()?.join("test-store"))
+    })
+    .clone()
+}
+
+/// [`per_user_data_dir`] for the pin that a test executable never resolves
+/// it.
+#[cfg(test)]
+pub(crate) fn per_user_data_dir_for_tests() -> Option<PathBuf> {
+    per_user_data_dir()
 }
 
 /// The platform's per-account data directory, or `None` when the environment

@@ -604,9 +604,20 @@ comes back as one tint read from the sky and its clouds at once.
 A variant is one card for the same photo: **▣ Original**, **✨ AI generated**,
 **✎ Edited AI image**, **◭ Reverse-fit**, **◈ Denoised negative**, or
 **▦ Stacked**. Each card combines its own base
-pixels with one develop. `Ctrl+S` saves every card in the strip together.
+pixels with one develop. The cards live in the strip under the canvas, and
+only there: click a card to switch to it, and the active card carries its
+**＋** (save as version), **▣** (copy its develop onto the Original card) and
+**✕** (delete it — every card but the photo's one Original can be deleted).
+`Ctrl+S` saves every card in the strip together.
 Switching cards is navigation, not an edit; reopening returns to the card that
-was active at the last save, not the last card viewed.
+was active at the last save, not the last card viewed, and every card comes back
+as the kind it was made as. A card whose saved master cannot be found keeps its
+kind and its link to that master, and the canvas shows the photo without it
+until the file is back. A photo that an earlier version saved with a second
+**▣ Original** card is tidied once when it opens (a message says what changed;
+`Ctrl+S` keeps it): a card whose master is a denoise or a stack master gets its
+kind back, an empty copy of the Original is removed, and any other second
+Original card stays and can be deleted.
 
 A **✨ AI generated** card is the generated image itself and never changes:
 the first slider you move, paste, version load, AI analysis or in-place retouch
@@ -666,11 +677,20 @@ There is no variant strip there, so the merged master joins the session chain
 the way a heal does: every later develop, export and download follows it, and
 `Save` records it for reopening. On the command line it is `autoshade stack`.
 
-A version is a numbered snapshot of one card's develop at one moment. **＋ Save
-as version** writes `v<N>.recipe.json`, frozen `v<N>.mask-*.png` rasters, and
-`.version-meta.json` provenance (`from_kind`/`from_id`, name, and `user` or
-`auto` origin). Loading a version replaces the active card's canvas as one undo
-step. `auto` versions are snapshots made by the backup gate before it replaces
+A version is a numbered snapshot of one card's develop at one moment. The
+**Versions** section of the Develop panel (under **Versions & Export**) lists
+the photo's versions and nothing else: one line says what a version is, **＋ Save
+as version** makes one from the active card (the ＋ on the strip's active card
+does the same), and each row reads `v<N>`, its name (click it to name the
+version), then **Load** and 🗑 at the row's right end. When the photo has more
+than one card, each row says under its name which card it was saved from, and
+**Only versions saved from this variant** hides the others (the count of hidden
+rows is shown). A version made automatically says **auto-archived**.
+**＋ Save as version** writes `v<N>.recipe.json`, frozen `v<N>.mask-*.png`
+rasters, and `.version-meta.json` provenance (`from_kind`/`from_id`, name, and
+`user` or `auto` origin). Loading a version replaces the active card's canvas
+as one undo step. Deleting one cannot be undone, and its number is not used
+again. `auto` versions are snapshots made by the backup gate before it replaces
 a saved develop.
 
 An AI-generated variant carries its look in pixels and has no editable XMP

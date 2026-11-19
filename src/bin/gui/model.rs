@@ -1218,18 +1218,6 @@ pub(crate) enum VariantAction {
     SaveVersion,
 }
 
-/// Which surface is drawing a card's actions (R24-5). Both draw the same
-/// buttons through one owner; they differ only in which headless test seam
-/// records the result, and in the strip's exclusive right to the rename box —
-/// two `TextEdit`s over one buffer would fight for the caret every frame.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum VariantSurface {
-    /// The bottom variant strip.
-    Strip,
-    /// The Versions section's edit-state list.
-    List,
-}
-
 /// Pick radius (px) for on-image mask knobs — matches the crop handles' feel.
 pub(crate) const HANDLE_HIT: f32 = 12.0;
 
@@ -1519,8 +1507,10 @@ impl VariantKind {
     ///   reverse-fit defaults to (the `Generated` card's, never an `Edited`
     ///   card's: the fit reads pixels, and the edits are sliders the user
     ///   already has), not a claim about this axis;
-    /// * the `== Original` / `!= Original` branches (the strip's ✕ guard,
-    ///   the strip-triviality judgements) — a different axis entirely;
+    /// * the `== Original` / `!= Original` branches (the strip-triviality
+    ///   judgements, the choice of the base negative —
+    ///   [`base_negative_index`], which the strip's ✕ guard asks) — a
+    ///   different axis entirely;
     /// * the `== Generated` checks that guard the immutability rule itself
     ///   (the fork, `save_version`'s refusal, the door's normalisation) —
     ///   they ask about the one kind, not the side.
@@ -1560,6 +1550,56 @@ impl VariantKind {
 /// taken from it would come back unattributed. Minted ids are for the cards
 /// that only exist because something created them.
 pub(crate) const ORIGINAL_VARIANT_ID: &str = "original";
+
+/// Which card of `strip` is the photo's base negative — the ONE owner of
+/// that choice, shared by the strip's ✕ guard, `original_index` and the
+/// door's repair of strips that lost a card's kind
+/// (`AutoShadeApp::repair_lost_card_kinds`). A strip has at most one base;
+/// a second Original-kind card is a card whose word was lost. The base is
+/// the Original-kind card with the fixed [`ORIGINAL_VARIANT_ID`] when there
+/// is one, else the first Original-kind card on the photo's own pixels (no
+/// master), else the first Original-kind card.
+pub(crate) fn base_negative_index(strip: &[Variant]) -> Option<usize> {
+    let originals = || strip.iter().enumerate().filter(|(_, v)| v.kind == VariantKind::Original);
+    originals()
+        .find(|(_, v)| v.id == ORIGINAL_VARIANT_ID)
+        .or_else(|| originals().find(|(_, v)| v.origin.is_none()))
+        .or_else(|| originals().next())
+        .map(|(i, _)| i)
+}
+
+/// What `AutoShadeApp::repair_lost_card_kinds` changed in one pass, for the
+/// door's one toast.
+#[derive(Default, Debug, PartialEq)]
+pub(crate) struct LostKindRepair {
+    /// The kinds given back to cards whose master named them, in strip order.
+    pub(crate) restored: Vec<VariantKind>,
+    /// Empty duplicates of the base negative removed.
+    pub(crate) removed: usize,
+    /// Whether one of those was the active card (the base took its place).
+    pub(crate) active_removed: bool,
+}
+
+/// The kind a master's own file name says made it: ◈ for a denoise master,
+/// ▦ for a stack master, `None` for anything else (a heal, a clone, a
+/// reimagine, a file this app did not name). The tags are the store's
+/// ([`autoshade::store::DENOISE_MASTER_TAG`] / `STACK_MASTER_TAG`), the same
+/// words every writer of such a master names it with, so the two cannot
+/// drift.
+pub(crate) fn kind_named_by_master(origin: &std::path::Path) -> Option<VariantKind> {
+    let name = origin.file_name()?.to_str()?.strip_suffix(".png")?;
+    let (_, tag) = name.rsplit_once('.')?;
+    // `tag`, or `tag-<n>` for the second and later masters of one photo.
+    let tag = match tag.rsplit_once('-') {
+        Some((t, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => t,
+        _ => tag,
+    };
+    match tag {
+        autoshade::store::DENOISE_MASTER_TAG => Some(VariantKind::Denoised),
+        autoshade::store::STACK_MASTER_TAG => Some(VariantKind::Stacked),
+        _ => None,
+    }
+}
 
 /// Is this strip TRIVIAL — fully described by `recipe.json` + `pixels.json`,
 /// so a `variants.json` beside them would be pure sidecar noise?

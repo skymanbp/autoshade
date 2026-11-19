@@ -502,12 +502,14 @@
         );
     }
 
-    /// R24-4 (#1, phase 2 — minimal): ONE list answers "what edit states does
-    /// this photo have" — the rendition CARDS first, the numbered SNAPSHOTS
-    /// under them. The order is the claim (a photo is one negative + N
-    /// variants + one version history), so the test pins it.
+    /// R24-5: the strip's cards carry their actions — ＋ and ▣ on the ACTIVE
+    /// card only (both act on the live canvas), ✕ on any card but the base
+    /// negative, ▣ DISABLED rather than hidden on a pixel-state card (the
+    /// R24-2 judgement). Re-pointed at the strip on 2026-11-18, when the
+    /// Versions section's copy of the card list (and its seam) was removed:
+    /// the strip is the one surface that draws these buttons now.
     #[test]
-    fn the_edit_state_list_puts_the_cards_above_the_versions() {
+    fn the_strip_cards_carry_their_actions() {
         use crate::model::{Variant, VariantKind};
         let mk = |kind, id: &str| Variant {
             kind,
@@ -518,143 +520,37 @@
             origin: None,
             thumb: None,
         };
-        let ctx = egui::Context::default();
-        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
-        let mut app = AutoShadeApp {
-            variants: vec![
-                mk(VariantKind::Original, crate::model::ORIGINAL_VARIANT_ID),
-                mk(VariantKind::Generated, "card-gen"),
-            ],
-            active: 0,
-            versions: vec![1, 2],
-            ..Default::default()
-        };
-        let _ = ctx.run(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(1400.0, 900.0),
-                )),
-                ..Default::default()
-            },
-            |ctx| {
-                // Versions is a collapsed section by default; egui's own test
-                // hook opens every collapsible (the brush-slider test's idiom).
-                ctx.memory_mut(|m| m.set_everything_is_visible(true));
-                egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| app.develop_panel(ui));
-                });
-            },
-        );
-        assert_eq!(
-            app.edit_list_rows,
-            vec!["variant:original", "variant:generated", "version:1", "version:2"],
-            "cards above versions, in strip order then ascending"
-        );
-    }
-
-    /// R24-5: the edit-state list's rows CARRY the card actions — the same
-    /// ＋ / ▣ / ✕ the strip draws, through the one owner
-    /// (`variant_card_buttons`), so 「what does ✕ do here」 cannot become two
-    /// answers. What this pins:
-    ///
-    ///   * per-row membership: ＋ and ▣ on the ACTIVE card only (both act on
-    ///     the live canvas), ✕ on any droppable card, none on a lone Original;
-    ///   * ▣ DISABLED rather than hidden on a pixel-state card — the R24-2
-    ///     judgement, and the reason it is a seam at all;
-    ///   * the panel does not grow: this section gained two widgets per row in
-    ///     a 320 px panel, and an unbounded row is how the side panel crept
-    ///     +8 px a frame twice before (R19, R22-3).
-    ///
-    /// The STRIP's own seams are untouched by a frame that draws both, which
-    /// is why `strip_apply` stays the strip's (`VariantSurface`).
-    #[test]
-    fn the_edit_state_rows_carry_the_card_actions_without_widening_the_panel() {
-        use crate::model::{Variant, VariantKind};
-        let mk = |kind, id: &str| Variant {
-            kind,
-            id: id.into(),
-            name: None,
-            recipe: EditRecipe::default(),
-            base: None,
-            origin: None,
-            thumb: None,
-        };
-        for (active, want) in [
-            // The Generated card is active: it offers ＋, a DISABLED ▣ (its
-            // look lives in its pixels), and ✕. The background Original
-            // offers nothing — it is neither the live canvas nor droppable.
-            (1usize, vec!["1:＋▣(off)✕"]),
-            // The Original is active: ＋ only. ▣ is hidden (it IS the
-            // negative) and the Original is never droppable; the background
-            // Generated keeps its ✕.
-            (0usize, vec!["0:＋", "1:✕"]),
-        ] {
+        let strip_actions = |variants: Vec<Variant>, active: usize| {
             let ctx = egui::Context::default();
             crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
-            let mut app = AutoShadeApp {
-                variants: vec![
-                    mk(VariantKind::Original, crate::model::ORIGINAL_VARIANT_ID),
-                    mk(VariantKind::Generated, "card-gen"),
-                ],
-                active,
-                versions: vec![1],
-                ..Default::default()
-            };
-            let mut widths = Vec::new();
-            for _ in 0..3 {
-                let _ = ctx.run(
-                    egui::RawInput {
-                        screen_rect: Some(egui::Rect::from_min_size(
-                            egui::Pos2::ZERO,
-                            egui::vec2(1400.0, 900.0),
-                        )),
-                        ..Default::default()
-                    },
-                    |ctx| {
-                        ctx.memory_mut(|m| m.set_everything_is_visible(true));
-                        let r = egui::SidePanel::left("controls")
-                            .default_width(320.0)
-                            .show(ctx, |ui| {
-                                egui::ScrollArea::vertical().show(ui, |ui| app.develop_panel(ui));
-                            });
-                        widths.push(r.response.rect.width());
-                    },
-                );
-            }
-            assert_eq!(app.edit_list_actions, want, "active={active}");
-            assert!(
-                (widths[0] - widths[2]).abs() < 0.5,
-                "active={active}: the controls panel must not grow ({widths:?})"
+            let mut app = AutoShadeApp { variants, active, ..Default::default() };
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0))),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::TopBottomPanel::bottom("variants")
+                        .exact_height(AutoShadeApp::VARIANT_STRIP_H)
+                        .show(ctx, |ui| app.variant_strip(ui));
+                },
             );
-        }
-
-        // A lone Original: nothing is droppable and nothing else exists, so
-        // the only action is ＋. (A ✕ here would offer to delete the photo's
-        // one edit state.)
-        let ctx = egui::Context::default();
-        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
-        let mut app = AutoShadeApp {
-            variants: vec![mk(VariantKind::Original, crate::model::ORIGINAL_VARIANT_ID)],
-            active: 0,
-            ..Default::default()
+            app.strip_card_actions
         };
-        let _ = ctx.run(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(1400.0, 900.0),
-                )),
-                ..Default::default()
-            },
-            |ctx| {
-                ctx.memory_mut(|m| m.set_everything_is_visible(true));
-                egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| app.develop_panel(ui));
-                });
-            },
+        let pair = || vec![mk(VariantKind::Original, crate::model::ORIGINAL_VARIANT_ID), mk(VariantKind::Generated, "card-gen")];
+        // The Generated card is active: ＋, a DISABLED ▣ (its look lives in
+        // its pixels), and ✕. The background Original offers nothing — it is
+        // neither the live canvas nor droppable.
+        assert_eq!(strip_actions(pair(), 1), vec!["0:", "1:＋▣(off)✕"]);
+        // The Original is active: ＋ only. ▣ is hidden (it IS the negative)
+        // and the base is never droppable; the background Generated keeps ✕.
+        assert_eq!(strip_actions(pair(), 0), vec!["0:＋", "1:✕"]);
+        // A lone Original: the only action is ＋. (A ✕ here would offer to
+        // delete the photo's one edit state.)
+        assert_eq!(
+            strip_actions(vec![mk(VariantKind::Original, crate::model::ORIGINAL_VARIANT_ID)], 0),
+            vec!["0:＋"]
         );
-        assert_eq!(app.edit_list_actions, vec!["0:＋"]);
     }
 
     /// R24-3/R24-4, on the real panel: the strip's ACTIVE card carries the
@@ -940,17 +836,16 @@
         let src = dir.join("photo.arw");
         std::fs::write(&src, b"raw").unwrap();
 
+        // Two cards: the provenance line and the filter exist to tell cards
+        // apart, so a one-card photo draws neither (see
+        // `the_versions_section_draws_versions_only`).
         let mut app = AutoShadeApp {
             src_path: Some(src.clone()),
-            variants: vec![crate::model::Variant {
-                kind: crate::model::VariantKind::Fitted,
-                id: "card-fit".into(),
-                name: None,
-                recipe: EditRecipe::default(),
-                base: None,
-                origin: None,
-                thumb: None,
-            }],
+            variants: vec![
+                shot_card(VariantKind::Original, ORIGINAL_VARIANT_ID),
+                shot_card(VariantKind::Fitted, "card-fit"),
+            ],
+            active: 1,
             versions: vec![1, 2],
             ..Default::default()
         };
@@ -1000,14 +895,14 @@
         let seen = frame(&mut app);
         assert!(seen.iter().any(|t| t == "「偏暖」"), "the name is not on the row: {seen:?}");
         assert!(
-            seen.iter().any(|t| t == "· from ◭ Reverse-fit"),
+            seen.iter().any(|t| t == "from ◭ Reverse-fit"),
             "the row does not say which variant it came from: {seen:?}"
         );
         assert!(
-            seen.iter().any(|t| t == "· auto-archived"),
+            seen.iter().any(|t| t == "auto-archived"),
             "an automatic snapshot must say so: {seen:?}"
         );
-        assert!(seen.iter().any(|t| t == "Only this variant"), "no filter: {seen:?}");
+        assert!(seen.iter().any(|t| t == "Only versions saved from this variant"), "no filter: {seen:?}");
         assert!(
             !seen.iter().any(|t| t.contains("hidden")),
             "nothing is hidden while the filter is off: {seen:?}"
@@ -1175,4 +1070,164 @@
 
         assert!(!AutoShadeApp::version_is_from(Some(&meta(None, None)), "card-a", Some(VariantKind::Original)));
         assert!(!AutoShadeApp::version_is_from(None, "card-a", Some(VariantKind::Original)));
+    }
+
+    // ---- Part 3: the Versions section shows versions and nothing else.
+
+    /// The drawn texts of the Versions section alone — between its header and
+    /// the next fold's (「Stack」) — at panel width `w`, every fold open, and
+    /// the panel's rect.
+    fn versions_section_texts(app: &mut AutoShadeApp, w: f32) -> (Vec<(String, egui::Rect)>, egui::Rect) {
+        let lang = app.lang;
+        let (items, panel) = settled_controls(app, w);
+        let texts: Vec<(String, egui::Rect)> =
+            items.into_iter().filter(|(kind, ..)| kind == "text").map(|(_, t, r)| (t, r)).collect();
+        let head = trf(lang, "Versions ({n})", &[("n", &app.versions.len().to_string())]);
+        let top = texts
+            .iter()
+            .find(|(t, _)| t.starts_with(&head))
+            .unwrap_or_else(|| panic!("the Versions header {head:?} is drawn"))
+            .1
+            .bottom();
+        let bottom = texts
+            .iter()
+            .find(|(t, r)| t.starts_with(tr(lang, "Stack")) && r.top() > top)
+            .expect("the Stack header follows the section")
+            .1
+            .top();
+        (texts.into_iter().filter(|(_, r)| r.top() >= top && r.bottom() <= bottom).collect(), panel)
+    }
+
+    /// Part 3 (12): with two cards and two versions the section draws its
+    /// line, its verb, its filter and its version rows — no card row, no
+    /// "Snapshot history", no lone ＋.
+    #[test]
+    fn the_versions_section_draws_versions_only() {
+        let mut app = app_with_versions(crate::i18n::Lang::En, VersionsScene::TwoCardsThreeVersions);
+        app.versions.truncate(2);
+        let (texts, _) = versions_section_texts(&mut app, crate::theme::CONTROLS_W_MIN);
+        let seen: Vec<&str> = texts.iter().map(|(t, _)| t.as_str()).collect();
+        for gone in ["Variants (2)", "Snapshot history", "＋", "▣ Original", "◈ Denoised negative", "· current"] {
+            assert!(!seen.contains(&gone), "{gone:?} is still drawn: {seen:?}");
+        }
+        for drawn in [
+            "A version is a saved copy of the current adjustments — load it back whenever you like.",
+            "＋ Save as version",
+            "Only versions saved from this variant",
+            "v3",
+            "v5",
+        ] {
+            assert!(seen.contains(&drawn), "{drawn:?} is not drawn: {seen:?}");
+        }
+        assert_eq!(app.version_rows.len(), 2, "one row per version");
+    }
+
+    /// Part 3 (13): the provenance line and the filter exist to tell cards
+    /// apart. With one card neither is drawn and every version is listed,
+    /// even with the filter left ticked from another photo; with two, both
+    /// are drawn, and ticking the filter hides the other card's versions and
+    /// counts them.
+    #[test]
+    fn provenance_and_the_filter_appear_only_with_more_than_one_card() {
+        let mut one = app_with_versions(crate::i18n::Lang::En, VersionsScene::OneCardOneVersion);
+        // A version from a card this photo no longer has: the filter would
+        // hide it, if a filter that is not drawn could act.
+        one.version_meta.get_mut(&1).unwrap().from_id = Some("gone".into());
+        one.versions_current_only = true;
+        let (texts, _) = versions_section_texts(&mut one, crate::theme::CONTROLS_W_MIN);
+        let seen: Vec<&str> = texts.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(!seen.iter().any(|t| t.starts_with("from ")), "no provenance with one card: {seen:?}");
+        assert!(!seen.contains(&"Only versions saved from this variant"), "no filter with one card: {seen:?}");
+        assert_eq!(one.version_rows.len(), 1, "the version is listed: {seen:?}");
+        assert!(!seen.iter().any(|t| t.contains("hidden")), "{seen:?}");
+
+        let mut two = app_with_versions(crate::i18n::Lang::En, VersionsScene::TwoCardsThreeVersions);
+        let (texts, _) = versions_section_texts(&mut two, crate::theme::CONTROLS_W_MIN);
+        let seen: Vec<&str> = texts.iter().map(|(t, _)| t.as_str()).collect();
+        for drawn in ["from ▣ Original", "from ◈ Denoised negative", "auto-archived", "Only versions saved from this variant"] {
+            assert!(seen.contains(&drawn), "{drawn:?} is not drawn: {seen:?}");
+        }
+        assert_eq!(two.version_rows.len(), 3);
+        two.versions_current_only = true;
+        let (texts, _) = versions_section_texts(&mut two, crate::theme::CONTROLS_W_MIN);
+        let seen: Vec<&str> = texts.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(two.version_rows.iter().map(|r| r.0).collect::<Vec<_>>(), vec![7], "the ◈ card's own version");
+        assert!(seen.contains(&"2 hidden — saved from another variant"), "{seen:?}");
+    }
+
+    /// Part 3 (14): the section's rows hold the panel's grid at the
+    /// narrowest, a middle and the widest width, in both languages — every
+    /// row's 🗑 ends where 「＋ Save as version」 ends, 「Load」 stands left of
+    /// it and the name left of that; nothing is drawn past that edge, however
+    /// long a name; and opening a rename box changes no row's height and
+    /// moves no row below it. The panel is as wide with 0, 1 and 5 versions
+    /// and with the box open.
+    ///
+    /// MUTATION: one row built with the old plain `horizontal` (number,
+    /// name, provenance, Load, 🗑 at their own widths) — its 🗑 ends short of
+    /// the edge, or a long name pushes it past.
+    #[test]
+    fn the_version_rows_share_one_right_edge_at_every_width() {
+        use autoshade::store::VersionMetaEntry;
+        let style = egui::Context::default().style();
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            for w in [crate::theme::CONTROLS_W_MIN, 400.0, crate::theme::controls_w_max(&style)] {
+                let tag = format!("{lang:?} at {w}");
+                let mut app = app_with_versions(lang, VersionsScene::TwoCardsThreeVersions);
+                app.version_meta.insert(
+                    5,
+                    VersionMetaEntry {
+                        name: Some("a name far longer than any row of this panel can ever hold".into()),
+                        ..app.version_meta[&5].clone()
+                    },
+                );
+                let (texts, panel) = versions_section_texts(&mut app, w);
+                let save = app.version_save_rect.unwrap_or_else(|| panic!("{tag}: the save button is drawn"));
+                assert_eq!(app.version_rows.len(), 3, "{tag}");
+                let row_h = style.spacing.interact_size.y;
+                for (i, &(n, name, load, bin, note)) in app.version_rows.iter().enumerate() {
+                    assert!((bin.right() - save.right()).abs() <= 0.5, "{tag}: v{n}'s 🗑 ends at {:.1}, the save button at {:.1}", bin.right(), save.right());
+                    assert!(load.right() <= bin.left() + 0.5, "{tag}: v{n}'s Load overlaps 🗑");
+                    assert!(name.right() <= load.left() + 0.5, "{tag}: v{n}'s name runs under Load ({:.1} > {:.1})", name.right(), load.left());
+                    assert!((load.top() - bin.top()).abs() <= 0.5, "{tag}: v{n}'s verbs share a line");
+                    assert!(name.height() <= row_h + 0.5, "{tag}: v{n}'s name wraps ({:.1} tall)", name.height());
+                    // Follow-up 1, item 4: the provenance line HUGS its own
+                    // row — nearer to it than to the row after it.
+                    let note = note.unwrap_or_else(|| panic!("{tag}: v{n} has a provenance line in this scene"));
+                    if let Some(next) = app.version_rows.get(i + 1) {
+                        let above = note.top() - bin.bottom();
+                        let below = next.3.top() - note.bottom();
+                        assert!(above < below, "{tag}: v{n}'s provenance line stands {above:.1} under its row and {below:.1} over the next");
+                    }
+                }
+                let past: Vec<String> = texts
+                    .iter()
+                    .filter(|(_, r)| r.right() > save.right() + 0.5)
+                    .map(|(t, r)| format!("{t:?} ends at {:.1}", r.right()))
+                    .collect();
+                assert!(past.is_empty(), "{tag}: drawn past the row's edge {:.1}: {past:#?}", save.right());
+
+                // A rename box opened on v3: same row heights, nothing below moves.
+                let before = app.version_rows.clone();
+                app.version_name_buf = Some((app.src_path.clone().unwrap(), 3, String::new(), "dusk".into()));
+                let (_, renaming) = versions_section_texts(&mut app, w);
+                assert_eq!(app.version_rows.len(), before.len(), "{tag}");
+                for (a, b) in before.iter().zip(&app.version_rows) {
+                    assert!((a.2.top() - b.2.top()).abs() <= 0.5 && (a.3.top() - b.3.top()).abs() <= 0.5, "{tag}: v{} moved when v3's rename opened", a.0);
+                    assert!((a.3.right() - b.3.right()).abs() <= 0.5, "{tag}: v{}'s 🗑 moved sideways", a.0);
+                }
+                let boxed = app.version_rows[0].1;
+                assert!(boxed.height() <= row_h + 0.5, "{tag}: the rename box is taller than the row ({:.1})", boxed.height());
+                assert!(boxed.right() <= app.version_rows[0].2.left() + 0.5, "{tag}: the rename box runs under Load");
+
+                // The panel's width owes nothing to the list.
+                let mut widths = vec![panel.width(), renaming.width()];
+                for n in [0usize, 1, 5] {
+                    let mut app = app_with_versions(lang, VersionsScene::TwoCardsThreeVersions);
+                    app.versions = (1..=n as u32).collect();
+                    widths.push(settled_controls(&mut app, w).1.width());
+                }
+                assert!(widths.iter().all(|x| (x - widths[0]).abs() <= 0.5), "{tag}: the panel's width moved: {widths:?}");
+            }
+        }
     }

@@ -578,7 +578,7 @@ impl AutoShadeApp {
             return;
         }
         let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
-        let Some(out) = unique_out(&path, "denoise") else {
+        let Some(out) = unique_out(&path, autoshade::store::DENOISE_MASTER_TAG) else {
             self.status = tr(lang, "over 999 retouch masters for this photo — clean up the masters folder first").into();
             return;
         };
@@ -643,7 +643,7 @@ impl AutoShadeApp {
             return;
         }
         let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
-        let Some(out) = unique_out(&path, "stack") else {
+        let Some(out) = unique_out(&path, autoshade::store::STACK_MASTER_TAG) else {
             self.status = tr(lang, "over 999 retouch masters for this photo — clean up the masters folder first").into();
             return;
         };

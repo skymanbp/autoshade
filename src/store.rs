@@ -139,7 +139,8 @@ use snapshot::{
 #[cfg(test)]
 use snapshot::{revision_of};
 pub use variants::{
-    ActiveWrite, CommitMember, MAX_STORE_NAME, VariantEntry, VariantsRead, VariantsRecord,
+    ActiveWrite, CARD_KIND_WORDS, CommitMember, DENOISE_MASTER_TAG, MAX_STORE_NAME, STACK_MASTER_TAG,
+    VariantEntry, VariantsRead, VariantsRecord,
     active_card_is_denoised, clear_variants, read_variants, read_variants_checked, variants_member, variants_record_bytes,
     write_variants,
 };

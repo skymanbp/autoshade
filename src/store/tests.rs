@@ -3762,9 +3762,13 @@ fn backup_snapshot_is_a_copy_and_freezes_rasters() {
             pixel_bytes
         );
 
+        // A word no build has ever written (`"stacked"` stood here until
+        // 2026-11-18, when the store learned the ▦ card's word it had been
+        // refusing all along — see `CARD_KIND_WORDS`).
+        assert!(!CARD_KIND_WORDS.contains(&"collage"), "premise: the example is unknown");
         let variants = serde_json::json!({
             "v": 1,
-            "active_kind": "stacked",
+            "active_kind": "collage",
             "active_pos": 0,
             "others": [{
                 "kind": "original",
@@ -3901,4 +3905,50 @@ fn a_version_snapshot_freezes_depth_protect_and_layer_rasters() {
         assert_eq!(std::fs::read(dev.join(format!("v7.{n}"))).unwrap(), n.as_bytes(), "{n} frozen");
     }
     let _ = std::fs::remove_dir_all(&dev);
+}
+
+/// A test executable never resolves the user's real develop store
+/// (2026-11-18): with `AUTOSHADE_DATA_DIR` unset its root is the
+/// `test-store` folder beside its own `deps` folder, and with the variable
+/// set the variable wins. Hundreds of fixture folders had been written into
+/// the real store by ad-hoc runs that did not set it. The desktop app's test
+/// binary pins the same rule from its side
+/// (`the_gui_test_binary_never_resolves_the_per_user_store`).
+///
+/// The behaviour bites only in a run with the variable UNSET; a run that
+/// sets it (the battery, every lane run) cannot reach the step, so the step's
+/// place in the order is also pinned in the source — the half that bites
+/// there.
+///
+/// MUTATION: the `deps` step removed from `store_root_with_trust`'s order.
+#[test]
+fn a_test_build_never_resolves_the_per_user_store() {
+    let source = crate::store::source_text();
+    let body = source
+        .split("pub fn store_root_with_trust()")
+        .nth(1)
+        .expect("store_root_with_trust is gone");
+    let head = body.split("per_user_data_dir()").next().unwrap();
+    assert!(
+        head.contains(".or_else(|| test_executable_root().map(|d| (d, RootTrust::PerUser)))"),
+        "the test-executable step no longer comes before the per-user root"
+    );
+    let exe = std::env::current_exe().unwrap();
+    assert_eq!(exe.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()), Some("deps"), "premise: cargo runs tests from deps");
+    let expected = exe.parent().unwrap().parent().unwrap().join("test-store");
+    match crate::config::live_env_os("AUTOSHADE_DATA_DIR") {
+        None => {
+            let root = store_root();
+            assert_eq!(root, std::path::absolute(&expected).unwrap(), "an unset variable resolves the test store");
+            if let Some(user) = super::root::per_user_data_dir_for_tests() {
+                for name in [STORE_DIR_NAME, LEGACY_STORE_DIR_NAME] {
+                    assert!(!root.starts_with(user.join(name)), "{} is the user's store", root.display());
+                }
+            }
+        }
+        Some(explicit) => {
+            let explicit = PathBuf::from(explicit);
+            assert_eq!(store_root(), std::path::absolute(&explicit).unwrap_or(explicit), "the explicit variable wins");
+        }
+    }
 }
