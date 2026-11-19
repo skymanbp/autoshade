@@ -191,13 +191,13 @@ mirrored byte-exact on [Hugging Face](https://huggingface.co/Azng0/autoshade-mir
 
 | File | Size | SHA-256 |
 |---|---:|---|
-| `autoshade.exe` (CLI) | 26,245,120 bytes | `7470e35a7e82eac61b120eded894ed33703067bf9efb7e7ff9ebc79b29c3778d` |
-| `autoshade-gui.exe` (desktop app) | 33,745,920 bytes | `1ff4c3eb761bc16ddcdd2ab5dc5ecf368c7ff7c890db1598b8cc0d2e297e05ce` |
-| `AutoShade-Setup-1.18.3.exe` (installer) | 16,928,266 bytes | `c204ca401a7050773f169fc715e7596f011f3f13fbbb7d53ae41f8a5c212d7dc` |
-| `autoshade-1.18.3-windows-x64.zip` (portable archive) | 23,061,710 bytes | `4c1b7b0d1e451531741129646c9dd49685ef54b679ff3ef2a0e3505392a32d97` |
-| `AutoShade-1.18.3-macos-universal.zip` (macOS app bundle) | 46,095,029 bytes | `da51b67e241e0014505214211ee0e62717dbda2f3fc81562c8fc2942f054de40` |
-| `AutoShade-1.18.3-linux-x64.zip` (Linux command line only) | 11,041,955 bytes | `289bc538b33ded8cefd51ef59e1a45ba77ea08e6760be158f0bf29982379e96c` |
-| `AutoShade-1.18.3-macos-cli.zip` (macOS command line only) | 20,055,706 bytes | `9690f60b6b7a3a39c3f6a66540c776f8a0146722ef0764015a73085d8ef50c1b` |
+| `autoshade.exe` (CLI) | 26,265,088 bytes | `5ad361d8939cfa50bfe2e6dbd5b3450fba78890321a76ae0079067f00124f637` |
+| `autoshade-gui.exe` (desktop app) | 33,814,016 bytes | `f45fc2709a831107f9fcb821255fff7574d944513f6ca4f1714fe8ceacae3f76` |
+| `AutoShade-Setup-1.18.3.exe` (installer) | 16,955,760 bytes | `180bea3baf6a5d00a88f750a25c80f3ec9cb3804b0117efcdea4f6aa4985d7c9` |
+| `autoshade-1.18.3-windows-x64.zip` (portable archive) | 23,072,871 bytes | `143c58e28e0c39e5ebcf18ed1095bd1b4d7c1e4a27d3b375c28371c431106caa` |
+| `AutoShade-1.18.3-macos-universal.zip` (macOS app bundle) | 46,090,835 bytes | `dc0cdc9bbab0e58cc9abd5ec421cc3127536e0d27fadfa49d8f77c83d1f4dd15` |
+| `AutoShade-1.18.3-linux-x64.zip` (Linux command line only) | 11,046,087 bytes | `166a4ca88dbcd797f931685053ea7ce960aa87ad021b3e2d91cd1adde31843b7` |
+| `AutoShade-1.18.3-macos-cli.zip` (macOS command line only) | 20,044,123 bytes | `c1482f51e90159c14bdb262464ca8dfe0ec6d5b6abdf3743f16e7030e2ce9cda` |
 | `autoshade-raw-denoise-v2.pth` (RAW denoiser weights, fetched on demand from the v1.6.0 release) | 130,590,559 bytes | `ffafa40a53f52092149db2fcf03636117ad6855e1068142d4f6b03b634e9f9c4` |
 
 </details>
