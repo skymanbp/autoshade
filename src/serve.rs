@@ -3029,7 +3029,7 @@ fn api_stack(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     for r in &raws[1..] {
         inputs.push(crate::store::read_pixel_source(r).map(|(m, _)| m).unwrap_or_else(|| r.clone()));
     }
-    let Some(out) = pipeline::unique_out(&raws[0], "stack") else {
+    let Some(out) = pipeline::unique_out(&raws[0], crate::store::STACK_MASTER_TAG) else {
         return Ok(status_response(500, "no free stack output name (999 in the masters folder)"));
     };
     let opts = crate::stack::merge::MergeOptions {

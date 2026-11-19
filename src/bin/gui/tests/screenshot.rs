@@ -54,17 +54,34 @@
         ppp: f32,
         bg: egui::Color32,
     ) -> image::RgbaImage {
-        let (w, h) = ((size.x * ppp) as usize, (size.y * ppp) as usize);
+        rasterise_region(prims, tex, egui::Rect::from_min_size(egui::Pos2::ZERO, size), ppp, bg)
+    }
+
+    /// [`rasterise`] of one `region` of the screen only, so a picture of a
+    /// few hundred points out of a 16 000-point column does not paint (and
+    /// hold in memory) the whole column first.
+    fn rasterise_region(
+        prims: &[egui::ClippedPrimitive],
+        tex: &ShotTextures,
+        region: egui::Rect,
+        ppp: f32,
+        bg: egui::Color32,
+    ) -> image::RgbaImage {
+        let (w, h) = ((region.width() * ppp) as usize, (region.height() * ppp) as usize);
+        let o = region.min;
         let mut buf = vec![[bg.r() as f32, bg.g() as f32, bg.b() as f32]; w * h];
         for p in prims {
             let egui::epaint::Primitive::Mesh(mesh) = &p.primitive else { continue };
             let Some((tw, th, texels)) = tex.0.get(&mesh.texture_id) else { continue };
-            let clip = p.clip_rect;
+            let clip = p.clip_rect.translate(-o.to_vec2());
             let (cx0, cy0) = ((clip.min.x * ppp).max(0.0), (clip.min.y * ppp).max(0.0));
             let (cx1, cy1) = ((clip.max.x * ppp).ceil().min(w as f32), (clip.max.y * ppp).ceil().min(h as f32));
+            if cx1 <= cx0 || cy1 <= cy0 {
+                continue;
+            }
             for t in mesh.indices.chunks_exact(3) {
                 let v = [&mesh.vertices[t[0] as usize], &mesh.vertices[t[1] as usize], &mesh.vertices[t[2] as usize]];
-                let pt = |i: usize| (v[i].pos.x * ppp, v[i].pos.y * ppp);
+                let pt = |i: usize| ((v[i].pos.x - o.x) * ppp, (v[i].pos.y - o.y) * ppp);
                 let (a, b, c) = (pt(0), pt(1), pt(2));
                 let area = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
                 if area.abs() < 1e-6 {
@@ -425,6 +442,187 @@
                         .to_image()
                         .save(dir.join(format!("window-strip-busy-{lang:?}-{theme:?}.png")))
                         .unwrap();
+                }
+            }
+        }
+    }
+
+    // ---- The Versions & Export group and the variant strip: their scenes
+    // and their camera.
+
+    /// What the Versions section is showing, for its pictures.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum VersionsScene {
+        /// One card, nothing saved as a version yet.
+        NoVersions,
+        /// One card and one version taken from it.
+        OneCardOneVersion,
+        /// ▣ and ◈ (the ◈ card under the canvas) and three versions: one
+        /// named, one auto-archived, one from each card.
+        TwoCardsThreeVersions,
+    }
+
+    impl VersionsScene {
+        const ALL: [Self; 3] = [Self::NoVersions, Self::OneCardOneVersion, Self::TwoCardsThreeVersions];
+    }
+
+    /// One strip card for the pictures and the layout pins: no pixels of its
+    /// own, a neutral develop.
+    fn shot_card(kind: VariantKind, id: &str) -> Variant {
+        Variant { kind, id: id.into(), name: None, recipe: EditRecipe::default(), base: None, origin: None, thumb: None }
+    }
+
+    /// An app whose Versions section shows `scene` (the store is never read:
+    /// the version list and its records are filled by hand).
+    fn app_with_versions(lang: crate::i18n::Lang, scene: VersionsScene) -> AutoShadeApp {
+        use autoshade::store::{VersionMetaEntry, VERSION_ORIGIN_AUTO, VERSION_ORIGIN_USER};
+        let mut app = AutoShadeApp {
+            lang,
+            src_path: Some(PathBuf::from("D:/library/_versions.ARW")),
+            variants: vec![shot_card(VariantKind::Original, ORIGINAL_VARIANT_ID)],
+            ..Default::default()
+        };
+        let from = |n: u32, kind: &str, id: &str| VersionMetaEntry {
+            n,
+            from_kind: Some(kind.into()),
+            from_id: Some(id.into()),
+            origin: Some(VERSION_ORIGIN_USER.into()),
+            ..Default::default()
+        };
+        match scene {
+            VersionsScene::NoVersions => {}
+            VersionsScene::OneCardOneVersion => {
+                app.versions = vec![1];
+                app.version_meta.insert(1, from(1, "original", ORIGINAL_VARIANT_ID));
+            }
+            VersionsScene::TwoCardsThreeVersions => {
+                app.variants.push(shot_card(VariantKind::Denoised, "dn-1"));
+                app.active = 1;
+                app.versions = vec![3, 5, 7];
+                app.version_meta.insert(3, VersionMetaEntry { n: 3, origin: Some(VERSION_ORIGIN_AUTO.into()), ..Default::default() });
+                app.version_meta.insert(5, from(5, "original", ORIGINAL_VARIANT_ID));
+                app.version_meta.insert(7, VersionMetaEntry { name: Some("Warm sunset".into()), ..from(7, "denoised", "dn-1") });
+            }
+        }
+        app
+    }
+
+    /// The Versions & Export group as the controls panel draws it at `width`
+    /// points (every fold open), cut from the group's caption down to the
+    /// Export section's last verb, at 2×.
+    fn versions_group_shot(app: &mut AutoShadeApp, theme: crate::theme::ThemePref, width: f32) -> image::RgbaImage {
+        app.theme = theme;
+        let lang = app.lang;
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::install_theme(&ctx, theme);
+        let size = egui::vec2(width + 40.0, 16_000.0);
+        let mut tex = ShotTextures::default();
+        let mut last = None;
+        let mut panel = egui::Rect::NOTHING;
+        for i in 0..6 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                time: Some(i as f64 / 60.0),
+                ..Default::default()
+            };
+            input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(2.0);
+            let out = ctx.run(input, |ctx| {
+                ctx.memory_mut(|m| m.set_everything_is_visible(true));
+                panel = controls_panel(ctx, app, width);
+            });
+            tex.apply(&out.textures_delta);
+            last = Some(out);
+        }
+        let out = last.expect("frames ran");
+        let items = probe_items(&out.shapes, panel, None);
+        let find = |text: &str| {
+            items
+                .iter()
+                .find(|(kind, t, _)| kind == "text" && t == text)
+                .map(|(_, _, r)| *r)
+                .unwrap_or_else(|| panic!("{text:?} is drawn"))
+        };
+        let top = find(tr(lang, "Versions & Export")).top() - 8.0;
+        let bottom = find(tr(lang, "Export .xmp beside the photo")).bottom() + 16.0;
+        // Cut by the width the drag left the panel, not by the rect its
+        // content covered: a row that overruns the panel stretches that
+        // rect, and then the tooltips egui's show-everything hook pops
+        // (clipped to the screen) would pass a cut made by it.
+        let shapes: Vec<_> = out.shapes.iter().filter(|c| c.clip_rect.right() <= width + 1.0).cloned().collect();
+        let prims = ctx.tessellate(shapes, out.pixels_per_point);
+        let region = egui::Rect::from_min_max(egui::pos2(0.0, top), egui::pos2(width, bottom));
+        rasterise_region(&prims, &tex, region, out.pixels_per_point, ctx.style().visuals.panel_fill)
+    }
+
+    /// The variant strip alone as the app hosts it (the bottom panel), at 2×,
+    /// with a two-tone thumbnail on every card.
+    fn strip_shot(app: &mut AutoShadeApp, theme: crate::theme::ThemePref) -> image::RgbaImage {
+        app.theme = theme;
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::install_theme(&ctx, theme);
+        for (i, v) in app.variants.iter_mut().enumerate() {
+            let (w, h) = (60usize, 40usize);
+            let px: Vec<egui::Color32> = (0..w * h)
+                .map(|p| {
+                    let y = (p / w) as f32 / h as f32;
+                    let hue = 0.08 + 0.4 * i as f32;
+                    egui::Color32::from(egui::ecolor::Hsva::new((hue + if y < 0.5 { 0.5 } else { 0.0 }) % 1.0, 0.45, 0.8 - 0.3 * y, 1.0))
+                })
+                .collect();
+            v.thumb = Some(ctx.load_texture(format!("strip-thumb-{i}"), egui::ColorImage { size: [w, h], pixels: px }, egui::TextureOptions::LINEAR));
+        }
+        let size = egui::vec2(560.0, AutoShadeApp::VARIANT_STRIP_H + 16.0);
+        let mut tex = ShotTextures::default();
+        let mut last = None;
+        for i in 0..6 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                time: Some(i as f64 / 60.0),
+                ..Default::default()
+            };
+            input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(2.0);
+            let out = ctx.run(input, |ctx| {
+                egui::TopBottomPanel::bottom("variants")
+                    .exact_height(AutoShadeApp::VARIANT_STRIP_H)
+                    .show(ctx, |ui| app.variant_strip(ui));
+            });
+            tex.apply(&out.textures_delta);
+            last = Some(out);
+        }
+        let out = last.expect("frames ran");
+        let prims = ctx.tessellate(out.shapes.clone(), out.pixels_per_point);
+        rasterise(&prims, &tex, size, out.pixels_per_point, theme.colors().canvas_bed)
+    }
+
+    /// Not a check — the camera for the Versions & Export group (the
+    /// Versions section open, in each [`VersionsScene`], at the narrowest, a
+    /// middle and the widest panel width) and for the variant strip with
+    /// [▣] and [▣, ◈], in both languages and the Dark and Light themes:
+    /// `AUTOSHADE_SHOT_DIR=<dir> cargo test … versions_screenshots -- --ignored`.
+    #[test]
+    #[ignore = "writes PNGs for a person to look at"]
+    fn versions_screenshots() {
+        let dir = std::path::PathBuf::from(std::env::var("AUTOSHADE_SHOT_DIR").expect("AUTOSHADE_SHOT_DIR"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let style = egui::Context::default().style();
+        let widest = crate::theme::controls_w_max(&style);
+        for lang in [crate::i18n::Lang::Zh, crate::i18n::Lang::En] {
+            for theme in [crate::theme::ThemePref::Dark, crate::theme::ThemePref::Light] {
+                for scene in VersionsScene::ALL {
+                    for width in [crate::theme::CONTROLS_W_MIN, 400.0, widest] {
+                        let mut app = app_with_versions(lang, scene);
+                        versions_group_shot(&mut app, theme, width)
+                            .save(dir.join(format!("versions-{scene:?}-{lang:?}-{theme:?}-{width:.0}.png")))
+                            .unwrap();
+                    }
+                }
+                for cards in [1usize, 2] {
+                    let mut app = app_with_versions(lang, VersionsScene::TwoCardsThreeVersions);
+                    app.variants.truncate(cards);
+                    app.active = cards - 1;
+                    strip_shot(&mut app, theme).save(dir.join(format!("strip-{cards}-cards-{lang:?}-{theme:?}.png"))).unwrap();
                 }
             }
         }

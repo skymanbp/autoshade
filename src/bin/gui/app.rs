@@ -433,18 +433,19 @@ pub(crate) struct AutoShadeApp {
     pub(crate) strip_apply: Option<(egui::Rect, bool)>,
     #[cfg(test)]
     pub(crate) strip_name_rect: Option<egui::Rect>,   // test seam: the card's name widget (label or box)
-    /// Test seam (R24-4): the edit-state list's rows, in draw order —
-    /// `variant:<kind>` for a rendition card, `version:<n>` for a snapshot.
-    /// Strings, not a count: the ORDER (cards above versions) is the claim
-    /// the list makes.
+    /// Test seam (R24-5): which action glyphs the strip laid out per card,
+    /// as `"<i>:<glyphs>"`, in card order — which cards offer ✕ is a claim
+    /// about the base negative, and no rect says it.
     #[cfg(test)]
-    pub(crate) edit_list_rows: Vec<String>,
-    /// Test seam (R24-5): what the edit-state list's ACTION line laid out per
-    /// card, as `"<i>:<glyphs>"` — the list surface has no rects of its own
-    /// (`strip_apply` stays the STRIP's, so a full frame drawing both cannot
-    /// silently retarget the older assertions).
+    pub(crate) strip_card_actions: Vec<String>,
+    /// Test seam: each drawn version row as (number, name cell, 「Load」,
+    /// 🗑, its provenance line when it has one), and the 「＋ Save as
+    /// version」 button — one right edge, and a line that hugs its own row,
+    /// are the claims the section's layout makes.
     #[cfg(test)]
-    pub(crate) edit_list_actions: Vec<String>,
+    pub(crate) version_rows: Vec<(u32, egui::Rect, egui::Rect, egui::Rect, Option<egui::Rect>)>,
+    #[cfg(test)]
+    pub(crate) version_save_rect: Option<egui::Rect>,
     #[cfg(test)]
     pub(crate) reimagine_btn_rect: Option<egui::Rect>, // test seam: the ✨ Generate button's rect
     #[cfg(test)]
@@ -2003,9 +2004,11 @@ impl Default for AutoShadeApp {
             #[cfg(test)]
             strip_name_rect: None,
             #[cfg(test)]
-            edit_list_rows: Vec::new(),
+            strip_card_actions: Vec::new(),
             #[cfg(test)]
-            edit_list_actions: Vec::new(),
+            version_rows: Vec::new(),
+            #[cfg(test)]
+            version_save_rect: None,
             #[cfg(test)]
             reimagine_btn_rect: None,
             #[cfg(test)]

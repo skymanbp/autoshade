@@ -3379,7 +3379,10 @@ and a save writes no .xmp anywhere. The develop lives in the per-user develop
 store (`<AUTOSHADE_DATA_DIR | %LOCALAPPDATA%/autoshade |
 $HOME/Library/Application Support/AutoShade | $XDG_DATA_HOME/autoshade |
 $HOME/.local/share/autoshade>/develops/<stem>-<hash of the absolute
-path>/` — see `store::store_root_with_trust`, and the trust bullet in
+path>/` — see `store::store_root_with_trust` (a test executable, any
+program cargo starts from a `deps` folder, takes `<target>/<profile>/test-store`
+in place of the per-user root when the variable is unset, so no test run
+reaches the user's store), and the trust bullet in
 §3 for why the shared-temp last resort is labelled rather than
 trusted; and `store::adopt_pre_rename_root` for the one-time adoption of a
 pre-rename `autoshop` store — a single same-volume `rename`, never a copy,
@@ -3500,13 +3503,37 @@ deleted number burned — so the first click asks and the second deletes.
 Those three buttons are drawn by ONE owner (`variant_card_buttons`) and their
 clicks are performed by one more (`dispatch_variant_action`, taking a single
 `VariantAction` so the arms stay mutually exclusive by construction rather than
-by an `else if` chain's shape). The Versions section's edit-state list draws the
-same buttons through that owner and switches cards on a row click, so a card
-action means one thing on both surfaces; renaming stays on the strip alone,
-because two `TextEdit`s over one buffer fight for the caret every frame. The
-list's buttons take a second, indented line rather than joining the label row —
-a 320 px panel already holds a kind label, a name and a vocabulary note, and an
-unbounded row is how this side panel crept +8 px a frame twice before.
+by an `else if` chain's shape). The strip is the one surface that draws the
+cards (2026-11-18): the Versions section used to open with a second list of
+them, which repeated the strip, and now lists versions only. 「✕」 is offered on
+every card but the photo's BASE negative, which one owner picks
+(`model::base_negative_index`: the Original-kind card with the fixed id
+`original`, else the first one with no master, else the first one) — not on
+"every card but the Original-kind ones", because a strip can hold a second
+Original-kind card (below) and that one must stay deletable.
+
+A card's kind is written once, when the card is made, and never re-derived:
+the open landing restores the active card's kind verbatim from the session
+stash or from `variants.json`'s `active_kind`, and derives it only when no
+record exists (the pixel record's `generated` flag then names ✨, else ▣) or
+when the record's word and the pixel record disagree about which side of the
+taxonomy the card is on (the pixels win). A card whose master did not load
+keeps its kind and its recorded master link, exactly as a background card does
+when its own decode fails, so a save writes the same link back — except a ▣
+card whose in-place master was deleted, which works from the photo file again
+(the 2026-10-18 rule). Until 2026-11-18 the landing rebuilt the kind from two
+booleans, every ◈ / ▦ card (and every card whose master did not load) came
+back as 「▣ Original」, and the next save wrote that down: the door now repairs
+such strips (`repair_lost_card_kinds`, beside `normalize_ai_cards` and on its
+terms — in memory, said once, saved by Ctrl+S). A second Original-kind card
+whose master's file name says `denoise` or `stack` gets that word back; one
+with no master, no name and no develop of its own is an empty copy of the base
+and is removed; anything else stays and can be deleted. The words a strip
+record may hold have one home, the store's `CARD_KIND_WORDS`, which the GUI's
+kinds are tested against in both directions: until 2026-11-18 the store kept
+its own copy without `stacked`, so every saved strip holding a ▦ card read
+back as unresolved. The master-name tags those two kinds are told by
+(`DENOISE_MASTER_TAG`, `STACK_MASTER_TAG`) live beside them.
 
 `store::list_edits(src)` is the read side: a photo's whole edit-state list in
 one query — the strip's cards in strip order, then its version snapshots

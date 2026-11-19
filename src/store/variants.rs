@@ -2,8 +2,8 @@
 
 use super::*;
 
-/// One BACKGROUND variant in a [`VariantsRecord`]: its kind
-/// ("original" | "generated" | "fitted" | "edited" | "denoised"), the variant's full develop recipe,
+/// One BACKGROUND variant in a [`VariantsRecord`]: its kind (one of
+/// [`CARD_KIND_WORDS`]), the variant's full develop recipe,
 /// and its baked raster origin when the variant is pixel-based. Base pixels
 /// are NOT stored — they re-decode from `origin`; source-based variants
 /// re-develop the shared source.
@@ -64,14 +64,28 @@ pub struct VariantsRecord {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-/// The `variants.json` kind vocabulary — a FORMAT every surface shares (the
-/// GUI's `VariantKind::store_str` spells the same words). `"edited"`
+/// The `variants.json` card-kind words — a FORMAT every surface shares, and
+/// its ONE home (2026-11-18): the GUI's `VariantKind::store_str` spells these
+/// words, and a GUI test walks every `VariantKind` against this list in both
+/// directions. Until then the store kept its own `matches!` copy, which never
+/// learned `"stacked"` — so every saved strip holding a ▦ card read back as
+/// unresolved, its background cards hidden and every save refused. `"edited"`
 /// (2026-09-13) is a develop of the user's own over a generated card's
 /// pixels: a generated card is immutable, so any non-neutral develop on AI
 /// pixels is an edited card — [`ActiveWrite::DevelopOnAiPixels`] is how a
 /// writer without a live strip states that.
+pub const CARD_KIND_WORDS: [&str; 6] = ["original", "generated", "fitted", "edited", "denoised", "stacked"];
+
+/// The tag a denoise master's file name carries — `<stem>.denoise.png`,
+/// `<stem>.denoise-<n>.png` (`pipeline::unique_out`) — and a stack master's.
+/// One home for every writer that names such a master (the desktop app's
+/// denoise and stack, the web UI's stack) and for the desktop app's reader
+/// that tells a ◈ / ▦ card by its master when a strip lost the card's word.
+pub const DENOISE_MASTER_TAG: &str = "denoise";
+pub const STACK_MASTER_TAG: &str = "stack";
+
 fn known_variant_kind(kind: &str) -> bool {
-    matches!(kind, "original" | "generated" | "fitted" | "edited" | "denoised")
+    CARD_KIND_WORDS.contains(&kind)
 }
 
 /// Persist the strip record. Origins inside the develop dir are stored by

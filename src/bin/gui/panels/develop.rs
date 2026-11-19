@@ -519,6 +519,7 @@ impl AutoShadeApp {
         #[cfg(test)]
         {
             self.strip_row_rect = Some(ui.max_rect());
+            self.strip_card_actions.clear();
         }
         ui.add_space(((ui.available_height() - card_h) / 2.0).max(0.0));
         // LAYOUT INVARIANT (probed, R14+R15): egui places the scroll area
@@ -726,13 +727,7 @@ impl AutoShadeApp {
                                 } else if let Some(n) = &named {
                                     steady_note(ui, format!("「{n}」"));
                                 }
-                                if let Some(a) = self.variant_card_buttons(
-                                    ui,
-                                    i,
-                                    active,
-                                    busy,
-                                    VariantSurface::Strip,
-                                ) {
+                                if let Some(a) = self.variant_card_buttons(ui, i, active, busy) {
                                     act = Some(a);
                                 }
                             });
@@ -752,33 +747,29 @@ impl AutoShadeApp {
     }
 
     /// The card's ACTION buttons — ＋ archive, ▣ apply-to-Original, ✕ delete
-    /// — for whichever surface is drawing the card (R24-5).
-    ///
-    /// Extracted from `variant_strip` verbatim when the Versions section's
-    /// edit-state list grew the same three buttons: a card action must mean
-    /// one thing and be implemented once, or the two lists answer 「what does
-    /// ✕ do here」 differently the first time either is touched. The strip
-    /// keeps the rename box (see [`VariantSurface`]).
+    /// — on the strip's card (R24-5). The strip is the one home of the cards
+    /// since 2026-11-18: the Versions section's copy of this list repeated it
+    /// and is gone.
     ///
     /// Returns the deferred action; the caller performs it through
     /// `dispatch_variant_action` after the layout closure has released `self`.
-    // `surface` decides only which headless seam records the row, so it is
-    // genuinely unused in a release build — the alternative (two near-copies
-    // of this function) is the thing the extraction exists to remove.
-    #[cfg_attr(not(test), allow(unused_variables))]
     pub(crate) fn variant_card_buttons(
         &mut self,
         ui: &mut egui::Ui,
         i: usize,
         active: bool,
         busy: bool,
-        surface: VariantSurface,
     ) -> Option<VariantAction> {
         let lang = self.lang;
         let kind = self.variants[i].kind;
+        // The base negative is the one card nothing replaces: never dropped,
+        // never the target of its own 「apply to Original」. Asked of the one
+        // owner of that choice, not of the kind — a strip that kept a card
+        // whose word was lost holds a second Original-kind card, and that one
+        // must stay deletable (`repair_lost_card_kinds`, case (c)).
+        let is_base = self.original_index() == Some(i);
         let mut act: Option<VariantAction> = None;
-        // Which glyphs this row actually laid out — the list surface's test
-        // seam, since it has no rects of its own to assert on.
+        // Which glyphs this card actually laid out — a test seam.
         #[cfg(test)]
         let mut drawn: Vec<&str> = Vec::new();
         // R24-2 (user decision ②, in place of save-as-you-go snapshots): a
@@ -796,7 +787,9 @@ impl AutoShadeApp {
             #[cfg(test)]
             drawn.push("＋");
             if glyph(ui, !busy, "＋")
-                .on_hover_text(tr(lang, "Snapshot this card's develop only as a numbered version (v<N>.recipe.json with frozen mask rasters); Ctrl+S saves every card"))
+                // The Versions section's 「＋ Save as version」 says the same
+                // sentence: one action, one key.
+                .on_hover_text(tr(lang, "Save this variant's current adjustments as a numbered version. Ctrl+S saves the whole photo."))
                 .clicked()
             {
                 act = Some(VariantAction::SaveVersion);
@@ -812,7 +805,7 @@ impl AutoShadeApp {
         // look is in its raster, so there is nothing parametric to copy.
         // Hidden entirely when this card IS the negative, or when the strip
         // has no Original card to apply onto.
-        if active && kind != VariantKind::Original && self.original_index().is_some() {
+        if active && !is_base && self.original_index().is_some() {
             let can = kind.is_source_based();
             let hover = if can {
                 tr(lang, "Copy this variant's develop onto the ▣ Original card — its baked pixels and this card both stay. One Ctrl+Z undoes it; Ctrl+S then saves it as this photo's develop")
@@ -823,27 +816,23 @@ impl AutoShadeApp {
             };
             let resp = glyph(ui, can && !busy, "▣").on_hover_text(hover);
             #[cfg(test)]
-            drawn.push(if can && !busy { "▣" } else { "▣(off)" });
-            #[cfg(test)]
-            if surface == VariantSurface::Strip {
-                // The STRIP owns this seam: a full frame draws both surfaces,
-                // and letting the list overwrite it would silently retarget
-                // every existing assertion at the other widget.
+            {
+                drawn.push(if can && !busy { "▣" } else { "▣(off)" });
                 self.strip_apply = Some((resp.rect, can && !busy));
             }
             if resp.clicked() {
                 act = Some(VariantAction::Apply(i));
             }
         }
-        // Any variant except the sole Original can be dropped.
+        // Any card except the base negative can be dropped.
         // ✕ — the ONE close/cancel glyph app-wide (the old bare × was the
         // fourth variant of it). ARMED (R24-4): the first click asks, the
         // second deletes — the button says which, because a deleted card
         // cannot be brought back (unlike a version, whose number the registry
         // keeps burned rather than the card recoverable).
         let armed = self.variant_delete_confirm == Some(i);
-        if self.variants.len() > 1
-            && kind != VariantKind::Original
+        let droppable = self.variants.len() > 1 && !is_base;
+        if droppable
             && glyph(ui, true, if armed { "✕?" } else { "✕" })
                 .on_hover_text(if armed {
                     tr(lang, "Click again to delete this variant — it cannot be brought back (Ctrl+Z does not cross variants)")
@@ -855,12 +844,11 @@ impl AutoShadeApp {
             act = Some(VariantAction::Delete(i));
         }
         #[cfg(test)]
-        if self.variants.len() > 1 && kind != VariantKind::Original {
-            drawn.push(if armed { "✕?" } else { "✕" });
-        }
-        #[cfg(test)]
-        if surface == VariantSurface::List {
-            self.edit_list_actions.push(format!("{i}:{}", drawn.join("")));
+        {
+            if droppable {
+                drawn.push(if armed { "✕?" } else { "✕" });
+            }
+            self.strip_card_actions.push(format!("{i}:{}", drawn.join("")));
         }
         act
     }
@@ -3238,7 +3226,7 @@ impl AutoShadeApp {
     fn dev_versions(&mut self, ui: &mut egui::Ui) -> bool {
         let lang = self.lang;
 
-        // --- 版本: recipe snapshots ≈ LR virtual copies (gap batch G) --------
+        // --- 版本: numbered snapshots of a card's develop (gap batch G) ------
         // #14b, group 4 — DELIVERY (versions + export): what leaves the app,
         // as opposed to what is being edited. This boundary gets the same
         // fence + hairline + breather rhythm the other two group fences use
@@ -3248,9 +3236,6 @@ impl AutoShadeApp {
         group_caption(ui, tr(lang, "Versions & Export"));
         let n_ver = self.versions.len();
         let n_ver_s = n_ver.to_string();
-        // Deferred like the strip's, and dispatched through the same owner
-        // after the section's closures release `self` (R24-5).
-        let mut act: Option<VariantAction> = None;
         card_fold(ui, egui::CollapsingHeader::new(section_title(&trf(lang, "Versions ({n})", &[("n", &n_ver_s)]), n_ver > 0))
             .id_salt("sec_versions")
             .default_open(false)
@@ -3264,157 +3249,51 @@ impl AutoShadeApp {
                 // so the whole section goes inert rather than each button
                 // carrying its own guard.
                 ui.add_enabled_ui(!self.busy, |ui| {
-                // R24-4 (#1, phase 2 — minimal): ONE place that answers
-                // "what edit states does this photo have". A photo is one
-                // negative + N variant CARDS + one version history, so the
-                // cards are listed first and the numbered snapshots under
-                // them, in the vocabulary the data model now uses: the
-                // taxonomy's binary (parametric vs pixel-state) and the
-                // orthogonal "hangs off a baked master" attribute are the
-                // two notes a row can carry (R24-1).
-                //
-                // R24-5: the rows are no longer a read-only view — each one
-                // carries the card's own ＋ / ▣ / ✕, drawn by the SAME owner
-                // the strip draws them with (`variant_card_buttons`), so the
-                // two surfaces cannot come to mean different things. Clicking
-                // a row switches to that card, exactly as clicking its
-                // thumbnail does. Renaming stays on the strip on purpose: two
-                // `TextEdit`s over one buffer fight for the caret every frame
-                // (see `VariantSurface`).
-                //
-                // The buttons take a SECOND line rather than joining the
-                // label row. A 320 px panel already holds a kind label, a
-                // 「name」 and a vocabulary note; three more widgets on that
-                // line is how a side panel starts growing per frame, which is
-                // a defect this repo has shipped twice (R19, R22-3) and now
-                // has width-stability tests for.
-                let n_var = self.variants.len();
-                let busy = self.busy;
                 #[cfg(test)]
                 {
-                    self.edit_list_rows.clear();
-                    self.edit_list_actions.clear();
+                    self.version_rows.clear();
+                    self.version_save_rect = None;
                 }
-                if n_var > 0 {
-                    let accent = self.theme.colors().accent_text;
-                    ui.label(
-                        egui::RichText::new(trf(
-                            lang,
-                            "Variants ({n})",
-                            &[("n", &n_var.to_string())],
-                        ))
-                        .weak()
-                        .small(),
-                    );
-                    let active_i = self.active;
-                    for i in 0..n_var {
-                        // Read the three facts the row shows BEFORE the layout
-                        // closure borrows `self` (Variant is not Clone, and
-                        // making it so for a display row would be the wrong
-                        // fix — the card's texture handle rides on it).
-                        let (kind, name, on_pixels) = {
-                            let v = &self.variants[i];
-                            (v.kind, v.name.clone(), v.origin.is_some())
-                        };
-                        #[cfg(test)]
-                        self.edit_list_rows.push(format!("variant:{}", kind.store_str()));
-                        let hit = ui
-                            .horizontal(|ui| {
-                                let label = egui::RichText::new(tr(lang, kind.label())).small();
-                                ui.label(if i == active_i {
-                                    label.strong().color(accent)
-                                } else {
-                                    label
-                                });
-                                if let Some(n) = &name {
-                                    ui.label(egui::RichText::new(format!("「{n}」")).small());
-                                }
-                                if i == active_i {
-                                    ui.label(
-                                        egui::RichText::new(tr(lang, "· current"))
-                                            .weak()
-                                            .small(),
-                                    );
-                                }
-                                if kind == VariantKind::Edited {
-                                    ui.label(
-                                        egui::RichText::new(tr(lang, "· develop over AI pixels (no XMP)"))
-                                            .weak()
-                                            .small(),
-                                    );
-                                } else if !kind.is_source_based() {
-                                    ui.label(
-                                        egui::RichText::new(tr(lang, "· pixel-state (no XMP)"))
-                                            .weak()
-                                            .small(),
-                                    );
-                                } else if on_pixels {
-                                    ui.label(
-                                        egui::RichText::new(tr(lang, "· on baked pixels"))
-                                            .weak()
-                                            .small(),
-                                    );
-                                }
-                            })
-                            .response
-                            .interact(egui::Sense::click());
-                        // The whole label row is the switch target — the same
-                        // gesture the strip's thumbnail offers, on the row that
-                        // names the card. A BACKGROUND row only: re-selecting
-                        // the active card would run a switch (and its commit)
-                        // for no change.
-                        if i != active_i
-                            && hit
-                                .on_hover_text(tr(
-                                    lang,
-                                    "Click to switch to this variant (lossless)",
-                                ))
-                                .clicked()
-                        {
-                            act = Some(VariantAction::Switch(i));
-                        }
-                        // The card's own actions, one owner with the strip.
-                        // Indented under the label so the two lines read as
-                        // one row rather than as two entries.
-                        let has_actions =
-                            i == active_i || (n_var > 1 && kind != VariantKind::Original);
-                        if has_actions {
-                            ui.horizontal(|ui| {
-                                ui.add_space(SPACE_LG);
-                                if let Some(a) = self.variant_card_buttons(
-                                    ui,
-                                    i,
-                                    i == active_i,
-                                    busy,
-                                    VariantSurface::List,
-                                ) {
-                                    act = Some(a);
-                                }
-                            });
-                        }
-                    }
-                }
-                sub_caption(ui, tr(lang, "Snapshot history"));
-                if action_row(ui, true, tr(lang, "＋ Save as version"))
-                    .on_hover_text(tr(lang, "Snapshot this card's develop only as a numbered version (v<N>.recipe.json with frozen mask rasters); Ctrl+S saves every card"))
-                    .clicked()
+                // VERSIONS ONLY (2026-11-18, user: 「这是什么意思，看不懂」,
+                // 「这块需要好好整理」). The section used to open with a list
+                // of the photo's variant CARDS — the cards the strip under
+                // the canvas already shows, with thumbnails — and then named
+                // its own subject a third way ("Snapshot history"). The strip
+                // is the one home of the cards; this section says in one line
+                // what a version is, offers the one verb that makes one, and
+                // lists them. The line is always there, not only while the
+                // list is empty: it is the answer to "what is this section".
+                steady_note(ui, tr(lang, "A version is a saved copy of the current adjustments — load it back whenever you like."));
+                let save = action_row(ui, true, tr(lang, "＋ Save as version"))
+                    // The strip's ＋ on the active card says the same
+                    // sentence: one action, one key.
+                    .on_hover_text(tr(lang, "Save this variant's current adjustments as a numbered version. Ctrl+S saves the whole photo."));
+                #[cfg(test)]
                 {
+                    self.version_save_rect = Some(save.rect);
+                }
+                if save.clicked() {
                     self.save_version();
                 }
-                // R24-2: a version row is 「v3 「日落偏暖」· 来自 ◭ 反推」 —
-                // the number, the user's own name, and which VARIANT the
-                // snapshot was taken from. The filter answers "show me only
-                // this card's history"; rows it hides are COUNTED below, so
-                // a shrinking list is never mistaken for lost versions.
+                // R24-2: a version row is 「v3 「日落偏暖」」 and, under it, which
+                // VARIANT the snapshot was taken from. The filter answers "show
+                // me only this card's history"; rows it hides are COUNTED
+                // below, so a shrinking list is never mistaken for lost
+                // versions. Both exist only for a photo with more than one
+                // card: with one, every version is that card's, the line would
+                // repeat it, and a filter left ticked on another photo must not
+                // hide rows behind a control that is not drawn.
+                let several_cards = self.variants.len() > 1;
                 let active_id = self.active_variant().map(|v| v.id.clone()).unwrap_or_default();
                 let active_kind = self.active_variant().map(|v| v.kind);
-                if !self.versions.is_empty() {
-                    check(ui, &mut self.versions_current_only, tr(lang, "Only this variant"))
+                if several_cards && !self.versions.is_empty() {
+                    check(ui, &mut self.versions_current_only, tr(lang, "Only versions saved from this variant"))
                         .on_hover_text(tr(
                             lang,
-                            "Show only snapshots taken from the variant you are on. Versions with no recorded source (saved before this) are hidden while it is on.",
+                            "Show only the versions saved from the variant you are on. Versions that did not record where they came from are hidden while this is ticked.",
                         ));
                 }
+                let filter = several_cards && self.versions_current_only;
                 let mut load: Option<u32> = None;
                 let mut delete: Option<u32> = None;
                 let mut rename: Option<u32> = None;
@@ -3425,115 +3304,160 @@ impl AutoShadeApp {
                 let photo = self.src_path.clone();
                 for n in versions {
                     let meta = self.version_meta.get(&n).cloned();
-                    if self.versions_current_only
-                        && !Self::version_is_from(meta.as_ref(), &active_id, active_kind)
-                    {
+                    if filter && !Self::version_is_from(meta.as_ref(), &active_id, active_kind) {
                         hidden += 1;
                         continue;
                     }
-                    #[cfg(test)]
-                    self.edit_list_rows.push(format!("version:{n}"));
                     let named = meta.as_ref().and_then(|m| m.name.clone());
                     let editing = self
                         .version_name_buf
                         .as_ref()
                         .is_some_and(|(p, j, ..)| *j == n && Some(p) == photo.as_ref());
-                    ui.horizontal(|ui| {
-                        ui.label(format!("v{n}"));
-                        let field_id = ui.make_persistent_id(("version_name", n));
-                        if editing {
-                            let resp = {
-                                let buf = &mut self
-                                    .version_name_buf
-                                    .as_mut()
-                                    .expect("checked just above")
-                                    .3;
-                                ui.add(
-                                    egui::TextEdit::singleline(buf)
-                                        .id(field_id)
-                                        .margin(field_margin(ui))
-                                        .desired_width(110.0)
-                                        .hint_text(tr(lang, "Name")),
-                                )
-                            };
-                            // The +1 boundary: this row's own lost-focus
-                            // commit, the twin of the mask panel's (U10).
-                            // Enter counts as losing focus in egui. Leaving
-                            // the box also leaves EDIT MODE — a row that
-                            // stayed a TextEdit forever would keep asking
-                            // for focus below and never give it back.
-                            if resp.lost_focus() {
-                                self.commit_version_name_buf();
-                                self.version_name_buf = None;
-                            } else if !resp.has_focus() {
-                                // The frame the box first appears in: the
-                                // click that opened it landed on the LABEL
-                                // that used to be here, so the caret has to
-                                // be put here explicitly or the user's next
-                                // keystroke goes nowhere.
-                                resp.request_focus();
+                    let field_id = ui.make_persistent_id(("version_name", n));
+                    // A TWO-ZONE row of one row's height, as wide as the
+                    // 「＋ Save as version」 button above it. The verbs are laid
+                    // first, right to left from the row's right edge, so every
+                    // row's 🗑 ends where that button ends whatever the name
+                    // says; the number and the name take what is left, and the
+                    // name CUTS rather than wraps or pushes. A plain
+                    // `horizontal` laid them one after another at their own
+                    // widths: a long name or provenance pushed 「Load」 and 🗑
+                    // past the panel's edge, and that one row widened the
+                    // content under every section below it.
+                    //
+                    // Provenance, only when it was actually recorded — a
+                    // version from before this existed says nothing rather
+                    // than guessing — on a line of its own under the name.
+                    // "from <card>" only when there is more than one card to
+                    // tell apart; "auto-archived" whenever it is recorded, as
+                    // it says how the version came to be, not where from.
+                    let note = meta.as_ref().and_then(|m| {
+                        let from = m.from_kind.as_deref().and_then(VariantKind::from_store_str);
+                        match (from, m.origin.as_deref()) {
+                            // `kind` by name, not `k`: the i18n audit's
+                            // dynamic-key registry keys on the receiver
+                            // spelling (`kind.label()`), which is how a
+                            // new VariantKind without a zh pair is caught.
+                            (Some(kind), _) if several_cards => {
+                                Some(trf(lang, "from {kind}", &[("kind", tr(lang, kind.label()))]))
                             }
-                        } else {
-                            let shown = match &named {
-                                Some(name) => format!("「{name}」"),
-                                None => tr(lang, "Name…").to_string(),
-                            };
-                            let text = match &named {
-                                Some(_) => egui::RichText::new(shown),
-                                None => egui::RichText::new(shown).weak(),
-                            };
-                            if ui
-                                .add(egui::Label::new(text).sense(egui::Sense::click()))
-                                .on_hover_text(tr(lang, "Name this snapshot"))
-                                .clicked()
-                            {
-                                rename = Some(n);
+                            (_, Some(autoshade::store::VERSION_ORIGIN_AUTO)) => {
+                                Some(tr(lang, "auto-archived").to_string())
                             }
-                        }
-                        // Provenance, only when it was actually recorded —
-                        // a version from before this existed says nothing
-                        // rather than guessing.
-                        if let Some(m) = &meta {
-                            let from = m.from_kind.as_deref().and_then(VariantKind::from_store_str);
-                            let note = match (from, m.origin.as_deref()) {
-                                // `kind` by name, not `k`: the i18n audit's
-                                // dynamic-key registry keys on the receiver
-                                // spelling (`kind.label()`), which is how a
-                                // new VariantKind without a zh pair is caught.
-                                (Some(kind), _) => Some(trf(
-                                    lang,
-                                    "· from {kind}",
-                                    &[("kind", tr(lang, kind.label()))],
-                                )),
-                                (None, Some(autoshade::store::VERSION_ORIGIN_AUTO)) => {
-                                    Some(tr(lang, "· auto-archived").to_string())
-                                }
-                                _ => None,
-                            };
-                            if let Some(note) = note {
-                                steady_note(ui, note);
-                            }
-                        }
-                        if action(ui, true, tr(lang, "Load")).on_hover_text(tr(lang, "Replace current parameters (one Ctrl+Z to undo)")).clicked() {
-                            load = Some(n);
-                        }
-                        if glyph(ui, true, "🗑")
-                            .on_hover_text(tr(lang, "Delete this snapshot (its frozen mask rasters go with it)"))
-                            .clicked()
-                        {
-                            delete = Some(n);
+                            _ => None,
                         }
                     });
+                    // The row and its line are ONE allocation, the line
+                    // `SPACE_XS` under the row: laid as two, the column's
+                    // item gap stood both above and below the line, which
+                    // left it exactly halfway between its own row and the
+                    // next — nobody could tell whose it was. The next row
+                    // still starts one item gap below the block.
+                    let line_h = ui.text_style_height(&egui::TextStyle::Small);
+                    let block_h = row_h(ui) + note.as_ref().map_or(0.0, |_| SPACE_XS + line_h);
+                    let (block, _) = ui.allocate_exact_size(egui::vec2(columns(ui, 1).x, block_h), egui::Sense::hover());
+                    let row = egui::Rect::from_min_size(block.min, egui::vec2(block.width(), row_h(ui)));
+                    let mut verbs = ui.new_child(
+                        egui::UiBuilder::new()
+                            .id_salt(("version_verbs", n))
+                            .max_rect(row)
+                            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                    );
+                    let bin = glyph(&mut verbs, true, "🗑")
+                        .on_hover_text(tr(lang, "Delete this version — it cannot be brought back"));
+                    if bin.clicked() {
+                        delete = Some(n);
+                    }
+                    let load_btn = action(&mut verbs, true, tr(lang, "Load"))
+                        .on_hover_text(tr(lang, "Replace the current adjustments with this version (one Ctrl+Z undoes it)"));
+                    if load_btn.clicked() {
+                        load = Some(n);
+                    }
+                    let name_cell = egui::Rect::from_min_max(
+                        row.min,
+                        egui::pos2(load_btn.rect.left() - ui.spacing().item_spacing.x, row.max.y),
+                    );
+                    let mut left = ui.new_child(
+                        egui::UiBuilder::new()
+                            .id_salt(("version_name_cell", n))
+                            .max_rect(name_cell)
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    );
+                    left.set_clip_rect(name_cell.intersect(ui.clip_rect()));
+                    left.label(format!("v{n}"));
+                    let name_x = left.cursor().left();
+                    let name_rect = if editing {
+                        let resp = {
+                            let buf = &mut self
+                                .version_name_buf
+                                .as_mut()
+                                .expect("checked just above")
+                                .3;
+                            // The box takes the name's own cell: one row tall
+                            // (`field_margin`), so opening it moves nothing.
+                            let w = (left.available_width() - 2.0 * crate::util::FIELD_MARGIN_X).max(0.0);
+                            left.add(
+                                egui::TextEdit::singleline(buf)
+                                    .id(field_id)
+                                    .margin(field_margin(&left))
+                                    .desired_width(w)
+                                    .hint_text(tr(lang, "Name")),
+                            )
+                        };
+                        // The +1 boundary: this row's own lost-focus
+                        // commit, the twin of the mask panel's (U10).
+                        // Enter counts as losing focus in egui. Leaving
+                        // the box also leaves EDIT MODE — a row that
+                        // stayed a TextEdit forever would keep asking
+                        // for focus below and never give it back.
+                        if resp.lost_focus() {
+                            self.commit_version_name_buf();
+                            self.version_name_buf = None;
+                        } else if !resp.has_focus() {
+                            // The frame the box first appears in: the
+                            // click that opened it landed on the LABEL
+                            // that used to be here, so the caret has to
+                            // be put here explicitly or the user's next
+                            // keystroke goes nowhere.
+                            resp.request_focus();
+                        }
+                        resp.rect
+                    } else {
+                        let shown = match &named {
+                            Some(name) => format!("「{name}」"),
+                            None => tr(lang, "Name…").to_string(),
+                        };
+                        let text = match &named {
+                            Some(_) => egui::RichText::new(shown),
+                            None => egui::RichText::new(shown).weak(),
+                        };
+                        let resp = left
+                            .add(egui::Label::new(text).truncate().sense(egui::Sense::click()))
+                            .on_hover_text(tr(lang, "Name this version"));
+                        if resp.clicked() {
+                            rename = Some(n);
+                        }
+                        resp.rect
+                    };
+                    let note_rect = note.map(|note| {
+                        let cell = egui::Rect::from_min_max(egui::pos2(name_x, row.bottom() + SPACE_XS), block.max);
+                        let mut under = ui.new_child(
+                            egui::UiBuilder::new()
+                                .id_salt(("version_from", n))
+                                .max_rect(cell)
+                                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                        );
+                        under.add(egui::Label::new(egui::RichText::new(note).weak().small()).truncate()).rect
+                    });
+                    #[cfg(test)]
+                    self.version_rows.push((n, name_rect, load_btn.rect, bin.rect, note_rect));
+                    #[cfg(not(test))]
+                    let _ = (name_rect, note_rect);
                 }
                 if hidden > 0 {
-                    ui.label(
-                        egui::RichText::new(trf(
-                            lang,
-                            "{n} hidden — saved from another variant",
-                            &[("n", &hidden.to_string())],
-                        ))
-                        .weak()
-                        .small(),
+                    steady_note(
+                        ui,
+                        trf(lang, "{n} hidden — saved from another variant", &[("n", &hidden.to_string())]),
                     );
                 }
                 if let Some(n) = rename
@@ -3587,16 +3511,8 @@ impl AutoShadeApp {
                         }
                     }
                 }
-                if n_ver == 0 {
-                    explainer(ui, lang, tr(lang, "Like LR virtual copies: store multiple parameter sets for one photo (B&W, cropped…) without overwriting."));
-                }
                 }); // add_enabled_ui: inert while a photo is still opening
             });
-        // The edit-state list's card action, performed through the SAME owner
-        // the strip uses — after the section's closures have released `self`.
-        if let Some(a) = act {
-            self.dispatch_variant_action(a, ui.ctx());
-        }
         false
     }
 

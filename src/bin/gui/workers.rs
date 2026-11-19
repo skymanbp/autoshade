@@ -1346,7 +1346,9 @@ impl AutoShadeApp {
                             // decode/resolve in the worker (it only eprintln'd
                             // there) — a desktop-launched GUI would otherwise
                             // show an apparently normal un-retouched open with
-                            // no in-app trace.
+                            // no in-app trace. Said once the card is built
+                            // (below), because what is true afterwards depends
+                            // on the card.
                             // has_pixel_source, NOT read_pixel_source: the
                             // latter answers None for "nothing recorded" AND
                             // for "recorded but broken", so asking it again
@@ -1354,16 +1356,20 @@ impl AutoShadeApp {
                             // commonest causes — a deleted/moved master and a
                             // corrupt pixels.json. Those are precisely the
                             // cases the user must be told about.
-                            if baked.is_none()
-                                && let Some(p) = self.src_path.as_deref()
-                                && autoshade::store::has_pixel_source(p)
-                            {
-                                let t = tr(
-                                    lang,
-                                    "the saved retouch master could not be loaded — opened the un-retouched source (Ctrl+S would overwrite the master link)",
-                                );
-                                self.toast(ToastKind::Error, t);
-                            }
+                            let master_failed = baked.is_none()
+                                && self.src_path.as_deref().is_some_and(autoshade::store::has_pixel_source);
+                            // …and the link itself, as RECORDED, whether or
+                            // not its file is there (`None` for a record that
+                            // cannot be read at all). A card whose master did
+                            // not load keeps this link, exactly as a
+                            // background card of the strip keeps its `origin`
+                            // when `load_active`'s decode fails — and every
+                            // saver then writes the same link back.
+                            let lost_master = if master_failed {
+                                self.src_path.as_deref().and_then(autoshade::store::recorded_pixel_source)
+                            } else {
+                                None
+                            };
                             let mut pixels: Option<BakedBase> = baked;
                             // The stashed active card's master when its decode
                             // was still IN FLIGHT at navigate-away: origin
@@ -1373,13 +1379,18 @@ impl AutoShadeApp {
                             let mut pending_master: Option<PathBuf> = None;
                             let mut stash_others: Vec<StashedVariant> = Vec::new();
                             let mut stash_active_pos = 0usize;
-                            // The ACTIVE card's three-valued kind, whichever
-                            // authority supplies it: the session stash below,
-                            // or the persisted strip record read further down
-                            // (`Fitted` is source-based, so it has no pixels
-                            // arm to ride back on — without this the card
-                            // reopened renamed 「▣ 原片」).
-                            let mut active_kind = VariantKind::Original;
+                            // The ACTIVE card's kind, from whichever authority
+                            // RECORDED it: the session stash below, or the
+                            // persisted strip record read further down — taken
+                            // VERBATIM. A card's kind is written once, when
+                            // the card is made, and never re-derived: the old
+                            // landing rebuilt it from two booleans (a pixels
+                            // arm, a `generated` flag) plus two special-cased
+                            // words, so every ◈ / ▦ card — and every card whose
+                            // master did not load — reopened as a second
+                            // 「▣ 原片」, and the next save wrote that lie down
+                            // for good. `None` = no authority has a word.
+                            let mut active_kind: Option<VariantKind> = None;
                             // …and its identity + name, from the same two
                             // authorities (R24-2, hop 6 of 6). The default is
                             // the FIXED base-negative id: the common photo
@@ -1392,7 +1403,7 @@ impl AutoShadeApp {
                                 self.src_path.as_ref().and_then(|p| self.nav_stash.remove(p))
                             {
                                 recipe = st.recipe;
-                                active_kind = st.kind;
+                                active_kind = Some(st.kind);
                                 active_id = st.id;
                                 active_name = st.name;
                                 pixels = match (st.base, st.origin) {
@@ -1456,7 +1467,7 @@ impl AutoShadeApp {
                                 // `VariantKind::is_source_based` now, so a
                                 // new kind cannot inherit the answer.
                                 if let Some(p) = self.src_path.clone() {
-                                    let mut relooked = active_kind.is_source_based()
+                                    let mut relooked = st.kind.is_source_based()
                                         && autoshade::pipeline::repair_pre_era_base_curve(
                                             &p, &mut recipe,
                                         )
@@ -1507,24 +1518,20 @@ impl AutoShadeApp {
                                 _ => None,
                             };
                             if !from_stash && let Some(rec) = &disk_strip {
-                                if rec.active_kind == "fitted" {
-                                    // Fitted is source-based — its pixels arm,
-                                    // when it has one (the negative's in-place
-                                    // master, inherited at the fit), says
-                                    // `inplace` like the ▣ card's and cannot
-                                    // name the kind; without this the card
-                                    // cold-reopened renamed 「▣ 原片」. A recorded
-                                    // "generated" needs no hand here: the baked
-                                    // pixels arm below upgrades the card exactly
-                                    // when the master really decoded.
-                                    active_kind = VariantKind::Fitted;
-                                } else if rec.active_kind == "edited" {
-                                    // An edited card rides the pixels arm
-                                    // below like the generated card it forked
-                                    // from (the same AI raster); the arm needs
-                                    // the WORD to keep it from reopening as
-                                    // the pristine ✨ card.
-                                    active_kind = VariantKind::Edited;
+                                // The record's word, whatever kind it names:
+                                // the pixel record cannot name it (a ◭ card's
+                                // inherited master and a ◈ / ▦ card's own one
+                                // all say `inplace`; a ✎ card shares its ✨
+                                // card's `generated` raster). A word this build
+                                // does not know is said the way
+                                // `strip_from_record` says one, and the kind
+                                // is then read off the pixel record below.
+                                active_kind = VariantKind::from_store_str(&rec.active_kind);
+                                if active_kind.is_none() {
+                                    eprintln!(
+                                        "⚠ variants.json names the active card with unknown kind {:?} — its kind is read off the pixel record",
+                                        rec.active_kind
+                                    );
                                 }
                                 // The persisted strip is also where the active
                                 // card's identity + name live (R24-2); a record
@@ -1534,21 +1541,58 @@ impl AutoShadeApp {
                                 );
                                 active_name = rec.active_name.clone();
                             }
+                            // The pixel record's `generated` flag: the master
+                            // that decoded (or the stash's, which is the
+                            // stashed kind's own), else — on a cold open
+                            // only; the stash outranks disk wholesale — the
+                            // record of the one that did not.
+                            let pixel_flag = pixels.as_ref().map(|(_, _, g)| *g).or_else(|| {
+                                lost_master.as_ref().filter(|_| !from_stash).map(|(_, g)| *g)
+                            });
+                            let active_kind = match active_kind {
+                                // The one fact a word and the pixel record
+                                // can disagree on is the taxonomy's side: a
+                                // source-based word over an AI raster (or the
+                                // reverse) is a record left behind by a writer
+                                // that changed the develop and not the word.
+                                // The pixels are what the canvas will show, so
+                                // they decide — as the old pixels arm did.
+                                Some(k) if pixel_flag.is_some_and(|g| g != k.on_ai_pixels()) => {
+                                    eprintln!(
+                                        "⚠ the strip record's active kind {:?} disagrees with the pixel record — the card follows the pixels",
+                                        k.store_str()
+                                    );
+                                    if k.on_ai_pixels() { VariantKind::Original } else { VariantKind::Generated }
+                                }
+                                Some(k) => k,
+                                // No word at all — a develop that never had a
+                                // strip record: derived from the one fact that
+                                // exists.
+                                None if pixel_flag == Some(true) => VariantKind::Generated,
+                                None => VariantKind::Original,
+                            };
+                            // A recorded word for a kind that OWNS an image
+                            // (✨ / ✎ an AI raster, ◈ / ▦ a remade negative)
+                            // over NO pixel record at all: nothing failed to
+                            // load — nothing was ever recorded — so the card
+                            // shows the source develop under its own label.
+                            // The word stands (it is the authority); the user
+                            // is told once, below. One rule for all four kinds.
+                            let own_image_missing = !from_stash
+                                && pixels.is_none()
+                                && !master_failed
+                                && (active_kind.on_ai_pixels() || active_kind.is_remade_negative());
                             self.recipe = recipe.clone();
                             self.rationale = recipe.rationale.clone();
                             self.rationale_notes.clear(); // disk restore carries no typed notes
                             self.variants = vec![Variant {
-                                // A PENDING master keeps its stashed kind: the
-                                // Fitted-or-Original collapse renamed a still-
-                                // decoding Generated card to 「▣ 原片」, and a
-                                // save then persisted that lie.
-                                kind: if pending_master.is_some() {
-                                    active_kind
-                                } else if active_kind == VariantKind::Fitted {
-                                    VariantKind::Fitted
-                                } else {
-                                    VariantKind::Original
-                                },
+                                // The kind settled above, whatever the pixels
+                                // below turn out to be: a PENDING master (a
+                                // stashed decode still in flight) and a master
+                                // that did not load both leave the card on the
+                                // source develop under its own kind, never a
+                                // 「▣ 原片」 that a save would then persist.
+                                kind: active_kind,
                                 id: active_id,
                                 name: active_name,
                                 recipe,
@@ -1588,20 +1632,14 @@ impl AutoShadeApp {
                                 // (same rule as analyzing a baked variant) or
                                 // curve + lens geometry would cook it twice.
                                 let (bw, bh) = bimg.dimensions();
+                                // The card's kind is already settled (the
+                                // record's word tells the pristine ✨ card
+                                // from a ✎ develop over the same raster; a
+                                // record that predates the split is
+                                // normalised below) — the pixels only arrive.
                                 if let Some(v) = self.variants.get_mut(0) {
                                     v.base = Some(bimg.clone());
                                     v.origin = Some(borigin);
-                                    if generated {
-                                        // The record's word tells the pristine
-                                        // ✨ card from a ✎ develop over the
-                                        // same raster; a record that predates
-                                        // the split is normalised below.
-                                        v.kind = if active_kind == VariantKind::Edited {
-                                            VariantKind::Edited
-                                        } else {
-                                            VariantKind::Generated
-                                        };
-                                    }
                                 }
                                 if generated {
                                     self.recipe.strip_baked_start();
@@ -1644,6 +1682,52 @@ impl AutoShadeApp {
                                 if let Some(photo) = self.src_path.clone() {
                                     self.spawn_master_load(ctx, photo, o);
                                 }
+                            }
+                            // A cold open whose recorded master did not load:
+                            // the card keeps its recorded link with no pixels
+                            // behind it, the state a background card is left
+                            // in when its own decode fails, and the disk
+                            // truth is that same link — so nothing reads as
+                            // unsaved, and every saver writes the link back as
+                            // it stands. One exception, `on_master_loaded`'s
+                            // (user report 2026-10-18): a ▣ card whose
+                            // in-place master was DELETED works from the photo
+                            // file again, and saving records exactly that.
+                            if !from_stash
+                                && let Some((o, _)) = lost_master.as_ref()
+                                && (active_kind != VariantKind::Original || o.exists())
+                                && let Some(v) = self.variants.get_mut(0)
+                            {
+                                v.origin = Some(o.clone());
+                                self.pixels_on_disk = Some(o.clone());
+                            }
+                            if master_failed {
+                                let kept = self.variants.first().is_some_and(|v| v.origin.is_some());
+                                let t = match lost_master.as_ref() {
+                                    _ if kept => tr(
+                                        lang,
+                                        "this card's saved master could not be loaded — showing the photo without it for now; the card keeps its link to the master, and saving keeps the link too",
+                                    )
+                                    .to_string(),
+                                    Some((o, _)) if !o.exists() => trf(
+                                        lang,
+                                        "the ▣ Original card's retouch master {path} was deleted — the card now works from the photo file itself (Ctrl+S saves that)",
+                                        &[("path", &o.display().to_string())],
+                                    ),
+                                    _ => tr(
+                                        lang,
+                                        "the saved retouch master could not be read — opened the photo without it; saving drops the broken link",
+                                    )
+                                    .to_string(),
+                                };
+                                self.toast(ToastKind::Error, t);
+                            }
+                            if own_image_missing {
+                                let t = tr(
+                                    lang,
+                                    "this variant's own image is missing from the store — it shows the photo instead; delete the variant if you no longer need it",
+                                );
+                                self.toast(ToastKind::Error, t);
                             }
                             // Restore the BACKGROUND variants the stash
                             // carried (H4): the strip used to collapse to
@@ -1707,6 +1791,33 @@ impl AutoShadeApp {
                                     );
                                     self.toast(ToastKind::Error, t);
                                 }
+                            }
+                            // The base-negative invariant, restored at the
+                            // same door and on the same terms (2026-11-18):
+                            // the strips the re-derived kind already wrote
+                            // with a second 「▣ Original」 card are repaired in
+                            // memory, said once, and saved by Ctrl+S.
+                            let repair = self.repair_lost_card_kinds();
+                            if repair.active_removed {
+                                // The canvas was the removed duplicate's: the
+                                // base it gave way to becomes the canvas, the
+                                // way a deleted active card's neighbour does.
+                                self.load_active(ctx);
+                            }
+                            let mut fixed: Vec<String> = Vec::new();
+                            if repair.removed > 0 {
+                                fixed.push(tr(lang, "an empty copy of the ▣ Original variant was removed").to_string());
+                            }
+                            for kind in &repair.restored {
+                                fixed.push(trf(lang, "a variant was given back its kind 「{kind}」", &[("kind", tr(lang, kind.label()))]));
+                            }
+                            if !fixed.is_empty() {
+                                let t = trf(
+                                    lang,
+                                    "This photo's variant list was repaired: {what} — Ctrl+S saves it this way",
+                                    &[("what", &fixed.join("; "))],
+                                );
+                                self.toast(ToastKind::Success, t);
                             }
                             // The AI-card invariant, restored at the door
                             // (2026-09-13): a record that predates the split

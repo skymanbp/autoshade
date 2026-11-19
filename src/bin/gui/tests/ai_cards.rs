@@ -318,8 +318,8 @@
                 let note = match (lang, region) {
                     (Lang::En, true) => "adjusted → new ✨ card (painted area only)",
                     (Lang::En, false) => "adjusted → new ✨ card (whole image, divergence D = 0.12)",
-                    (Lang::Zh, true) => "已调整 → 新 ✨ 卡（只改涂抹区域）",
-                    (Lang::Zh, false) => "已调整 → 新 ✨ 卡（整张图，结构偏离 D = 0.12）",
+                    (Lang::Zh, true) => "已调整 → 新的 ✨ 变体（只改涂抹区域）",
+                    (Lang::Zh, false) => "已调整 → 新的 ✨ 变体（整张图，结构偏离 D = 0.12）",
                 };
                 assert!(app.status.starts_with(note), "landing language: {}", app.status);
                 // An edited AI card's non-neutral develop is just as immutable

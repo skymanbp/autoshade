@@ -118,7 +118,7 @@ pub(crate) fn explainer(ui: &mut egui::Ui, lang: Lang, text: &str) -> egui::Resp
 pub(crate) const EXPLAINER_W: f32 = 320.0;
 
 /// A caption for one block INSIDE a fold (the colour-grading scope, a mask's
-/// slider groups, the library ladder's rungs, the snapshot history): air and
+/// slider groups, the library ladder's rungs): air and
 /// a weak small line, no hairline — the fold's own indent already says whose
 /// block it is.
 pub(crate) fn sub_caption(ui: &mut egui::Ui, title: &str) {
