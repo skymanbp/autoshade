@@ -1116,6 +1116,46 @@ impl AutoShadeApp {
         }
     }
 
+    /// 「Import adjustments from an .xmp…」: pick any .xmp and read it in
+    /// through the question's own landing ([`Self::read_xmp_in`]).
+    /// The dialog opens in the photo's own folder, where the file another
+    /// program wrote for it usually is.
+    pub(crate) fn import_xmp_dialog(&mut self, ctx: &egui::Context) {
+        let mut dialog = rfd::FileDialog::new().add_filter("XMP", &["xmp", "XMP"]);
+        if let Some(dir) = self.src_path.as_deref().and_then(|p| p.parent()) {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(file) = dialog.pick_file() {
+            self.import_xmp_file(ctx, &file);
+        }
+    }
+
+    /// Read `file` in as one undoable, unsaved step. When it is the very file
+    /// beside the photo, the import also answers the question about it, so a
+    /// later open does not ask about a file the user already read in.
+    pub(crate) fn import_xmp_file(&mut self, ctx: &egui::Context, file: &std::path::Path) {
+        let lang = self.lang;
+        let label = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match autoshade::pipeline::read_xmp_file(file) {
+            Ok(text) => {
+                let beside = self.src_path.as_deref().map(|p| p.with_extension("xmp"));
+                let same = |a: &std::path::Path, b: &std::path::Path| match (a.canonicalize(), b.canonicalize()) {
+                    (Ok(a), Ok(b)) => a == b,
+                    _ => a == b,
+                };
+                let tag = beside
+                    .is_some_and(|b| same(&b, file))
+                    .then(|| autoshade::store::xmp_tag(&text));
+                self.read_xmp_in(ctx, &label, &text, tag.as_deref());
+            }
+            Err(e) => {
+                let t = trf(lang, "could not read {file}: {err}", &[("file", &label), ("err", &format!("{e:#}"))]);
+                self.status = t.clone();
+                self.toast(ToastKind::Error, t);
+            }
+        }
+    }
+
     /// Save this photo's develop to the central store: recipe.json, the
     /// baked-pixels link and the strip record, in one commit. No .xmp is
     /// written anywhere (2026-11-18): an .xmp is made only by 「Export .xmp

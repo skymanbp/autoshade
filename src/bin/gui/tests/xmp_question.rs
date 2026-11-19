@@ -446,3 +446,53 @@
         app.export_xmp_beside();
         assert!(!src.with_extension("xmp").exists(), "and the door writes nothing: {}", app.status);
     }
+
+    /// The Export section's 「Import adjustments from an .xmp…」 lands like the
+    /// question's "Read them in": ONE undoable, unsaved step from any .xmp the
+    /// user picks. Picking the very file beside the photo also answers the
+    /// question about it; a file that cannot be read says so and changes
+    /// nothing.
+    ///
+    /// MUTATION: `import_xmp_file` recording no answer for the file beside
+    /// the photo (its `tag` always `None`).
+    #[test]
+    fn a_picked_xmp_lands_like_the_question() {
+        let (src, xmp, dev, _scrub) = xmp_beside_fixture("pick");
+        let dir = src.parent().unwrap().to_path_buf();
+        let ctx = egui::Context::default();
+        let mut app = AutoShadeApp { src_path: Some(src.clone()), ..Default::default() };
+        land_cold_open(&mut app, &ctx, &src);
+        // As after a photo first met in the Normal workspace: the file beside
+        // it was never asked about, and never answered.
+        app.xmp_prompt = None;
+        assert!(develop_files(&dev).is_empty(), "premise: no answer recorded");
+        let before = app.recipe.clone();
+
+        // A file from anywhere: it lands, and answers no question.
+        let look = dir.join("look.xmp");
+        write_newer_xmp(&look, 17.0, 0);
+        app.import_xmp_file(&ctx, &look);
+        assert_eq!(app.recipe.contrast, 17.0, "the picked file's adjustments are on the canvas");
+        assert_eq!(
+            app.status,
+            "Adjustments read in from look.xmp — not saved yet (Ctrl+S saves, Ctrl+Z undoes)"
+        );
+        assert!(app.unsaved_marker_dirty(), "● lit");
+        assert!(develop_files(&dev).is_empty(), "nothing written: {:?}", develop_files(&dev));
+        app.commit_if_settled(&ctx);
+        app.undo(&ctx);
+        assert_eq!(app.recipe, before, "one Ctrl+Z returns to the canvas the user had");
+
+        // A file that cannot be read: said, and nothing lands.
+        app.import_xmp_file(&ctx, &dir.join("missing.xmp"));
+        assert!(app.status.starts_with("could not read missing.xmp: "), "{}", app.status);
+        assert_eq!(app.recipe, before, "nothing landed");
+
+        // The file beside the photo, picked by hand: read in, and answered.
+        app.import_xmp_file(&ctx, &xmp);
+        assert_eq!(app.recipe.contrast, 33.0);
+        assert_eq!(develop_files(&dev), ["external-xmp.answered"], "the import answered the question");
+        let mut again = AutoShadeApp { src_path: Some(src.clone()), ..Default::default() };
+        land_cold_open(&mut again, &ctx, &src);
+        assert!(again.xmp_prompt.is_none(), "a file already read in by hand is not asked about");
+    }

@@ -3634,10 +3634,13 @@ impl AutoShadeApp {
                     );
                 });
                 explainer(ui, lang, tr(lang, "Applied by 「Export」 in the toolbar (Ctrl+Shift+E, or Ctrl+E) and by 「Render」 in the library. The ▾ beside Export delivers one file to a path you pick without touching the Destination."));
-                // --- The .xmp export (2026-11-18) --------------------------
+                // --- The .xmp doors (2026-11-18) ---------------------------
                 // An .xmp is an external source: the app writes one only
                 // here, at the user's click, beside the photo where Lightroom
-                // reads it — built from the canvas at that moment.
+                // reads it — built from the canvas at that moment — and reads
+                // one only through the import below (or the question on
+                // open). The two buttons stand as one pair, each a full-width
+                // row, so neither label is cut at the narrowest sidebar.
                 ui.add_space(SPACE_LG);
                 let exportable = self.can_export_xmp_beside();
                 let is_raw = self.src_path.as_deref().is_some_and(autoshade::decode::is_raw);
@@ -3665,6 +3668,19 @@ impl AutoShadeApp {
                     .clicked()
                 {
                     self.export_xmp_beside();
+                }
+                let open = self.src_path.is_some();
+                let import_hint = if open {
+                    tr(lang, "Pick any .xmp file (Lightroom / Camera Raw settings). Its adjustments are read in as one step you can undo; Ctrl+S saves them.")
+                } else {
+                    tr(lang, "Open a photo first")
+                };
+                if action_row(ui, open && !self.busy, tr(lang, "Import adjustments from an .xmp…"))
+                    .on_hover_text(import_hint)
+                    .on_disabled_hover_text(import_hint)
+                    .clicked()
+                {
+                    self.import_xmp_dialog(ui.ctx());
                 }
             });
         false

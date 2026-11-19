@@ -511,8 +511,26 @@
     /// points (every fold open), cut from the group's caption down to the
     /// Export section's last verb, at 2×.
     fn versions_group_shot(app: &mut AutoShadeApp, theme: crate::theme::ThemePref, width: f32) -> image::RgbaImage {
-        app.theme = theme;
         let lang = app.lang;
+        controls_cut_shot(
+            app,
+            theme,
+            width,
+            tr(lang, "Versions & Export"),
+            tr(lang, "Import adjustments from an .xmp…"),
+        )
+    }
+
+    /// The controls panel as it is drawn at `width` points (every fold open),
+    /// cut from the text `top` down to the text `bottom`, at 2×.
+    fn controls_cut_shot(
+        app: &mut AutoShadeApp,
+        theme: crate::theme::ThemePref,
+        width: f32,
+        top: &str,
+        bottom: &str,
+    ) -> image::RgbaImage {
+        app.theme = theme;
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
         crate::theme::install_theme(&ctx, theme);
@@ -543,8 +561,8 @@
                 .map(|(_, _, r)| *r)
                 .unwrap_or_else(|| panic!("{text:?} is drawn"))
         };
-        let top = find(tr(lang, "Versions & Export")).top() - 8.0;
-        let bottom = find(tr(lang, "Export .xmp beside the photo")).bottom() + 16.0;
+        let top = find(top).top() - 8.0;
+        let bottom = find(bottom).bottom() + 16.0;
         // Cut by the width the drag left the panel, not by the rect its
         // content covered: a row that overruns the panel stretches that
         // rect, and then the tooltips egui's show-everything hook pops
@@ -676,8 +694,10 @@
     }
 
     /// Not a check — the camera for the .xmp question, in its two forms (a
-    /// file beside the photo, adjustments written into the photo), Chinese on
-    /// Dark and English on Light:
+    /// file beside the photo, adjustments written into the photo), and for
+    /// the Export section with its two .xmp verbs (idle, and armed — the
+    /// export button asking before it replaces a file): Chinese on Dark at
+    /// the narrowest panel, English on Light at 450 points.
     /// `AUTOSHADE_SHOT_DIR=<dir> cargo test … xmp_screenshots -- --ignored`.
     #[test]
     #[ignore = "writes PNGs for a person to look at"]
@@ -695,6 +715,21 @@
                     .save(dir.join(format!("xmp-question-{form}-{lang:?}-{theme:?}.png")))
                     .unwrap();
                 assert!(app.xmp_prompt.is_some(), "a frame with no answer leaves the question standing");
+            }
+        }
+        for ((lang, theme), width) in looks.into_iter().zip([crate::theme::CONTROLS_W_MIN, 450.0]) {
+            for (armed, state) in [(false, "idle"), (true, "armed")] {
+                let mut app = app_with_versions(lang, VersionsScene::NoVersions);
+                app.xmp_beside_confirm = armed;
+                controls_cut_shot(
+                    &mut app,
+                    theme,
+                    width,
+                    tr(lang, "Export"),
+                    tr(lang, "Import adjustments from an .xmp…"),
+                )
+                .save(dir.join(format!("export-section-{state}-{lang:?}-{theme:?}-{width:.0}.png")))
+                .unwrap();
             }
         }
     }
