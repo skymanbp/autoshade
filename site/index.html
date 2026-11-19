@@ -82,7 +82,7 @@
         </article>
         <article>
           <h3>Sidecars both ways</h3>
-          <p>Lightroom and Camera Raw sidecars are the merge base: owned edits are written back, unmodeled fields survive byte for byte, and a Lightroom round trip reopens exactly.</p>
+          <p>A Lightroom or Camera Raw .xmp is read when you ask and written when you export. An export merges into the file beside the photo: unmodeled fields survive byte for byte, and a Lightroom round trip reads back exactly.</p>
         </article>
         <article>
           <h3>Versions and variants</h3>
@@ -432,7 +432,7 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
           <div class="tech-index" aria-hidden="true">09</div>
           <div>
             <h3><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#application-and-infrastructure">Application and infrastructure</a></h3>
-            <p>Rust 2024: one library for the CLI, egui desktop and loopback web UI. The v1.18.2 battery: 2003 library, 28 CLI, 323 GUI and 2+2 contract tests.</p>
+            <p>Rust 2024: one library for the CLI, egui desktop and loopback web UI. The v1.18.2 battery: 2013 library, 29 CLI, 356 GUI and 2+2 contract tests.</p>
           </div>
         </article>
       </div>

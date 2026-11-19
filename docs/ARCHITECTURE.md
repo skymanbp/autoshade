@@ -265,10 +265,10 @@
 > `scripts/roundtrip_gate.py` is an optional developer instrument (Photoshop
 > with Camera Raw, driven through `scripts/acr_render.ps1`), not part of the
 > release battery.
-> 2003 library + 28 CLI + 323 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1981 pass + 22 `#[ignore]`d forensic probes and
-> the GUI result is 316 pass + seven ignored (an explicit scratch-recipe export
-> probe and the offline panel, window, mode-workspace, Settings, controls-width and library screenshots) in the ordinary battery. One of the
+> 2013 library + 29 CLI + 356 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1991 pass + 22 `#[ignore]`d forensic probes and
+> the GUI result is 347 pass + nine ignored (an explicit scratch-recipe export
+> probe and the offline panel, window, mode-workspace, Settings, controls-width, library, Versions-section and .xmp-question screenshots) in the ordinary battery. One of the
 > ignored library names is not a probe:
 > `the_real_reverse_fit_reproduces_a_stated_look_on_a_small_frame` is the production reverse fit end to
 > end on a small synthetic pair, ignored for its duration (most of an hour) and run by name for a
@@ -304,7 +304,25 @@
 > edit read as the edit, a maskless edit sending no mask and layering only
 > what changed, and the ignored tuning bench on real answers) and two GUI names
 > (no side-panel text runs under the scrollbar, and the ignored offline panel
-> screenshots). For v1.18.2, by name against the v1.18.1 battery: GUI
+> screenshots). For v1.18.3, by name against the v1.18.2 battery: library
+> +26 / −16 — thirteen in the store (an .xmp beside a photo is reported and
+> asked about once per version of the file, never adopted; a develop commit
+> has no .xmp member; a clear with nothing stored writes nothing; a test
+> build never resolves the per-user store), nine in the pipeline (the import
+> and export doors, a save retiring the stale stored .xmp) and four in the
+> web server (a save writes no .xmp, the export download), against nine store
+> and seven pipeline names of the automatic sidecar readers and writers,
+> removed with them; CLI +1 (`export-xmp` writes the saved develop and
+> refuses AI pixels); GUI +39 / −6 — sixteen on the .xmp (opening never
+> adopts one, the question and its one landing, the export from the canvas,
+> the import, no save path leaving an .xmp in the store, the badge), fifteen
+> on a card keeping its kind and the one-time repair of a second Original,
+> four on the Versions section, one on the face Chinese punctuation is drawn
+> from, one on the test program's own store, and two ignored offline cameras
+> (the Versions section, the .xmp question); the six removed read the
+> adoption of a sidecar or an embedded packet on open, the projection a save
+> published, and the card list the Versions section used to repeat. For
+> v1.18.2, by name against the v1.18.1 battery: GUI
 > +24 / −2 — four on the Settings window's five pages, three on the mode
 > page's language switch, six on the toolbar and the library line under it,
 > three on the controls column (every row in place at any width, one look
