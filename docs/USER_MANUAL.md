@@ -177,10 +177,9 @@ cannot carry it.
 Use **Open photo…** (`Ctrl+O`), drag and drop, or **Open folder…**. The library
 is read-only: AutoShade stores develop state separately and never rewrites the
 source RAW. The viewer applies the photo's orientation before crop and mask
-geometry, so every tool works in the displayed frame — and when a Lightroom
-sidecar sits beside the RAW, the rotation Lightroom holds for that photo is the
-one AutoShade opens it in, not the camera's original. A turn made here is
-written back into the sidecar, so Lightroom picks it up too. The neutral view
+geometry, so every tool works in the displayed frame. A rotation Lightroom
+holds for the photo arrives with its `.xmp` when you read that in, and a turn
+made here reaches Lightroom in the `.xmp` you export. The neutral view
 is AutoShade's own conversion, not the camera JPEG; histogram and clipping
 information are computed from the decoded image and also feed the AI verifier.
 The develop starts from a **camera-matched base look**: a tone curve read off
@@ -189,17 +188,38 @@ looks like the camera's JPEG rather than a flat conversion. Since v1.6.0 that
 estimate is made on block means of the two pictures, and a photo saved by an
 earlier version gets the current estimate the first time it is opened — here,
 in batch export, in the web UI or with `apply` — and a toast says so; a photo
-saved with no base look keeps none. A Lightroom sidecar you open starts from
+saved with no base look keeps none. A Lightroom sidecar you read in starts from
 the same camera base look; the camera profile it names is colour data, read
 from the Camera Raw install on this computer like a lens profile, and never
 changes how a control behaves (v1.17.0).
+
+**An .xmp beside the photo.** AutoShade keeps its own record of your edits
+and treats a `.xmp` as another program's file: it reads one only when you say
+so, and writes one only when you export it. When you open a RAW in the
+Landscape or Portraits workspace and a `.xmp` holding adjustments sits beside
+it — Lightroom's, usually — the photo opens as AutoShade last saved it, or
+untouched if it never did, and a question asks whether to read those
+adjustments in. A RAW that carries adjustments another program wrote into the
+file itself, as a DNG can, is asked about the same way when nothing sits
+beside it and nothing is saved for it. **Read them in** puts the adjustments
+on the canvas as one step you can undo; nothing is saved until you press
+`Ctrl+S`. **Don't read** leaves the photo as it is. Either answer is
+remembered for that file, so you are asked again only when the file changes.
+A file older than your own last save or reset of the photo is not asked
+about, and neither is a `.xmp` AutoShade exported. On a variant that is an
+AI-generated image the adjustments are read onto the **▣ Original** variant
+instead, because a `.xmp` describes the photo itself. Normal mode never asks;
+**Import adjustments from an .xmp…** in the Export section reads any `.xmp`
+in whenever you want.
 
 The **library** column on the left shows the open folder. Under its title
 stand the folder's name and its photo count (hover the line for the full
 path), with **Open folder…** at the top right, and under those one row per
 photo: its name, and beneath the name the file's format when it is not a RAW
-(JPG, PNG, TIF) and **● edited** when it has a saved develop or a Lightroom
-sidecar. Click a row to open that photo; `Ctrl`/`⌘`+click picks several, and
+(JPG, PNG, TIF) and **● edited** when the photo has adjustments saved in
+AutoShade (hover the mark and it says so). A `.xmp` beside the photo does not
+light it, and it goes out when you reset the photo and save.
+Click a row to open that photo; `Ctrl`/`⌘`+click picks several, and
 each picked row says **✓ selected**. Above the list are the batch buttons, two
 to a row. **Copy recipe** takes the open photo's develop; **Paste (n)** writes
 it into the develop of each of the n picked photos and renders nothing — tick
@@ -286,9 +306,9 @@ sidecar records, and so masks and the pixels beside them are in the same frame; 
 chromatic-aberration correction stays on, because Lightroom keeps it on with
 the profile off (v1.17.0). A sidecar AutoShade itself wrote is read by what it
 carries while its lens keys are as AutoShade wrote them (v1.17.1): those keys
-may be the older Lightroom sidecar's that the save merged into, so the
+may be the older Lightroom sidecar's that the export merged into, so the
 develop's own lens profile is used; change the lens switch in Lightroom and
-the change is obeyed. Since v1.18.0 the save writes the lens switch itself —
+the change is obeyed. Since v1.18.0 the export writes the lens switch itself —
 on while the develop renders the lens profile's distortion or vignetting
 correction, off when it carries the profile with both switched off — because
 Lightroom places every mask in the frame its own switch names: merged over a
@@ -308,9 +328,9 @@ chromatic-aberration correction as the canvas does. Only when that correction
 is switched off in AutoShade does the export say Custom, the setup under which
 Lightroom draws none. Back at 100 nothing about the
 profile is written and a Lightroom sidecar keeps its own setup. With no Adobe
-profile for the lens on this computer there is nothing to name; the save then
+profile for the lens on this computer there is nothing to name; the export then
 says the strength is not carried, because Lightroom would draw it at 100.
-Opening a sidecar follows the same rule: a strength in a document that names no
+Reading a sidecar in follows the same rule: a strength in a document that names no
 profile is read as 100, which is what Lightroom draws from it.
 
 The Lens header's ● stays unlit for both profiles enabled from the camera's
@@ -337,8 +357,8 @@ a touch tighter on a long lens and a touch looser on a wide one.
 **Upright** is the dropdown above them, and it is the honest half of that
 sentence. Lightroom does not publish how its Upright solver works, but it DOES
 write the answer into the sidecar — one matrix per mode — so on a photo you
-corrected in Lightroom, AutoShade applies the matrix the sidecar stores,
-digit for digit. The panel says so while it is doing it. On a photo Lightroom
+corrected in Lightroom, once you have read its `.xmp` in, AutoShade applies
+the matrix the sidecar stores, digit for digit. The panel says so while it is doing it. On a photo Lightroom
 never corrected, picking a mode here runs AutoShade's own solver instead: it
 reads the picture's long straight edges, finds where they would meet, and
 builds the turn that sends them parallel again — Level straightens, Vertical
@@ -377,7 +397,7 @@ Adobe's RGB tables).
 
 The **Curves** fold holds Lightroom's **parametric curve** too since v1.5.0:
 Highlights, Lights, Darks and Shadows sliders (±100) under the point curve, then
-the three splits that set where those regions meet. The point curve is applied on top of it, and both go to the sidecar. A split cannot pass
+the three splits that set where those regions meet. The point curve is applied on top of it, and both go into the `.xmp` you export. A split cannot pass
 its neighbours, and moving a split changes nothing until a region slider moves.
 
 The **Color Mixer (HSL)** fold holds the full Color Mixer since
@@ -393,8 +413,9 @@ black-and-white switch is what made it black and white. Below the mixer,
 with its own Hue, Saturation, Luminance and **Range** sliders — Range widens or
 narrows how much of the neighbouring colour it takes with it. A spot that is
 almost grey makes no swatch, because no swatch could move it. Swatches you made
-in Lightroom arrive with the photo and go back to the sidecar; a Lightroom file
-with no swatches keeps its empty block exactly as Lightroom wrote it.
+in Lightroom arrive when you read the photo's `.xmp` in and go back in the
+`.xmp` you export; a Lightroom file with no swatches keeps its empty block
+exactly as Lightroom wrote it.
 
 The **Calibration** fold holds the shadows tint and each primary's hue and
 saturation. These seven are the FIRST thing applied to
@@ -413,7 +434,7 @@ headroom the sidecar states, +100 is twice as many stops of it.
 Those seven only render while **HDR edit mode** is ticked, as the sidecar's
 own switch says — so a value left over from
 an HDR session you later abandoned cannot quietly re-tone the photo. The values
-are still kept, still written back to the sidecar, and the fold still shows its
+are still kept, still written to the `.xmp` you export, and the fold still shows its
 ● so nothing a file holds is invisible.
 
 The shoulder AutoShade rolls the headroom off with was calibrated on a test
@@ -523,27 +544,42 @@ the same thing —
 🤖 an AI verb, ✓ finish, ✕ cancel, ＋ add, ↺ reset, 🗂 a folder, 🖌 paint, 💧
 pick from the image.
 
-**Save develop** (`Ctrl+S`) persists the recipe and, for a RAW, its XMP
-projection in the per-user develop store (`%LOCALAPPDATA%\autoshade` on
-Windows). Upgrading from Autoshop v1.1.0 or earlier moves the old
+**Save develop** (`Ctrl+S`) saves the photo's develop — its adjustments, its
+variants and the link to any retouched image — in the per-user develop store
+(`%LOCALAPPDATA%\autoshade` on Windows), and the status line says **develop
+saved**. Nothing is written beside the photo, and no `.xmp` is written
+anywhere. On a photo you have not changed, `Ctrl+S` says there is nothing to
+save and saves nothing; after **Reset** it clears what was saved and says so,
+and the photo's **● edited** mark in the library goes out. A `.xmp` an earlier
+version of AutoShade kept inside the develop store is removed by the next
+save: your adjustments are in the develop itself.
+Upgrading from Autoshop v1.1.0 or earlier moves the old
 `%LOCALAPPDATA%\autoshop` folder there on first launch, in one step, and says
 so; if a folder of the new name already exists nothing is moved or merged and
 the app says that instead. A settings file still named `autoshop.local.json`
 keeps being read until the next time settings are saved.
-A neighboring Lightroom/ACR `.xmp` is
-read only as the merge base; Save does not overwrite it. A baked image keeps an
-AutoShade recipe but does not receive a RAW XMP, and neither does a card on
-AI-generated pixels (✨ / ✎): its develop is saved, a projection left by an
-earlier source develop is retired in the same save, and the status line says
-so. To deliver the stored projection where Lightroom reads it, choose
-**Export .xmp beside the photo**; replacing an existing neighboring sidecar
-requires confirmation. That click is also the one moment AutoShade says what
-the sidecar cannot carry (bitmap masks, a lens blur, the camera base curve and
-the like; your `recipe.json` keeps all of it). Saving and an AI analysis write
-the sidecar too, but say nothing about Lightroom: you did not ask for a
+
+To give a photo's adjustments to Lightroom, choose **Export .xmp beside the
+photo** in the Export section. It writes the adjustments of the variant on the
+canvas as they are at that moment — changes you have not saved included — as
+a `.xmp` in the photo's own folder, where Lightroom reads it. A `.xmp` already
+there (Lightroom's own, for instance) is never replaced by one click: the
+button says so and asks for a second click, and the file that replaces it
+keeps whatever in the old one AutoShade does not model. The button is off for
+a photo that is not a camera RAW and for a variant on AI-generated pixels
+(✨ / ✎), whose look no `.xmp` can carry; a variant with no adjustments has
+nothing to export, and the click says that. That click is also the one moment
+AutoShade says what the `.xmp` cannot carry (bitmap masks, a lens blur, the
+camera base curve and the like; the develop AutoShade saved keeps all of it).
+Saving and an AI analysis say nothing about Lightroom: you did not ask for a
 Lightroom file then. A loss you can act on, such as one of your own masks, also
 raises a red notice; the camera base curve and lens profile that every RAW
 gets on opening are named quietly on the status line.
+
+**Import adjustments from an .xmp…**, the button under it, reads any `.xmp`
+you pick — Lightroom or Camera Raw settings — onto the canvas as one step you
+can undo, and `Ctrl+S` saves it. It is the same reading-in the question on
+opening offers, for a file anywhere on disk.
 
 ## 3. Add local masks
 
@@ -625,8 +661,8 @@ on it continues on a new **✎ Edited AI image** card right beside it, on the
 same pixels, and the ✨ card stays pristine (a toast says so; hovering the ✨
 label says it before you try). Undo, zoom and tools carry over — only the card
 under the canvas changed. Editing an ✎ card edits that card. Both kinds save
-their develop with `Ctrl+S` and receive no Lightroom XMP (no sidecar can
-reproduce generated pixels). A photo saved by an earlier version with edits on
+their develop with `Ctrl+S`, and neither can be exported as a `.xmp` (no
+sidecar can reproduce generated pixels). A photo saved by an earlier version with edits on
 its ✨ card opens split into ✨ + ✎ once, as unsaved work, and `Ctrl+S` keeps it
 that way.
 
@@ -697,8 +733,8 @@ An AI-generated variant carries its look in pixels and has no editable XMP
 develop. Reverse-fit estimates an engine recipe from that look — it reads the
 ✨ card's pixels, so select that card (an ✎ card's edits are your own sliders
 over the same pixels, not a look to solve for); copy the fitted develop to
-Original when you want an editable recipe and sidecar for the full-resolution
-source. **＋ Save as version** snapshots an ✎ card's develop; a pristine ✨ card
+Original when you want an editable recipe, and a `.xmp` you can export, for the
+full-resolution source. **＋ Save as version** snapshots an ✎ card's develop; a pristine ✨ card
 has nothing to snapshot.
 
 A **◭ Reverse-fit** card develops the negative the fit started from. The
@@ -720,14 +756,14 @@ already denoised — in the browser's export and download and in `auto
 
 **Spot removal you did in Lightroom comes across.** If a photo's `.xmp`
 carries Lightroom's healing — dust, a power line, somebody in the background —
-the Retouch panel opens with an **Imported removal** line saying how many areas
-it found, and the canvas already has them off. Those repairs are AutoShade's
+then once you have read it in, the Retouch panel shows an **Imported removal**
+line saying how many areas it found, and the canvas has them off. Those repairs are AutoShade's
 own: for all but the plainest kind Lightroom keeps its result in Adobe's store
 rather than in the sidecar, so the panel also says how many areas Adobe
 synthesised and leaves a **✨ Regenerate those areas** button, which paints
 exactly those shapes into Generative Fill's painted area and re-runs the generative
 model over them (an empty prompt removes; the result lands as a layer on the
-card, like any other fill). One thing to know when you save: a merge into an existing
+card, like any other fill). One thing to know when you export: a merge into an existing
 `.xmp` keeps your original removal block untouched, but a sidecar written where
 none existed carries no removals at all, and **Export .xmp beside the photo**
 names that.
@@ -969,8 +1005,8 @@ this app with **no Lightroom equivalent at all**: classic XMP has no
 coordinate system for a smooth local field, so the **Export .xmp beside the
 photo** note names it among the things Lightroom cannot render, and the `.xmp`
 itself says so in an `asr:NotCarried` line (v1.17.0). Your rendered exports are the faithful delivery of a photo with a
-field. Since v1.3.1 the `.xmp` beside your RAW still carries the field inside
-AutoShade's own payload, and reopening that sidecar restores it. Copy/paste to another photo drops it and tells
+field. Since v1.3.1 the `.xmp` you export still carries the field inside
+AutoShade's own payload, and reading that file in again restores it. Copy/paste to another photo drops it and tells
 you — its cells are measured on this frame's own geometry and mean nothing on
 someone else's picture. At or below 65% no field is attached and the recipe
 file does not carry the key at all.
@@ -1095,6 +1131,7 @@ autoshade auto <src> [-o|--out FILE] [--guidance TEXT] [--guide library|directio
 autoshade denoise <src> [-o|--out FILE] [--strength 0..1] [--model NAME]
 autoshade batch <dir> [--render] [--limit N] [--include-baked] [--jobs N] [--long-edge N]
 autoshade eval <dir> [--xmp-dir DIR] [--limit N] [--jobs N] [--fresh] [--state FILE]
+autoshade export-xmp <raw> [-o|--out FILE] [--beside] [--force]
 autoshade library-build <dir> [--describe] [--raw-root DIR]
 autoshade library-search <photo> [--style 0..1]
 autoshade reimagine <src> --prompt TEXT [--fidelity high|low] [--quality low|medium|high|auto] [--fidelity-retry] [-o|--out FILE]
@@ -1107,11 +1144,18 @@ autoshade serve <dir> [-p|--port N]
 autoshade recipe-schema
 ```
 
-`<src>` is a RAW or baked image. For commands that save develop state, baked
-sources get recipe JSON but no RAW XMP. `apply` also takes a Lightroom `.xmp`
+`<src>` is a RAW or baked image. No command writes a `.xmp` except
+`export-xmp`: `analyze`, `auto`, `match` and `batch` keep the develop in the
+store. `export-xmp` writes a RAW's SAVED develop as a Lightroom / Camera Raw
+`.xmp` — to `./out/<name>.xmp` by default, to the path `-o` names, or with
+`--beside` into the RAW's own folder, where Lightroom reads it (a `.xmp`
+already there is replaced only with `--force`, and is merged, not discarded:
+what AutoShade does not model in it is kept). It refuses a photo with no
+saved develop or a neutral one, a photo that is not a camera RAW, and a
+develop that sits on AI-generated pixels. `apply` also takes a Lightroom `.xmp`
 sidecar in place of the recipe, and since v1.16.0 it stamps the camera's lens
 profile from the sidecar's own lens switch exactly as the desktop app does when
-it opens the photo beside that sidecar (a sidecar AutoShade wrote, with its
+it reads that sidecar in (a sidecar AutoShade wrote, with its
 lens keys unedited, gives back the develop's own lens profile, v1.17.1), so
 one sidecar renders one geometry on
 both surfaces. Since v1.17.0 a sidecar starts from the photo's camera base
@@ -1174,7 +1218,7 @@ and rendered without the lens profile. A master fitted once with
 `match` on it without the flag fits under that calibration too. A RAW
 source refuses the flag: it is its own
 negative, and `match` on it describes the RAW itself, which is what its
-saved develop and its Lightroom sidecar render afterwards.
+saved develop, and a `.xmp` exported from it, render afterwards.
 
 ### The reference library — `library-build` and `library-search`
 
@@ -1238,6 +1282,11 @@ vision role.
 
 ## Lightroom and XMP interoperability
 
+A `.xmp` is read only when you ask — the question on opening a photo, **Import
+adjustments from an .xmp…**, or `apply` on the command line — and written only
+when you ask: **Export .xmp beside the photo**, the web UI's **Export .xmp**
+download, or `export-xmp`. Nothing below happens on its own.
+
 AutoShade reads and writes sidecar XMP for global settings, point curves, the
 parametric curve, HSL, the B&W mixer, Point Color, camera calibration,
 crop, and supported local corrections; the writer merges owned fields into the
@@ -1266,15 +1315,15 @@ properties in AutoShade's own XMP namespace on the same document. Lightroom
 9.4 preserves those byte for byte when it rewrites the file (measured
 2026-09-12: a 15 KB recipe and 250 KB of rasters came back unchanged, moved
 into XMP's compact attribute form), while it drops unknown `crs:` items and
-AutoShade's per-mask intent attributes. When such a sidecar is opened again,
+AutoShade's per-mask intent attributes. When such a sidecar is read in again,
 AutoShade reads the Camera Raw settings as before and then reconciles them
 with the payload: where Lightroom changed a value, Lightroom's value wins —
 measured, since v1.17.1, against a record of the document as AutoShade wrote
 it, so the camera profile, Look and lens switch an existing Lightroom sidecar
-brought into the save are not mistaken for edits;
+brought into the export are not mistaken for edits;
 everywhere else — the colour field, a muted mask, a bitmap tile, a zone's
 role, an exact slider position, the calibration anchor — the payload's exact
-value is restored. Rasters are placed beside the develop on a restore (a
+value is restored. Rasters are placed beside the develop when it is read in (a
 different file already under the name is left alone and the sidecar's copy
 takes a `-2` name, which the status line says). A payload this build cannot
 read is disclosed and the Camera Raw settings stand alone. The payload adds
@@ -1399,8 +1448,8 @@ develop** (Analysis, Adjust the selected variant, Reference library).
   run `autoshade analyze`.
   The vision advisor proposes bounded sliders and masks, a data-only verifier
   checks the proposal, and normal visual review may attempt one revision;
-  `--deep` permits additional bounded rounds. Accepted output remains a normal
-  recipe and XMP. For a RAW, the model, the histogram it is given and the
+  `--deep` permits additional bounded rounds. Accepted output is saved as a
+  normal develop; no `.xmp` is written until you export one. For a RAW, the model, the histogram it is given and the
   visual review all look at the RAW's neutral develop with the photo's
   calibration applied (camera-matched base curve, saved profile or Look, lens
   corrections) — the picture the result is applied to — not at the camera's
