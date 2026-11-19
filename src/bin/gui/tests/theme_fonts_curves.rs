@@ -633,3 +633,44 @@
         };
         (app, scrub)
     }
+
+    /// Chinese punctuation is drawn from the same face as the Chinese around
+    /// it. egui's `emoji-icon-font` also holds （ ） ？, in a heavier hand,
+    /// and listed ahead of the hanzi subset it won those three marks in every
+    /// Chinese sentence. The subset answers right after the Latin face(s) and
+    /// the icon font, before both of egui's emoji faces; the symbol subsets —
+    /// and a system CJK face, which carries arrows and shapes of its own —
+    /// keep their place behind them.
+    ///
+    /// MUTATION: the hanzi subset inserted at the list's end, behind egui's
+    /// emoji faces again (`emoji_at` = the list's length).
+    #[test]
+    fn chinese_punctuation_is_drawn_from_the_chinese_face() {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        // A font table set on a context is built at the next frame's start.
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            let list = ctx.fonts(|f| f.lock().fonts.definitions().families[&fam].clone());
+            let at = |name: &str| {
+                list.iter().position(|n| n == name).unwrap_or_else(|| panic!("{name} is in {fam:?}: {list:?}"))
+            };
+            let cjk = at(crate::theme::CJK_UI_FONT);
+            assert_eq!(list.iter().filter(|n| *n == crate::theme::CJK_UI_FONT).count(), 1, "listed once: {list:?}");
+            assert!(at("Ubuntu-Light") < cjk, "the Latin face answers first: {list:?}");
+            assert!(at(crate::theme::ICON_FONT.0) < cjk, "…and the icon font: {list:?}");
+            assert!(
+                cjk < at("NotoEmoji-Regular") && cjk < at("emoji-icon-font"),
+                "the hanzi subset answers before egui's emoji faces: {list:?}"
+            );
+            for later in ["symbols2", "symbols", "math", "emoji-extra"] {
+                assert!(at("emoji-icon-font") < at(later), "the symbol subsets keep their place: {list:?}");
+            }
+            if let Some(system) = list.iter().position(|n| n == "cjk") {
+                assert!(at("emoji-extra") < system, "a system CJK face stays behind every embedded subset: {list:?}");
+            }
+        }
+        // The premise the order rests on: the marks are drawable at all.
+        let body = egui::FontId::proportional(crate::theme::TEXT_BODY);
+        assert!(ctx.fonts(|f| f.has_glyphs(&body, "（）？，。；：")));
+    }

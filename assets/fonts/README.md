@@ -21,6 +21,17 @@ machine with no system CJK font rendered the entire window as tofu. The runtime 
 fallback stays in the chain for text this static extraction cannot know,
 such as the user's own file and folder names.
 
+The faces answer in this order: egui's Latin text face, the icon face, this SC
+subset, egui's two emoji faces, the four symbol subsets, and last a system CJK
+font when the machine has one. The SC subset sits ahead of egui's emoji faces
+because egui's `emoji-icon-font` also draws （ ） ？, in a heavier hand than the
+Chinese around them — listed first, it won those three marks in every Chinese
+sentence. The subset shares no codepoint with the four symbol subsets, and
+below U+0100 it holds only ², which the Latin face keeps. A system CJK font
+stays last: a full face carries arrows, circled digits and shapes of its own,
+and the embedded subsets must win those so the window looks the same on every
+machine.
+
 All five are licensed under the SIL Open Font License 1.1 — full texts in
 the `OFL-*.txt` files here. Four declare no Reserved Font Name. Noto Sans SC
 inherits Adobe's `Source` RFN from Source Han Sans; the subset's family name

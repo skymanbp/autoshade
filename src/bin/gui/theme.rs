@@ -403,18 +403,29 @@ pub(crate) fn palette(theme: ThemePref, accent: AccentPref) -> &'static ThemeCol
 ///
 /// The `cjk-ui` subset carries the hanzi the CHINESE UI ITSELF renders, so
 /// picking 中文 no longer depends on the machine owning a system CJK font —
-/// without one the whole window used to be tofu. It is last in priority so
-/// the symbol donors keep the shared punctuation, and it is deliberately not
-/// a full CJK face (~16 MB): the runtime fallback below still handles text
-/// this static extraction cannot know, like a user's own file names.
+/// without one the whole window used to be tofu. It answers right after the
+/// Latin face and the icon font, AHEAD of egui's two emoji faces
+/// ([`install_fonts`]): egui's emoji-icon-font also draws （ ） ？, in a
+/// heavier hand than the Chinese around them. It holds no codepoint a symbol
+/// donor draws, and it is deliberately not a full CJK face (~16 MB): the
+/// runtime fallback below still handles text this static extraction cannot
+/// know, like a user's own file names.
 pub(crate) const EMBEDDED_SYMBOL_FONTS: &[(&str, &[u8])] = &[
     ICON_FONT,
     ("symbols2", include_bytes!("../../../assets/fonts/NotoSansSymbols2-autoshade.ttf")),
     ("symbols", include_bytes!("../../../assets/fonts/NotoSansSymbols-autoshade.ttf")),
     ("math", include_bytes!("../../../assets/fonts/NotoSansMath-autoshade.ttf")),
     ("emoji-extra", include_bytes!("../../../assets/fonts/NotoEmoji-autoshade.ttf")),
-    ("cjk-ui", include_bytes!("../../../assets/fonts/NotoSansSC-autoshade.ttf")),
+    (CJK_UI_FONT, include_bytes!("../../../assets/fonts/NotoSansSC-autoshade.ttf")),
 ];
+
+/// The embedded hanzi subset's name in the font table.
+pub(crate) const CJK_UI_FONT: &str = "cjk-ui";
+
+/// egui's two bundled emoji faces, by the names its default font table gives
+/// them. Should a later egui rename them, the hanzi subset simply goes where
+/// it used to: after every other embedded subset.
+const EGUI_EMOJI_FONTS: [&str; 2] = ["NotoEmoji-Regular", "emoji-icon-font"];
 
 /// The icon face (scripts/build_icon_font.py): Lucide outlines under the
 /// GUI's own icon-like symbol codepoints (✨ ⚠ 🗑 ⚙ …), so every verb icon is
@@ -508,14 +519,16 @@ pub(crate) fn read_font_capped(p: &str, cap: u64) -> Option<Vec<u8>> {
     std::fs::read(p).ok()
 }
 
-/// Build the GUI font chain: egui defaults → embedded symbol subsets → system
-/// CJK → per-script system faces (L12#3). The embedded subsets are
-/// compile-time constants; every runtime face is read under a byte budget
-/// and pre-validated with `ab_glyph` (egui's own backend) before handing it
-/// over — egui PANICS on a font it can't parse, so a missing/odd font must
-/// be skipped, not registered. Everything is appended as FALLBACKS, and the
-/// embedded subsets stay AHEAD of every runtime face, so Latin text keeps
-/// egui's default look and the symbol glyphs stay machine-independent.
+/// Build the GUI font chain: egui's Latin face(s) → the icon face → the
+/// embedded hanzi subset → egui's two emoji faces → the embedded symbol
+/// subsets → system CJK → per-script system faces (L12#3). The embedded
+/// subsets are compile-time constants; every runtime face is read under a
+/// byte budget and pre-validated with `ab_glyph` (egui's own backend) before
+/// handing it over — egui PANICS on a font it can't parse, so a missing/odd
+/// font must be skipped, not registered. Every runtime face is appended as a
+/// FALLBACK, and the embedded subsets stay AHEAD of every runtime face, so
+/// Latin text keeps egui's default look and the symbol glyphs stay
+/// machine-independent.
 pub(crate) fn install_fonts(ctx: &egui::Context) {
     // Single-face TTFs first (always parse); TTC collections (face 0) last.
     // System font directories per OS (not user-specific paths); a miss just
@@ -635,13 +648,31 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
     for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
         let list = fonts.families.entry(fam).or_default();
         list.insert(1.min(list.len()), ICON_FONT.0.to_owned());
-        for (name, _) in EMBEDDED_SYMBOL_FONTS.iter().filter(|(name, _)| *name != ICON_FONT.0) {
+        // The UI's own hanzi subset answers BEFORE egui's two emoji faces,
+        // right after the Latin face(s) and the icon font: egui's
+        // emoji-icon-font also holds （ ） ？, drawn heavier than the Chinese
+        // around them, and listed first it won those three marks in every
+        // Chinese sentence. Every codepoint the subset holds is now drawn
+        // from the one face. Nothing else moves: below U+0100 the subset
+        // holds only ², which the Latin faces ahead of it keep, and it
+        // shares nothing with the symbol subsets.
+        let emoji_at = list
+            .iter()
+            .position(|name| EGUI_EMOJI_FONTS.contains(&name.as_str()))
+            .unwrap_or(list.len());
+        list.insert(emoji_at, CJK_UI_FONT.to_owned());
+        for (name, _) in EMBEDDED_SYMBOL_FONTS
+            .iter()
+            .filter(|(name, _)| *name != ICON_FONT.0 && *name != CJK_UI_FONT)
+        {
             list.push((*name).to_owned());
         }
         if cjk.is_some() {
-            // AFTER the embedded subsets: CJK faces carry some symbol
-            // glyphs too, and the embedded subsets must win those so
-            // rendering stays machine-independent.
+            // AFTER the embedded subsets, and so after egui's emoji faces
+            // too — unlike the hanzi subset above: a full CJK face carries
+            // arrows, circled digits and shapes of its own, and the
+            // embedded subsets must win those so rendering stays
+            // machine-independent.
             list.push("cjk".to_owned());
         }
         // Script faces last for the same reason.

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Regenerate the embedded GUI symbol fonts (assets/fonts/*.ttf).
 
-The GUI's font chain is: egui's bundled fonts -> these embedded subsets ->
-a system CJK font found at runtime. egui's bundle has no glyphs for most of
+The GUI's font chain is: egui's Latin text face -> the icon face -> the hanzi
+subset below -> egui's two emoji faces -> the four symbol subsets -> a system
+CJK font found at runtime. egui's bundle has no glyphs for most of
 the toolbar/panel symbols (⧉ ⊖ ◭ ▭ ◯ ◌ ✓ ✕ 🖌 ...), and leaning on system
 fonts for them made the UI machine-dependent (tofu boxes on a stock Windows
 install, because DengXian lacks them too). So we ship tiny subsets of five
