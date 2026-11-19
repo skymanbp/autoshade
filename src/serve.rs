@@ -2439,7 +2439,7 @@ fn api_export_xmp(request: &Request, state: &AppState) -> Result<ResponseBox> {
     let stem = pipeline::stem(&raw);
     let disposition = format!(
         "attachment; filename=\"{}.xmp\"; filename*=UTF-8''{}",
-        ascii_sanitize(&stem).replace('"', "_"),
+        ascii_sanitize(stem).replace('"', "_"),
         percent_encode(&format!("{stem}.xmp"))
     );
     let mut resp = Response::from_data(bytes).with_header(no_store());
