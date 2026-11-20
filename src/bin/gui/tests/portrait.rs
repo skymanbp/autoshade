@@ -466,16 +466,59 @@
             serde_json::from_str(&std::fs::read_to_string(autoshade::store::recipe_target(&src)).unwrap()).unwrap();
         assert_eq!(disk.masks.iter().map(|m| m.role).collect::<Vec<_>>(), roles, "the masks came back before the write");
         assert_eq!(disk.lens_blur.as_ref().map(|l| l.amount), Some(70.0), "the blur was written too");
+        // The look's Temp −60 comes back to the warmth limit: 10.67 on the
+        // slider since its reach grew, the ∓16 mired it always was.
+        let cool = -autoshade::face::SKIN_TEMPERATURE_MAX;
         let f = &disk.masks[0];
-        assert_eq!((f.saturation, f.hue, f.temperature, f.clarity), (15.0, hue, -20.0, -40.0), "held before the write");
+        assert_eq!((f.saturation, f.hue, f.temperature, f.clarity), (15.0, hue, cool, -40.0), "held before the write");
         assert_eq!(app.saved_recipe, app.recipe, "the saved look is the one on screen");
         app.guard_portrait_skin();
         let face = &app.recipe.masks[0];
         assert_eq!(
             (face.saturation, face.hue, face.temperature, face.clarity),
-            (15.0, hue, -20.0, -40.0),
+            (15.0, hue, cool, -40.0),
             "the AI's face mask meets the user's limits"
         );
+    }
+
+    /// 2026-11-20: a portrait an older build saved with its skin warmth AT
+    /// that build's limit (±20) opens on this build's limit exactly — the same
+    /// warmth, 10.67 on today's slider — and the Portraits panel shows it
+    /// without touching it: the switch stays on, the guard moves nothing, the
+    /// slider's box reads 10.67 and the photo is not marked edited. A warmth
+    /// inside the limit is shown the same way, on the whole numbers (15 → 8)
+    /// or off them (10 → 5.33).
+    ///
+    /// MUTATION THIS CATCHES: the limit put back to the round 20 (the saved
+    /// 10.67 is no longer the limit it was saved at); the slider's rail left
+    /// stepping the number it is shown (5.33 becomes 5 on the first frame and
+    /// the photo is marked edited).
+    #[test]
+    fn a_portrait_saved_at_the_older_warmth_limit_is_shown_as_saved_under_the_guard() {
+        let limit = autoshade::face::SKIN_TEMPERATURE_MAX;
+        for (older, reads) in [(20.0f32, "10.67"), (-20.0, "-10.67"), (15.0, "8"), (10.0, "5.33")] {
+            let mut app = portrait_app(Lang::En, true);
+            crate::panels::portrait::skin_target(&mut app.recipe).unwrap().temperature = older;
+            app.recipe.mask_wb_era = 0;
+            assert!(app.recipe.convert_legacy_mask_wb(), "premise: the open carries the saved number over");
+            let opened = app.recipe.clone();
+            let warmth = crate::panels::portrait::skin_target(&mut app.recipe).unwrap().temperature;
+            if older.abs() == 20.0 {
+                assert_eq!(warmth, limit.copysign(older), "the older limit lands on this one");
+            }
+            assert_eq!(autoshade::face::skin_values_beyond(&app.recipe), 0, "{older}: nothing is past the limits");
+            app.decide_keep_skin_for_photo();
+            assert!(app.keep_skin_on(), "{older}: the switch opens on");
+            app.dirty = false;
+            let texts = portrait_panel_texts(&mut app);
+            assert_eq!(app.recipe, opened, "{older}: drawing the panel changed the develop");
+            assert!(!app.dirty, "{older}: the photo was marked edited by being looked at");
+            assert!(texts.iter().any(|t| t == reads), "{older}: the warmth box reads {reads:?}: {texts:?}");
+            assert!(!texts.iter().any(|t| t == "11" || t == "-11"), "{older}: a number past the limit is on screen: {texts:?}");
+            app.guard_portrait_skin();
+            assert_eq!(app.recipe, opened, "{older}: the guard has nothing to move");
+            assert!(!app.dirty);
+        }
     }
 
     /// A stand-in for the billed detect + heal: three spots healed, the

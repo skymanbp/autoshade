@@ -70,9 +70,13 @@ pub const PRESETS: [Preset; 6] = [
 /// The skin guardrail as the model reads it (design-portraits-mode.md §4,
 /// the "Keep skin natural" switch's limits from `face::keep_skin_natural`):
 /// part of the portrait direction, and the black-and-white exception named.
+/// The two limits that are not whole numbers on the slider — hue (26.67) and,
+/// since the mask Temp slider's reach grew, warmth (10.67, 2026-11-20) — are
+/// told to the model as the whole number INSIDE the limit, so a reply that
+/// follows the sentence to its end is never one the guard has to pull back.
 pub const SKIN_GUARDRAIL: &str = "Skin is never pushed orange. Inside the face mask keep saturation at \
                                   +15 or below, hue within -26..+26 (8 degrees), temperature within \
-                                  -20..+20, texture no lower than -60, clarity no lower than -40 and \
+                                  -10..+10, texture no lower than -60, clarity no lower than -40 and \
                                   sharpness never above 0; the only exception is a black-and-white \
                                   look, where skin colour does not apply.";
 
@@ -92,7 +96,7 @@ pub const PORTRAIT: Preset = Preset {
                 colour a little so the person stands out. Keep the overall exposure and white balance \
                 kind to skin. Skin is never pushed orange. Inside the face mask keep saturation at \
                 +15 or below, hue within -26..+26 (8 degrees), temperature within \
-                -20..+20, texture no lower than -60, clarity no lower than -40 and \
+                -10..+10, texture no lower than -60, clarity no lower than -40 and \
                 sharpness never above 0; the only exception is a black-and-white \
                 look, where skin colour does not apply. Do not smooth the skin into plastic, do not \
                 sharpen it, and do not blur or reshape the face. Keep the photo in colour: leave \
@@ -165,11 +169,14 @@ mod tests {
         assert!(!p.direction.contains("  ") && !SKIN_GUARDRAIL.contains("  "), "one space between words");
         assert!(p.direction.contains(SKIN_GUARDRAIL), "the guardrail rides word for word");
         use crate::face::*;
-        let hue = skin_hue_max().floor();
+        // The whole number inside each limit that is not one (26.67, 10.67):
+        // what the model is told is never past what the guard allows.
+        let (hue, warm) = (skin_hue_max().floor(), SKIN_TEMPERATURE_MAX.floor());
+        assert!(warm == 10.0 && warm <= SKIN_TEMPERATURE_MAX, "the warmth limit, floored: {warm}");
         for number in [
             format!("+{SKIN_SATURATION_MAX} or below"),
             format!("hue within -{hue}..+{hue} ({SKIN_HUE_MAX_DEG} degrees)"),
-            format!("temperature within -{SKIN_TEMPERATURE_MAX}..+{SKIN_TEMPERATURE_MAX}"),
+            format!("temperature within -{warm}..+{warm}, "),
             format!("texture no lower than {SKIN_TEXTURE_MIN}"),
             format!("clarity no lower than {SKIN_CLARITY_MIN}"),
             format!("sharpness never above {SKIN_SHARPNESS_MAX}"),

@@ -378,11 +378,23 @@ pub const LOCAL_HUE_FULL_DEG: f32 = 30.0;
 pub const SKIN_SATURATION_MAX: f32 = 15.0;
 /// Skin hues rotate by at most this many degrees either way.
 pub const SKIN_HUE_MAX_DEG: f32 = 8.0;
-/// Skin warmth moves by at most this much either way (the relative ±100 scale).
-/// The number is the slider's, and it was not rescaled when the mask Temp
-/// slider's reach grew on 2026-11-19 (`render::local_temp_to_kelvin`): ±20 is
-/// now ∓30 mired where it was ∓16.
-pub const SKIN_TEMPERATURE_MAX: f32 = 20.0;
+/// Skin warmth moves by at most this much either way, in the mask Temp
+/// slider's own number (the relative ±100 scale): 10.67.
+///
+/// The limit is a fact about the PICTURE — ∓16 mired, which is what ±20 was
+/// on the slider until v1.18.3 — and the number follows from the mask
+/// white-balance law. When the slider's reach grew (2026-11-19,
+/// `render::local_temp_to_kelvin`) the guard kept the warmth it had always
+/// allowed (owner's ruling, 2026-11-20), so the same warmth is now
+/// 20 × 80/150 on the slider. It is written as the old limit carried over by
+/// the law's own function rather than as a retyped decimal: the two cannot
+/// drift apart, and a portrait an older build saved AT its limit, carried
+/// over when it is opened (`EditRecipe::convert_legacy_mask_wb`), lands
+/// exactly ON this one — the guard finds nothing to move
+/// (`a_portrait_saved_at_the_older_limit_opens_exactly_on_this_one`).
+/// With the switch off the slider still runs to ±100, about twice as far as
+/// it did.
+pub const SKIN_TEMPERATURE_MAX: f32 = crate::render::local_wb_from_legacy(20.0, 0.0).0;
 /// Softening stops here: texture no lower than this…
 pub const SKIN_TEXTURE_MIN: f32 = -60.0;
 /// …and clarity no lower than this.
@@ -859,12 +871,16 @@ mod tests {
         let hue = skin_hue_max();
         assert!((hue - 26.666_666).abs() < 1e-3, "8° of the ±30° hue travel: {hue}");
         // (field, past the limit → the limit, a value inside that stays)
-        let rows: [(&str, Field, f32, f32, f32); 9] = [
+        let rows: [(&str, Field, f32, f32, f32); 10] = [
             ("saturation up", |m| &mut m.saturation, 60.0, SKIN_SATURATION_MAX, -80.0),
             ("hue +", |m| &mut m.hue, 100.0, hue, 20.0),
             ("hue −", |m| &mut m.hue, -100.0, -hue, -20.0),
-            ("warmer", |m| &mut m.temperature, 70.0, SKIN_TEMPERATURE_MAX, 15.0),
-            ("cooler", |m| &mut m.temperature, -70.0, -SKIN_TEMPERATURE_MAX, -15.0),
+            // Warmth: the limit is 10.67 on today's slider (the ±20 of the
+            // builds up to v1.18.3, carried over), so 8 is inside it and a
+            // slider-scale 20 is past it.
+            ("warmer", |m| &mut m.temperature, 70.0, SKIN_TEMPERATURE_MAX, 8.0),
+            ("cooler", |m| &mut m.temperature, -70.0, -SKIN_TEMPERATURE_MAX, -8.0),
+            ("this build's 20", |m| &mut m.temperature, 20.0, SKIN_TEMPERATURE_MAX, 10.0),
             ("texture", |m| &mut m.texture, -100.0, SKIN_TEXTURE_MIN, 40.0),
             ("clarity", |m| &mut m.clarity, -100.0, SKIN_CLARITY_MIN, 30.0),
             ("sharpness", |m| &mut m.sharpness, 40.0, SKIN_SHARPNESS_MAX, -50.0),
@@ -882,6 +898,49 @@ mod tests {
             *field(&mut m) = inside;
             assert!(!keep_skin_natural(&mut m), "{what}: {inside} is inside");
             assert_eq!(*field(&mut m), inside);
+        }
+    }
+
+    /// 2026-11-20: the warmth limit is the SAME WARMTH it was before the mask
+    /// Temp slider's reach grew — ∓16 mired — so a portrait an older build
+    /// saved at its limit (Temp ±20 on that build's scale), carried over as
+    /// every saved develop is when it opens, stands exactly ON this build's
+    /// limit: the guard reports nothing to move and moves nothing, and the
+    /// photo opens with the switch on. A 20 on THIS build's slider is about
+    /// twice that warmth and is still pulled back.
+    ///
+    /// MUTATION THIS CATCHES: `SKIN_TEMPERATURE_MAX` put back to the round
+    /// 20.0 (the carried-over 10.67 is then well inside the limit, and this
+    /// build's 20 is let through), or retyped as a decimal that is not the
+    /// carry-over's own number (the saved portrait lands a hair off it).
+    #[test]
+    fn a_portrait_saved_at_the_older_limit_opens_exactly_on_this_one() {
+        for older in [20.0f32, -20.0] {
+            let mut r = crate::recipe::EditRecipe {
+                masks: vec![LocalAdjustment { role: MaskRole::Skin, temperature: older, ..Default::default() }],
+                mask_wb_era: 0,
+                ..Default::default()
+            };
+            assert!(r.convert_legacy_mask_wb(), "premise: the saved number is carried over");
+            let carried = r.masks[0].temperature;
+            assert_eq!(carried, SKIN_TEMPERATURE_MAX.copysign(older), "the older limit, carried over, IS this limit");
+            assert!((carried.abs() - 10.666_667).abs() < 1e-5, "20 × 80/150: {carried}");
+            assert_eq!(skin_values_beyond(&r), 0, "nothing is past the limit, so the switch opens on");
+            let before = r.clone();
+            assert!(!keep_skin_natural(&mut r.masks[0]), "the guard has nothing to move");
+            assert!(!keep_skin_natural_in(&mut r));
+            assert_eq!(r, before, "and moves nothing");
+            // This build's own 20 is about twice that warmth: held as before.
+            let mut m = LocalAdjustment { role: MaskRole::Skin, temperature: older, ..Default::default() };
+            assert!(keep_skin_natural(&mut m), "a slider-scale {older} is past the limit");
+            assert_eq!(m.temperature, SKIN_TEMPERATURE_MAX.copysign(older));
+        }
+        // The limit as the picture has it: 16 mired either side of the mask
+        // law's fixed point, which is what ±20 was on the older scale.
+        let mired = |t: f32| 1e6 / crate::render::local_temp_to_kelvin(t);
+        for (t, want) in [(SKIN_TEMPERATURE_MAX, -16.0f32), (-SKIN_TEMPERATURE_MAX, 16.0)] {
+            let moved = mired(t) - mired(0.0);
+            assert!((moved - want).abs() < 1e-2, "Temp {t} moves the mask's white {moved} mired");
         }
     }
 

@@ -727,6 +727,10 @@ impl AutoShadeApp {
                 set_soften(m, soften);
                 changed = true;
             }
+            // Guarded, the track ends ON the limit, which is not a whole
+            // number (10.67 — the ±20 of the builds up to v1.18.3 on today's
+            // stronger slider): the slider steps in whole numbers inside it,
+            // stops on the limit itself and prints it as it is (`slider_impl`).
             let warm = reach(guarded, autoshade::face::SKIN_TEMPERATURE_MAX, 100.0);
             changed |= Self::slider_hinted(ui, lang, tr(lang, "Skin warmth"), &mut m.temperature, -warm, warm, 0.0, tr(lang, "Cooler to the left, warmer to the right — on the skin only."));
             let rich = reach(guarded, autoshade::face::SKIN_SATURATION_MAX, 100.0);
