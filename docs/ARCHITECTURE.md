@@ -2244,18 +2244,45 @@ naming the recolour as a loss. The document the reader measures against is
 today's projection, so every such mask read as moved in Lightroom and lost
 its gains — on a sidecar nobody had touched, from v1.17.0 on. The payload's
 root names its writer (`Writer="AutoShade X.Y.Z"`, read by
-`payload::decode`), and for a writer older than v1.17.0 that left no record
-of the document, `reconcile_masks` restates the written mask as that writer
-wrote it — the payload mask's own three
-(`payload::written_before_the_projection`) — before any rule runs, the same
-principle as the scale. Untouched, the gains stay and the mask's own Temp and
-Tint are carried over; a leaf moved in Lightroom makes the three read as
-moved, as for any mask with gains. A payload whose writer is absent or is not
-that shape is read by the rule for today's writer. Pinned by
-`a_sidecar_written_before_the_gains_projection_keeps_its_masks_gains` and its
-two siblings, and on the v1.3.1 sidecar a real Lightroom 9.4 rewrote
-(`the_real_lightroom_rewrites_read_as_measured`, which runs where the fixture
-root is named).
+`payload::decode`), and the reader goes by it.
+
+**How the three numbers of a mask with colour gains are read, in a payload
+that names no `mask_wb_era` (`payload::paired_mask`, 2026-11-20).** What
+decides is how far the written document can be trusted for them. They came
+back as the written document has them: untouched — the gains stay and the
+mask's own Temp and Tint are carried over. Otherwise:
+1. The sidecar carries the record of the document as written. The written
+   document is exact, so the three were edited: the gains go, as for any
+   sidecar, and the three are read leaf by leaf like a plain mask's — the
+   number Lightroom moved stands as the document states it, a Temp or Tint
+   that came back as written is still that build's number and is carried
+   over, and the Exposure, which has one scale, is the document's.
+2. No record, and a writer that projects the gains (v1.17.0 on, or a writer
+   the reader cannot name). The written document is a projection made again
+   by this build, and an edit cannot be told from a projection this build's
+   search does not land on — the likelier by far, since it is every gains
+   mask of such a file. No leaf is taken for Lightroom's: the gains go, the
+   document's three are taken, and BOTH its Temp and Tint are carried over,
+   read as the build that wrote them read them. That is the picture v1.18.3
+   drew for the file; taking the leaves that differ as Lightroom's would draw
+   them about twice too strong.
+3. No record, and a writer older than v1.17.0. The projection form is tried
+   first — builds of the weeks before v1.17.0 projected under the older
+   version's name — and a document that matches it is untouched. Otherwise
+   the three are that writer's own form: the written mask is restated as the
+   payload mask's own three (`payload::written_before_the_projection`), the
+   same principle as the scale, and the mask is read leaf by leaf WITH its
+   gains — that document never carried their colour, so there is nothing to
+   remove.
+A payload that states today's scale is read as it always was. One test per
+row: `an_older_sidecars_gains_edited_in_lightroom_are_read_leaf_by_leaf_beside_the_written_record`,
+`an_older_sidecars_gains_that_do_not_retrace_are_read_as_their_writer_read_them`,
+`a_projected_sidecar_under_an_older_writers_name_is_untouched`,
+`a_sidecar_written_before_the_gains_projection_keeps_its_masks_gains` and
+`a_sidecar_written_before_the_gains_projection_keeps_them_through_a_lightroom_edit`;
+and the v1.3.1 sidecar a real
+Lightroom 9.4 rewrote (`the_real_lightroom_rewrites_read_as_measured`, which
+runs where the fixture root is named).
 
 **The develop reads the stamp as well (2026-11-20).** The mask stage takes a
 mask's Temp and Tint through `render::mask_wb_gains`, which reads them on the
@@ -2283,20 +2310,10 @@ fit that build's range (by up to 0.36 of a slider unit) and for 169 of the
 today's runs on); that build's numbers carried over candidate by candidate
 and rendered by today's law, the same law a last bit apart now and then,
 missed for 27 (by up to 0.16); that build's own arithmetic misses none. A
-miss reads as an edit made in Lightroom: the gains go, and the number that
-missed is taken as Lightroom's. One consequence follows and is accepted: a
-develop saved before the change and exported after it writes the smaller,
-converted numbers.
-
-When the three numbers that carry a mask's gains WERE edited in Lightroom,
-the gains go, as for any sidecar, and the three are read leaf by leaf like a
-plain mask's (`payload::mask_wb_from_payload`): the number Lightroom moved
-stands as the document states it, a Temp or Tint beside it that came back as
-written is still that build's number and is carried over, and the Exposure,
-which has one scale, is the document's. One rule runs through the whole
-reader: a number AutoShade wrote keeps AutoShade's picture, a number set in
-Lightroom stands as stated
-(`an_older_sidecars_gains_edited_in_lightroom_go_and_each_number_left_alone_is_carried_over`).
+miss costs the mask its gains, and the document's three are then read as
+their writer read them (rule 2 above). One consequence follows and is
+accepted: a develop saved before the change and exported after it writes the
+smaller, converted numbers.
 Like `coord_era`, the stamp is a forward break: builds up to v1.18.3 refuse a
 recipe that carries the key (`deny_unknown_fields`), and read a sidecar this
 build wrote from its `crs:` settings alone.
@@ -4238,9 +4255,9 @@ value (`payload::recolour_carrier`): handed back as written, the exact gains
 and the mask's own Temp, Tint and Exposure are restored; moved (a Lightroom
 edit, or a build whose develop projects the gains differently), the
 document's three are taken and the gains go, so the recolour is never applied
-twice (in a sidecar v1.18.3 or an earlier build wrote, a Temp or Tint among
-the three that Lightroom left alone is then carried onto today's scale —
-§4.1). The projection reads the mask white balance the develop renders, so
+twice (how the three are then read in a sidecar v1.18.3 or an earlier build
+wrote, and the writers older than v1.17.0 whose three were never the gains'
+spelling, are §4.1's three rules). The projection reads the mask white balance the develop renders, so
 it followed that law when the law's reach grew (the version after v1.18.3,
 `mask_wb_era` in §4.1): the same gains are carried by a Temp and Tint of
 about half the size, and gains further from neutral fit inside the range

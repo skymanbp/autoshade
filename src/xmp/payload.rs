@@ -684,18 +684,18 @@ fn decode_raster(name: &str, crc: &str, data: &str) -> Result<Raster, String> {
 ///   leaf by leaf: one the document handed back as written is still that
 ///   build's number and is carried onto this build's scale, and one that
 ///   came back different — a number set in Lightroom — stands as it is
-///   ([`mask_wb_from_payload`], [`carry_over_mask_wb`]). That holds for a
-///   recolour carrier whose three were moved as well: its gains go, the
-///   number Lightroom moved stands, and the Temp or Tint beside it that was
-///   not moved is carried over. The sidecar imports to the picture it was
-///   exported with.
-/// * a mask's COLOUR GAINS in a payload whose writer is older than v1.17.0
-///   were never spelled into the `crs:` settings: that writer wrote the
-///   mask's own Temp, Tint and Exposure. W is today's projection, which
-///   spells them, so for such a writer the mask's three in W are restated
-///   as the payload's own before the rule runs
-///   ([`written_before_the_projection`]): untouched, the gains stay; a leaf
-///   moved in Lightroom, the three read as moved like any carrier's.
+///   ([`mask_wb_from_payload`], [`carry_over_mask_wb`]). The sidecar imports
+///   to the picture it was exported with.
+/// * a mask that carries COLOUR GAINS, in such a payload, is read by what W
+///   can say about its three numbers ([`paired_mask`]). They came back as W
+///   has them: untouched, gains and all. They differ from a RECORDED
+///   document: edited — the gains go and the three are read leaf by leaf,
+///   like a plain mask's. They differ from a projection made again (no
+///   record): an edit cannot be told from a projection this build does not
+///   land on, so the gains go and both the document's Temp and Tint are
+///   carried over, as the build that wrote them read them. And a writer
+///   older than v1.17.0 never spelled the gains into the document at all:
+///   its three are the mask's own, read leaf by leaf with the gains kept.
 ///
 /// Masks are matched, not zipped: the payload's masks that the projection
 /// never wrote (a muted mask, a bitmap-based one) are restored as they were;
@@ -742,22 +742,26 @@ pub(crate) fn restore(
     // (`render::mask_wb_gains`), so it ends on the three numbers that build
     // wrote and the gains are recognised as untouched.
     let older_mask_wb = payload.recipe.mask_wb_era < crate::recipe::MASK_WB_ERA;
-    // What the writing build put into the `crs:` settings for a mask's colour
-    // gains (2026-11-20). A writer older than v1.17.0 did not project them:
-    // it wrote the mask's OWN Temp, Tint and Exposure and kept the gains in
-    // the payload alone. The bare projection below is today's writer's, which
-    // does project them, so measured against it every such mask read as moved
-    // in Lightroom and lost its gains — on a sidecar nobody had touched, from
-    // v1.17.0 on. Like the scale, the written document is restated as the
-    // writing build wrote it (`reconcile_masks`). A RECORDED document needs
-    // no restating — it is what was written — and no build that old left one.
-    // A payload with no writer this reader can parse was not left that way by
-    // any build of this app, so nothing says what its three were written as:
-    // it is read by the rule for today's writer, the one that assumes nothing
-    // about the past. A wrong assumption either way costs the same — the mask
-    // reads as moved, its gains go and the document's numbers stand.
-    let own_three = payload.written.is_none() && payload.writer.is_some_and(|v| v < GAINS_PROJECTED_SINCE);
-    let wrote = Wrote { older_mask_wb, own_three };
+    // How far the written document below can be trusted for the three
+    // numbers of a mask that carries colour gains, in an older build's
+    // payload (2026-11-20; `GainsThree` has the three cases and
+    // `paired_mask` the rule for each). A recorded document is what was
+    // written. Without one the document is projected again from the payload,
+    // and that tells an untouched file only when it lands on the numbers the
+    // writing build wrote: a writer older than v1.17.0 did not project the
+    // gains at all, and a later one may have projected them to numbers this
+    // build's search does not land on. A payload that states today's scale is
+    // read as it always was.
+    let gains = match (&payload.written, payload.writer) {
+        _ if !older_mask_wb => GainsThree::Exact,
+        (Some(_), _) => GainsThree::Exact,
+        (None, Some(writer)) if writer < GAINS_PROJECTED_SINCE => GainsThree::OwnOrProjected,
+        // A payload with no writer this reader can parse was not left that
+        // way by any build of this app: nothing says its three were ever the
+        // mask's own, so it is read like a writer that projects.
+        (None, _) => GainsThree::Reprojected,
+    };
+    let wrote = Wrote { older_mask_wb, gains };
     let written = strip_mask_intent(&written_document(&payload, frame));
     // The raw reading: a photo-less outer read disables raster names only
     // once it is finished, so W keeps the bare names P and C are compared in.
@@ -855,14 +859,34 @@ struct Wrote {
     /// The payload names no `mask_wb_era`: its masks' Temp and Tint, and the
     /// `crs:` ones written beside them, are on the scale of v1.18.3.
     older_mask_wb: bool,
-    /// The writer is older than v1.17.0 and left no record of the document:
-    /// a mask's colour gains were not projected, and the three numbers it
-    /// wrote for such a mask are the mask's own ([`GAINS_PROJECTED_SINCE`]).
-    own_three: bool,
+    /// What W can say about a gains mask's three numbers.
+    gains: GainsThree,
 }
 
 impl Wrote {
-    const NOW: Self = Self { older_mask_wb: false, own_three: false };
+    const NOW: Self = Self { older_mask_wb: false, gains: GainsThree::Exact };
+}
+
+/// What the written document W is worth for the Temp, Tint and Exposure of a
+/// mask that carries colour gains — the three numbers a writer since v1.17.0
+/// spells the gains as (2026-11-20). [`paired_mask`] holds the rule for each.
+#[derive(Clone, Copy, PartialEq)]
+enum GainsThree {
+    /// W is the document as written: its record, or — for a payload on
+    /// today's scale — the rule this reader has always had. Three that differ
+    /// from it were edited, and are read leaf by leaf.
+    Exact,
+    /// An older build's payload with no record, from a writer that projects
+    /// the gains (v1.17.0 on, or one the reader cannot name): W is a
+    /// projection made again, by this build. Three that differ from it are an
+    /// edit in Lightroom OR a projection this build does not land on, and
+    /// nothing in the file says which.
+    Reprojected,
+    /// An older build's payload with no record, from a writer older than
+    /// v1.17.0: that writer wrote the mask's OWN three and kept the gains in
+    /// the payload alone ([`GAINS_PROJECTED_SINCE`]) — though a build of the
+    /// weeks before v1.17.0 that already projected still gave that version.
+    OwnOrProjected,
 }
 
 fn reconcile_recipes(
@@ -999,15 +1023,13 @@ fn approx_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
 /// mask's Temp and Tint are brought onto this build's scale, by where the
 /// rule took them from ([`carry_over_mask_wb`]): a mask the projection never
 /// wrote is the payload's alone, both leaves; a paired mask's leaf is that
-/// build's number where the document handed it back as written, whether or
-/// not the mask carries colour gains ([`mask_wb_from_payload`]); a
-/// correction added in Lightroom is the document's and stands.
+/// build's number where the document handed it back as written
+/// ([`mask_wb_from_payload`]); a correction added in Lightroom is the
+/// document's and stands.
 ///
-/// And where the writer was older than v1.17.0 (`wrote.own_three`), a paired
-/// mask that carries colour gains is measured against what THAT writer wrote
-/// for it — the mask's own three, not today's projection of the gains
-/// ([`written_before_the_projection`]) — before any rule runs, so the rules
-/// themselves are the same for every writer.
+/// A paired mask that carries colour gains is read by what the written
+/// document can say about its three numbers, which in one case settles both
+/// leaves at once ([`paired_mask`]).
 fn reconcile_masks(
     p: &[serde_json::Value],
     w: &[serde_json::Value],
@@ -1068,14 +1090,7 @@ fn reconcile_masks(
             Some(j) => match w_to_c[j] {
                 // Written, then removed in Lightroom.
                 None => continue,
-                Some(k) => {
-                    let written = if wrote.own_three {
-                        written_before_the_projection(pm, &w[j])
-                    } else {
-                        std::borrow::Cow::Borrowed(&w[j])
-                    };
-                    (reconcile_mask(pm, &written, &c[k]), mask_wb_from_payload(&written, &c[k]))
-                }
+                Some(k) => paired_mask(pm, &w[j], &c[k], wrote),
             },
         };
         if wrote.older_mask_wb {
@@ -1105,11 +1120,20 @@ fn reconcile_masks(
 /// the two halves would each lose: a flipped net kept the payload's
 /// correction bit beside the document's own bit and undid the edit, and an
 /// untouched rewrite moved the home for nothing.
-fn reconcile_mask(p: &serde_json::Value, w: &serde_json::Value, c: &serde_json::Value) -> serde_json::Value {
+fn reconcile_mask(
+    p: &serde_json::Value,
+    w: &serde_json::Value,
+    c: &serde_json::Value,
+    gains_in_the_three: bool,
+) -> serde_json::Value {
     use serde_json::Value;
     // No mask holds masks: what an older writer did differently is
-    // `reconcile_masks`'s to restate, so the leaves below are read as today's.
-    let mut out = recolour_carrier(reconcile(p, w, c, None, Wrote::NOW), p, w, c);
+    // `paired_mask`'s to settle, so the leaves below are read as today's.
+    let leaves = reconcile(p, w, c, None, Wrote::NOW);
+    // `gains_in_the_three`: the document spells the mask's colour gains as its
+    // three numbers, so the three are one value ([`recolour_carrier`]). False
+    // only for a document whose writer never did ([`paired_mask`]).
+    let mut out = if gains_in_the_three { recolour_carrier(leaves, p, w, c) } else { leaves };
     fn kind(m: &Value) -> Option<&str> {
         m.get("mask").and_then(|g| g.get("kind")).and_then(Value::as_str)
     }
@@ -1143,7 +1167,8 @@ fn reconcile_mask(p: &serde_json::Value, w: &serde_json::Value, c: &serde_json::
 /// Leaf by leaf, a moved Temp would have joined the payload's gains and put
 /// the recolour on twice. What is taken here is the document's numbers; on
 /// which scale each Temp and Tint among them is read, for an older build's
-/// payload, is settled afterwards and leaf by leaf ([`mask_wb_from_payload`]).
+/// payload, and whether the document spells the gains at all, is
+/// [`paired_mask`]'s to settle.
 fn recolour_carrier(
     mut out: serde_json::Value,
     p: &serde_json::Value,
@@ -1184,28 +1209,63 @@ fn carries_gains(p: &serde_json::Value) -> bool {
     !gains.is_none_or(|g| g.iter().all(|v| v.as_f64() == Some(1.0)))
 }
 
+/// One paired mask, reconciled, and which of its Temp and Tint are still the
+/// writing build's numbers (`[temperature, tint]`, for
+/// [`carry_over_mask_wb`]) — the rule for a mask that carries colour gains,
+/// by what the written document can say about its three numbers
+/// ([`GainsThree`], 2026-11-20). A mask without gains, and a gains mask whose
+/// three came back as W has them, is read the one way there is: untouched,
+/// the payload's own leaves stand, the gains with them.
+///
+/// The three differ from W:
+/// * W exact (a record, or today's scale): they were edited. The gains go —
+///   the document's colour carries them — and the three are read leaf by
+///   leaf: the moved one stands as stated, a Temp or Tint left alone is
+///   still that build's number ([`mask_wb_from_payload`]).
+/// * W projected again, no record: an edit cannot be told from a projection
+///   this build does not land on, and the second is the likelier — it is
+///   every gains mask of such a sidecar. The gains go, the document's three
+///   are taken, and BOTH its Temp and Tint are read as the build that wrote
+///   the document read them: carried over. v1.18.3 read such a file at that
+///   strength; taking the leaves that differ as Lightroom's would draw them
+///   about twice too strong.
+/// * a writer older than v1.17.0, no record: the three are not today's
+///   projection, so they are that writer's own form — the mask's OWN three,
+///   the gains in the payload alone. W is restated as that
+///   ([`written_before_the_projection`]) and the mask is read leaf by leaf
+///   WITH ITS GAINS: that document never carried their colour, so there is
+///   nothing to remove. (The projection form is tried first because builds
+///   of the weeks before v1.17.0 projected under the older version's name.)
+fn paired_mask(
+    p: &serde_json::Value,
+    w: &serde_json::Value,
+    c: &serde_json::Value,
+    wrote: Wrote,
+) -> (serde_json::Value, [bool; 2]) {
+    if carrier_moved(p, w, c) {
+        match wrote.gains {
+            GainsThree::Exact => {}
+            GainsThree::Reprojected => return (reconcile_mask(p, w, c, true), [true; 2]),
+            GainsThree::OwnOrProjected => {
+                let own = written_before_the_projection(p, w);
+                return (reconcile_mask(p, &own, c, false), mask_wb_from_payload(&own, c));
+            }
+        }
+    }
+    (reconcile_mask(p, w, c, true), mask_wb_from_payload(w, c))
+}
+
 /// The written mask `w` as a writer older than v1.17.0 wrote it for the
-/// payload's mask `p` (2026-11-20).
+/// payload's gains mask `p` (2026-11-20).
 ///
 /// `w` is read back from today's bare projection, where a mask's colour gains
 /// leave as its Temp, Tint and Exposure (`render::gains_as_white`). Up to
 /// v1.16.x the writer did no such thing: `masks_xml` wrote
 /// `m.exposure_ev`, `m.temperature` and `m.tint` as they stood and named the
 /// recolour as a loss, so what the document held for the three is the
-/// payload mask's OWN numbers. They are put back into `w` here, and the rules
-/// that follow — the leaf rule, [`recolour_carrier`],
-/// [`mask_wb_from_payload`] — then see the document that build wrote:
-/// handed back as written, the gains stay and the mask's own Temp and Tint
-/// are carried over; a leaf moved in Lightroom makes the three read as moved.
-/// A mask without gains was written the same way by every build and is left
-/// alone.
-fn written_before_the_projection<'a>(
-    p: &serde_json::Value,
-    w: &'a serde_json::Value,
-) -> std::borrow::Cow<'a, serde_json::Value> {
-    if !carries_gains(p) {
-        return std::borrow::Cow::Borrowed(w);
-    }
+/// payload mask's OWN numbers. They are put back into `w` here, and the leaf
+/// rule then sees the document that build wrote.
+fn written_before_the_projection(p: &serde_json::Value, w: &serde_json::Value) -> serde_json::Value {
     let mut own = w.clone();
     if let Some(o) = own.as_object_mut() {
         for k in CARRIER {
@@ -1215,7 +1275,7 @@ fn written_before_the_projection<'a>(
             };
         }
     }
-    std::borrow::Cow::Owned(own)
+    own
 }
 
 /// Which of a paired mask's Temp and Tint are still the numbers the build
@@ -1232,12 +1292,16 @@ fn written_before_the_projection<'a>(
 /// written is still what that build wrote, so it is carried over like a
 /// plain mask's, while the one Lightroom moved stands at the number it
 /// states. The Exposure has one scale and is the document's either way.
+///
+/// It answers for a `w` that IS the document as written. Where `w` is only
+/// a projection made again and the three differ from it, a leaf that differs
+/// is not known to be Lightroom's, and [`paired_mask`] does not ask here.
 fn mask_wb_from_payload(w: &serde_json::Value, c: &serde_json::Value) -> [bool; 2] {
     ["temperature", "tint"].map(|k| approx_eq(&mask_leaf(w, k), &mask_leaf(c, k)))
 }
 
 /// Carry the leaves of `mask` that are still an older build's numbers
-/// (`from_payload`, as [`mask_wb_from_payload`] or the unwritten-mask arm of
+/// (`from_payload`, as [`paired_mask`] or the unwritten-mask arm of
 /// [`reconcile_masks`] names them) onto this build's scale (2026-11-20).
 ///
 /// A sidecar AutoShade wrote must import to the picture it was exported

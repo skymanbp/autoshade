@@ -1422,42 +1422,77 @@ fn an_older_sidecars_mask_gains_survive_a_fresh_export_with_no_record() {
     assert!(off < 1e-4, "it draws what that build drew: {off:e}");
 }
 
-/// One of the gains' three numbers moved in Lightroom: the gains go — the
-/// document's colour already carries them — and the three are read leaf by
-/// leaf, with or without the record. The number Lightroom moved stands as the
-/// document states it; a Temp or Tint it handed back as written is still that
-/// build's number and is carried over like a plain mask's; the Exposure has
-/// one scale and is the document's.
+/// The gains develop with one of its three numbers moved in Lightroom:
+/// `(what moved, the settings Lightroom left)` — the Temp, and the Exposure
+/// alone.
+fn older_gains_edits(wrote: &EditRecipe) -> [(&'static str, EditRecipe); 2] {
+    let mut warmer = wrote.clone();
+    warmer.masks[0].temperature += 9.0;
+    let mut brighter = wrote.clone();
+    brighter.masks[0].exposure_ev += 0.3;
+    [("Temp moved", warmer), ("only Exposure moved", brighter)]
+}
+
+/// One of the gains' three numbers moved in Lightroom, in a sidecar that
+/// carries the RECORD of the document as written: the record says exactly
+/// what was written, so the edit is known. The gains go — the document's
+/// colour already carries them — and the three are read leaf by leaf: the
+/// number Lightroom moved stands as the document states it; a Temp or Tint it
+/// handed back as written is still that build's number and is carried over
+/// like a plain mask's; the Exposure has one scale and is the document's.
 ///
 /// MUTATION THIS CATCHES: a mask whose three moved read whole as the document
 /// states it (the untouched Tint comes back at the number that build wrote,
 /// twice the carried-over one; with only the Exposure moved, the Temp too).
 #[test]
-fn an_older_sidecars_gains_edited_in_lightroom_go_and_each_number_left_alone_is_carried_over() {
+fn an_older_sidecars_gains_edited_in_lightroom_are_read_leaf_by_leaf_beside_the_written_record() {
     let (p, wrote) = older_gains_develop();
     let w = &wrote.masks[0];
     let (temperature, tint) = crate::render::local_wb_from_legacy(w.temperature, w.tint);
     assert!(w.tint.abs() > 0.1 && !near(w.tint, tint), "premise: a Tint worth carrying over: {:?}", mask_wb(&wrote, 0));
-    // (a) the Temp moved in Lightroom; (b) only the Exposure moved.
-    let mut warmer = wrote.clone();
-    warmer.masks[0].temperature += 9.0;
-    let mut brighter = wrote.clone();
-    brighter.masks[0].exposure_ev += 0.3;
-    for (what, edited, want_temperature) in
-        [("Temp moved", &warmer, warmer.masks[0].temperature), ("only Exposure moved", &brighter, temperature)]
-    {
-        let rewritten = lightroom_like(&p, edited);
-        for (record, doc) in
-            [("with the record", with_written_record(&rewritten, &bare_document(&wrote, None))), ("no record", rewritten)]
-        {
-            let back = xmp_to_recipe(&doc);
-            let m = &back.masks[0];
-            assert_eq!(m.color_gains, None, "{what}, {record}: the document's colour already carries them");
-            assert!(near(m.temperature, want_temperature), "{what}, {record}: Temp {} against {want_temperature}", m.temperature);
-            assert!(near(m.tint, tint), "{what}, {record}: the Tint left alone is carried over: {} against {tint}", m.tint);
-            let exposure_ev = edited.masks[0].exposure_ev;
-            assert!(near(m.exposure_ev, exposure_ev), "{what}, {record}: Exposure {} against the document's {exposure_ev}", m.exposure_ev);
-        }
+    for (what, edited) in older_gains_edits(&wrote) {
+        let moved = edited.masks[0].temperature != w.temperature;
+        let want_temperature = if moved { edited.masks[0].temperature } else { temperature };
+        let back = xmp_to_recipe(&with_written_record(&lightroom_like(&p, &edited), &bare_document(&wrote, None)));
+        let m = &back.masks[0];
+        assert_eq!(m.color_gains, None, "{what}: the document's colour already carries them");
+        assert!(near(m.temperature, want_temperature), "{what}: Temp {} against {want_temperature}", m.temperature);
+        assert!(near(m.tint, tint), "{what}: the Tint left alone is carried over: {} against {tint}", m.tint);
+        let exposure_ev = edited.masks[0].exposure_ev;
+        assert!(near(m.exposure_ev, exposure_ev), "{what}: Exposure {} against the document's {exposure_ev}", m.exposure_ev);
+    }
+}
+
+/// The same documents with NO record — what a fresh export is. The three do
+/// not retrace, and nothing says whether Lightroom moved one or the build
+/// that wrote them projected the gains to numbers this build's search does
+/// not land on (the likelier by far: it is every gains mask of such a file).
+/// So no leaf is taken for Lightroom's: the gains go, the document's three
+/// are taken, and BOTH its Temp and Tint are carried over — read as the build
+/// that wrote them read them. It draws what v1.18.3 drew for that file: the
+/// document's three under that build's law, the gains gone.
+///
+/// MUTATION THIS CATCHES: the leaf that differs taken as Lightroom's, as
+/// beside a record (the document's Temp stands at the number that build
+/// wrote, about twice the strength v1.18.3 read it at).
+#[test]
+fn an_older_sidecars_gains_that_do_not_retrace_are_read_as_their_writer_read_them() {
+    use crate::render::v1_18_3::{developed, developed_then, worst};
+    let (p, wrote) = older_gains_develop();
+    for (what, edited) in older_gains_edits(&wrote) {
+        let doc = lightroom_like(&p, &edited);
+        assert!(payload::find(&doc).unwrap().unwrap().written.is_none(), "premise: no record");
+        let back = xmp_to_recipe(&doc);
+        let (m, e) = (&back.masks[0], &edited.masks[0]);
+        let (temperature, tint) = crate::render::local_wb_from_legacy(e.temperature, e.tint);
+        assert_eq!(m.color_gains, None, "{what}: the document's colour already carries them");
+        assert!(near(m.temperature, temperature), "{what}: the document's Temp, carried over: {} against {temperature}", m.temperature);
+        assert!(near(m.tint, tint), "{what}: the document's Tint, carried over: {} against {tint}", m.tint);
+        assert!(near(m.exposure_ev, e.exposure_ev), "{what}: Exposure {} against the document's {}", m.exposure_ev, e.exposure_ev);
+        // What v1.18.3 held after reading this file: the document's three as
+        // they stand, no gains, on its own scale.
+        let off = worst(&developed(&back), &developed_then(&edited));
+        assert!(off < 1e-4, "{what}: it draws what v1.18.3 drew for the file: {off:e}");
     }
 }
 
@@ -1494,10 +1529,9 @@ fn unprojected_gains_develop() -> (EditRecipe, EditRecipe) {
 /// import is the saved develop carried over, and it draws what the older law
 /// draws for that develop.
 ///
-/// MUTATION THIS CATCHES: the written document not restated for a writer
-/// older than v1.17.0 (measured against today's projection of the gains the
-/// mask reads as moved in Lightroom: the gains go, and its own Temp and Tint
-/// stand at twice their strength).
+/// MUTATION THIS CATCHES: the own form not recognised for a writer older than
+/// v1.17.0 (measured against today's projection alone, the mask's three do
+/// not retrace and its gains go — on a sidecar nobody touched).
 #[test]
 fn a_sidecar_written_before_the_gains_projection_keeps_its_masks_gains() {
     use crate::render::v1_18_3::{developed, developed_then, worst};
@@ -1515,33 +1549,54 @@ fn a_sidecar_written_before_the_gains_projection_keeps_its_masks_gains() {
     }
 }
 
-/// One of the three moved in Lightroom: read like any mask whose three moved
-/// — the gains go, Lightroom's number stands as stated, and the Temp or Tint
-/// it left alone is still that build's and is carried over.
+/// One of the three moved in Lightroom: that writer's document never carried
+/// the gains' colour, so the gains STAY — there is nothing in the document to
+/// take their place — and the three are read leaf by leaf: Lightroom's number
+/// stands as stated, and the Temp or Tint it left alone is still that build's
+/// and is carried over.
+///
+/// MUTATION THIS CATCHES: the three of such a document treated as the gains'
+/// spelling (a Lightroom edit of one number drops the mask's whole recolour).
 #[test]
-fn a_sidecar_written_before_the_gains_projection_reads_a_lightroom_edit_leaf_by_leaf() {
+fn a_sidecar_written_before_the_gains_projection_keeps_them_through_a_lightroom_edit() {
     let (p, own) = unprojected_gains_develop();
     let mut warmer = own.clone();
     warmer.masks[0].temperature += 9.0;
     let back = xmp_to_recipe(&sidecar_by_writer(&p, &warmer, Some("AutoShade 1.16.0")));
     let m = &back.masks[0];
-    assert_eq!(m.color_gains, None, "the three read as moved");
+    assert_eq!(m.color_gains, Some(OLDER_GAINS), "the document never carried them: they stay");
     assert!(near(m.temperature, 21.0), "Lightroom's Temp stands: {}", m.temperature);
     assert!(near(m.tint, -3.0), "the Tint left alone is carried over: {}", m.tint);
     assert!(near(m.exposure_ev, own.masks[0].exposure_ev), "the Exposure is the document's: {}", m.exposure_ev);
 }
 
-/// The restatement is for a writer older than v1.17.0 and nobody else. The
-/// same document under a writer that projects the gains, under a writer
-/// attribute that is not `AutoShade X.Y.Z`, or with none, is read by today's
-/// rule: measured against today's projection its three read as moved, the
-/// gains go and the document's Temp and Tint stand as it states them.
+/// A build of the weeks before v1.17.0 already projected the gains and still
+/// gave the older version. Its document is the projection form, and that is
+/// tried first: handed back as written it is untouched — the gains stay and
+/// the mask's own Temp and Tint are carried over.
 ///
-/// MUTATION THIS CATCHES: the restatement applied whatever the writer (the
-/// gains of a v1.17.0 sidecar whose three were moved come back on top of the
+/// MUTATION THIS CATCHES: the own form assumed of every writer older than
+/// v1.17.0 (the projection's Temp and Tint read as Lightroom edits on top of
+/// the gains: the recolour is on twice).
+#[test]
+fn a_projected_sidecar_under_an_older_writers_name_is_untouched() {
+    let (p, wrote) = older_gains_develop();
+    let back = xmp_to_recipe(&sidecar_by_writer(&p, &wrote, Some("AutoShade 1.16.0")));
+    assert_eq!(back.masks[0].color_gains, Some(OLDER_GAINS), "the untouched gains survive");
+    assert_eq!(back.masks, carried_over(&p).masks, "with the mask's own Temp and Tint, carried over");
+}
+
+/// The own form is for a writer older than v1.17.0 and nobody else. The same
+/// document under a writer that projects the gains, under a writer attribute
+/// that is not `AutoShade X.Y.Z`, or with none, is three numbers that do not
+/// retrace: the gains go and the document's Temp and Tint are carried over,
+/// as for any such file.
+///
+/// MUTATION THIS CATCHES: the own form assumed whatever the writer (the gains
+/// of a v1.17.0 sidecar whose three do not retrace come back on top of the
 /// document's numbers).
 #[test]
-fn the_gains_restatement_is_for_writers_older_than_the_projection_only() {
+fn the_own_form_is_for_writers_older_than_the_projection_only() {
     let (p, own) = unprojected_gains_develop();
     for writer in [Some("AutoShade 1.17.0"), Some("AutoShade 1.18.3"), Some("AutoShade 1.16"), Some("somebody 1.16.0"), None] {
         let doc = sidecar_by_writer(&p, &own, writer);
@@ -1549,8 +1604,8 @@ fn the_gains_restatement_is_for_writers_older_than_the_projection_only() {
         assert!(found.writer.is_none_or(|v| v >= [1, 17, 0]), "premise: {writer:?} reads as {:?}", found.writer);
         let back = xmp_to_recipe(&doc);
         let m = &back.masks[0];
-        assert_eq!(m.color_gains, None, "{writer:?}: against today's projection the three read as moved");
-        assert!(near(m.temperature, 12.0) && near(m.tint, -6.0), "{writer:?}: the document's stand: {:?}", mask_wb(&back, 0));
+        assert_eq!(m.color_gains, None, "{writer:?}: the three do not retrace");
+        assert!(near(m.temperature, 6.4) && near(m.tint, -3.0), "{writer:?}: the document's, carried over: {:?}", mask_wb(&back, 0));
     }
 }
 

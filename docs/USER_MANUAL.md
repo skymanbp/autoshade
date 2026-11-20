@@ -645,7 +645,10 @@ exported with: the numbers an older version wrote are restated the same way.
 A mask Temp or Tint set in Lightroom is read at the number it states, so it
 reaches about twice as far here as it did in earlier versions; so is one in
 an .xmp written before v1.3.1, which carries Lightroom's settings and nothing
-else.
+else. The one exception is a mask the AI gave a colour of its own, in an .xmp
+from v1.18.3 or earlier: such a file does not always say which of that mask's
+numbers were set in Lightroom, and its Temp and Tint are then restated like
+the older version's.
 The **Color** group holds
 **Saturation**, **Hue shift**, **Temp shift**, **Tint shift** and, since
 v1.17.0, **Color tint** with its **Color tint hue** (Lightroom's mask
