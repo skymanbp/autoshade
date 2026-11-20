@@ -696,7 +696,9 @@ impl AutoShadeApp {
             .small(),
             None => egui::RichText::new(tr(lang, "reading the reference library…")).weak().small(),
         };
-        ui.label(line).on_hover_text(trf(
+        // Wrapped at the steady width, as every note of the column is: the
+        // no-library sentence runs to several lines.
+        steady_label(ui, line).on_hover_text(trf(
             lang,
             "Library file: {path}",
             &[("path", &abs_display(&autoshade::library::path()))],
@@ -813,7 +815,8 @@ impl AutoShadeApp {
                 "Each analysis measures this photo with a local model (SigLIP 2, 1.5 GB, downloaded once) and picks the closest references. Building a library turns this on, since the build has already downloaded the model.",
             ));
         if built && !self.style_embed {
-            ui.label(
+            steady_label(
+                ui,
                 egui::RichText::new(tr(lang, "built, but not searched: the switch above is off"))
                     .color(ui.visuals().warn_fg_color)
                     .small(),

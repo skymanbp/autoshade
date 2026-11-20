@@ -57,6 +57,12 @@
 //! round corners ([`place`]). `every_input_of_a_kind_has_one_look` and
 //! `a_disabled_button_has_a_plate_and_a_selected_toggle_has_round_corners`
 //! pin these.
+//!
+//! A row that carries a NAME — a mask in its list, a shape under its mask —
+//! ends on that same right edge too (2026-11-19): its marks, its switch and
+//! its 🗑 stand at the row's end and the name is cut to what they leave
+//! ([`row_ending_in`]). `every_kind_of_selected_mask_fits_the_column` lays
+//! every kind of mask, with every kind of range, in both languages.
 
 use super::*;
 
@@ -116,6 +122,49 @@ pub(crate) fn row_label(ui: &mut egui::Ui, text: &str, block: &[&str]) -> egui::
         ui.label(egui::RichText::new(text).color(name))
     })
     .inner
+}
+
+/// The rest of a `horizontal` row that holds a NAME and fixed things after it
+/// — a list row's marks and its 🗑, a shape's dropdown and its switch — laid
+/// so that the row ends on its right edge whatever the name is (2026-11-19).
+/// `ends` draws the fixed things from that edge INWARD, so it names them
+/// last-first; `name` then draws in what they left, and a text in it is CUT
+/// to that room, not let run ([`cut_text`]). Laid left to right at their own
+/// widths these rows were as wide as their names: a mask called 「sky
+/// gradient」 with a luminance range put its 🗑 41 px past the column in
+/// English, and each row's 🗑 stood wherever its own name stopped.
+///
+/// The fixed things come first in the code, so what they DO to the list (a
+/// delete, a reorder) is collected by the caller and applied after the row —
+/// never between the two halves of one row. Call it inside a `horizontal`:
+/// the row's height is what the two halves centre in.
+pub(crate) fn row_ending_in<A, B>(
+    ui: &mut egui::Ui,
+    ends: impl FnOnce(&mut egui::Ui) -> A,
+    name: impl FnOnce(&mut egui::Ui) -> B,
+) -> (A, B) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let a = ends(ui);
+        // Justified: the name's own widget takes the whole room, so a list
+        // row is one target from the eye to the marks. Its text starts at
+        // the left — egui's rows centre a text in a widget wider than it.
+        let rest = egui::Layout::left_to_right(egui::Align::Center)
+            .with_main_align(egui::Align::Min)
+            .with_main_justify(true);
+        let b = ui.with_layout(rest, |ui| cut_text(ui, name)).inner;
+        (a, b)
+    })
+    .inner
+}
+
+/// Draw `add` with every text in it cut to the room it has, with an ellipsis
+/// — a row's default is to let a text run on past the row's end.
+pub(crate) fn cut_text<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let saved = ui.style().wrap_mode;
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+    let out = add(ui);
+    ui.style_mut().wrap_mode = saved;
+    out
 }
 
 /// Every button this vocabulary drew on this thread — read by the

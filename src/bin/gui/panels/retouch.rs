@@ -1186,27 +1186,29 @@ impl AutoShadeApp {
             let synth =
                 self.recipe.retouch.iter().filter(|a| a.origin.is_synthesised()).count();
             sub_caption(ui, tr(lang, "Imported removal"));
-            ui.label(
-                egui::RichText::new(trf(
+            // Both sentences are `steady_note`s, as every note of the column
+            // is (2026-11-19): as plain labels they wrapped at the real
+            // width, so a drag of the panel's edge changed their line count
+            // and moved everything under them.
+            steady_note(
+                ui,
+                trf(
                     lang,
                     "Lightroom removed {n} area(s) here; re-solved from this photo's own pixels.",
                     &[("n", &total.to_string())],
-                ))
-                .weak()
-                .small(),
+                ),
             );
             if synth > 0 {
                 // The sentence that keeps the panel honest: for these areas
                 // the picture on screen is THIS app's repair, and Adobe's own
                 // result is not in the sidecar to be shown.
-                ui.label(
-                    egui::RichText::new(trf(
+                steady_note(
+                    ui,
+                    trf(
                         lang,
                         "{n} of them were synthesised by Adobe — those pixels are not in the sidecar, so what you see is this app's repair.",
                         &[("n", &synth.to_string())],
-                    ))
-                    .weak()
-                    .small(),
+                    ),
                 );
                 ui.add_enabled_ui(!self.busy, |ui| {
                     if action_row(ui, true, tr(lang, "✨ Regenerate those areas"))

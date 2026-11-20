@@ -14,6 +14,16 @@
 //! since 2026-11-17, between [`LIBRARY_W_MIN`] and [`library_w_max`]
 //! ([`drag_owned_panel`] is the one host of both).
 //!
+//! …AND WHERE THE CANVAS STARTS (2026-11-19, user: 「控件栏和右边预览窗口中间
+//! 多了一大块黑色」). egui reads the same content rect a second time, in the
+//! same frame: the rest of the window is laid beside it (`allocate_left_panel`).
+//! Writing the width back after the frame — what the 2026-10-13 fix did —
+//! stopped the ratchet and left this: a selected radial mask's feather row
+//! stood 97 px past the panel, so the canvas began 97 px to the right of it
+//! on every frame, and the strip between the two was painted by nobody. The
+//! content's rect now never reaches egui at all ([`drag_owned_panel`]), which
+//! answers both readers at once and needs no write-back.
+//!
 //! WHAT A DRAG MAY MOVE (2026-11-17, user: 「那一栏的宽度一调整，里面的各种
 //! 按钮、控件就开始跟着动，很诡异」). Dragging the edge changes how WIDE the
 //! column's rows are and nothing else: no row wraps or unwraps, nothing
@@ -129,14 +139,34 @@ pub(crate) fn library_side_panel<R>(
     drag_owned_panel(ctx, LIBRARY_ID, LIBRARY_W_DEFAULT, range, add_contents)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Each side panel this thread laid, at its latest frame: its id, the
+    /// rect its column was given and the rect the column's rows covered.
+    /// The layout tests read it — a row the panel clips away is drawn
+    /// nowhere, so only the layout itself can say it was too wide.
+    static LAID: std::cell::RefCell<Vec<(egui::Id, egui::Rect, egui::Rect)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The rect the side panel `id` gave its column at this thread's latest
+/// frame, and the rect the column's rows covered.
+#[cfg(test)]
+pub(crate) fn laid_column(id: &str) -> Option<(egui::Rect, egui::Rect)> {
+    let id = egui::Id::new(id);
+    LAID.with_borrow(|l| l.iter().find(|(i, ..)| *i == id).map(|(_, given, covered)| (*given, *covered)))
+}
+
 /// A left side panel whose width only the user's drag sets.
 ///
 /// The width the panel is laid at this frame is egui's own computation —
 /// last frame's stored width, or the pointer while the edge is dragged, then
-/// clamped into the range and to the screen. After the content has drawn,
-/// that width is written back over whatever the content covered, so an
-/// overflowing row is clipped by the panel (egui clips it already) instead of
-/// becoming next frame's width.
+/// clamped into the range and to the screen. The column draws in a CHILD of
+/// the panel's `Ui`, and the panel's `Ui` is then told only of the rect it
+/// handed the child: the rect egui reads back from a panel — to store as next
+/// frame's width, and to lay the rest of the window beside it — is the rect
+/// the panel's own `Ui` covered, so it is the panel's laid rect whatever the
+/// rows did. An overflowing row is clipped by the panel (egui clips to the
+/// laid rect already) and moves nothing outside it.
 fn drag_owned_panel<R>(
     ctx: &egui::Context,
     id: &str,
@@ -145,18 +175,18 @@ fn drag_owned_panel<R>(
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<R> {
     let id = egui::Id::new(id);
-    let stored = egui::containers::panel::PanelState::load(ctx, id).map(|s| s.rect.width());
-    let response = egui::SidePanel::left(id).default_width(default).width_range(range.clone()).show(ctx, add_contents);
-    let rect = response.response.rect;
-    let drag = ctx.read_response(id.with("__resize")).filter(egui::Response::dragged);
-    let laid = match drag.and_then(|d| d.interact_pointer_pos()) {
-        Some(pointer) => pointer.x - rect.left(),
-        None => stored.unwrap_or(default),
-    };
-    let laid = laid.clamp(*range.start(), *range.end()).min(ctx.screen_rect().width());
-    if (rect.width() - laid).abs() > 0.5 {
-        let rect = egui::Rect::from_min_size(rect.min, egui::vec2(laid, rect.height()));
-        ctx.data_mut(|d| d.insert_persisted(id, egui::containers::panel::PanelState { rect }));
-    }
-    response
+    egui::SidePanel::left(id).default_width(default).width_range(range).show(ctx, |ui| {
+        let given = ui.max_rect();
+        let mut column = ui.new_child(egui::UiBuilder::new().id_salt("column").max_rect(given).layout(*ui.layout()));
+        let out = add_contents(&mut column);
+        #[cfg(test)]
+        LAID.with_borrow_mut(|l| {
+            l.retain(|(i, ..)| *i != id);
+            l.push((id, given, column.min_rect()));
+        });
+        // No widget of its own: the rect is taken, nothing is sensed, so
+        // nothing lies over the column's controls.
+        ui.advance_cursor_after_rect(given);
+        out
+    })
 }

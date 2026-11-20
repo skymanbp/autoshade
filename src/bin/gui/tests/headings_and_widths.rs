@@ -131,9 +131,9 @@
     /// before must come back inside the range, and a drag to the far right
     /// stops where the content column is exactly the readable ceiling.
     ///
-    /// MUTATION THIS CATCHES: `controls_side_panel`'s write-back removed (the
-    /// first arm grows to the 900 px row), or its `width_range` dropped (the
-    /// second arm restores 1200 px).
+    /// MUTATION THIS CATCHES: `drag_owned_panel` handing egui the content's
+    /// own `Ui` again (the first arm grows to the 900 px row), or its
+    /// `width_range` dropped (the second arm restores 1200 px).
     #[test]
     fn the_controls_panel_width_follows_the_drag_not_the_content() {
         let run = |ctx: &egui::Context, row: f32| {
@@ -141,9 +141,7 @@
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 900.0))),
                 ..Default::default()
             };
-            // The width the panel keeps for the next frame — the response
-            // rect is the CONTENT's (wider when it overflows, narrower when a
-            // 10 px row does not fill the panel), not the panel's.
+            // The width the panel keeps for the next frame, as egui stored it.
             let _ = ctx.run(input, |ctx| {
                 crate::side_panel::controls_side_panel(ctx, |ui| {
                     ui.allocate_exact_size(egui::vec2(row, 20.0), egui::Sense::hover());
@@ -176,6 +174,62 @@
             "at the cap the content column is {column}, not the {} readable ceiling",
             crate::theme::FIELD_W_MAX
         );
+    }
+
+    /// User report 2026-11-19 (screenshot: a black band between the controls
+    /// panel and the picture, the panel's rows cut off at the band). egui
+    /// lays the REST of the window from the rect a side panel's content
+    /// covered (`allocate_left_panel`, panel.rs) while it paints and clips
+    /// the panel at the width it was laid at. So one over-wide row — a
+    /// selected radial mask's feather row was 97 px over — pushed the canvas
+    /// away by its overflow on every frame, and nothing painted the strip
+    /// between the two. With an over-wide row in either side panel, the
+    /// panel's rect is the width it was laid at and the rest of the window
+    /// starts at that edge.
+    ///
+    /// MUTATION THIS CATCHES: `drag_owned_panel` handing egui the content's
+    /// own `Ui` again (the rest of the window starts where the 900 px row
+    /// ends).
+    #[test]
+    fn an_over_wide_row_does_not_push_the_canvas_away() {
+        type Host = fn(&egui::Context, f32) -> egui::Rect;
+        fn row(ui: &mut egui::Ui, w: f32) {
+            ui.allocate_exact_size(egui::vec2(w, 20.0), egui::Sense::hover());
+        }
+        let hosts: [(&str, f32, Host); 2] = [
+            ("controls", crate::theme::CONTROLS_W_DEFAULT, |ctx, w| {
+                crate::side_panel::controls_side_panel(ctx, |ui| row(ui, w)).response.rect
+            }),
+            ("library", crate::theme::LIBRARY_W_DEFAULT, |ctx, w| {
+                crate::side_panel::library_side_panel(ctx, |ui| row(ui, w)).response.rect
+            }),
+        ];
+        for (name, default, host) in hosts {
+            let ctx = egui::Context::default();
+            crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+            for frame in 0..4 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 900.0))),
+                    ..Default::default()
+                };
+                let mut seen = None;
+                let _ = ctx.run(input, |ctx| {
+                    let panel = host(ctx, 900.0);
+                    seen = Some((panel, ctx.available_rect()));
+                });
+                let (panel, rest) = seen.expect("the frame ran");
+                assert!(
+                    (panel.width() - default).abs() < 0.5,
+                    "{name}, frame {frame}: the panel's rect is {:.1} px wide, not the {default} px it was laid at",
+                    panel.width()
+                );
+                assert!(
+                    (rest.left() - panel.right()).abs() < 0.5 && (rest.left() - default).abs() < 0.5,
+                    "{name}, frame {frame}: the rest of the window starts at x {:.1}, not at the panel's edge {default}",
+                    rest.left()
+                );
+            }
+        }
     }
 
     /// User 2026-10-14: 「"展开折叠"的按钮，放上去给阴影动画」. A fold's header

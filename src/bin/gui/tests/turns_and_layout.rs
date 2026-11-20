@@ -464,6 +464,24 @@
         // v1.5.0: a Point Color swatch — its row is a chip, a name and a
         // ✕, and its four sliders are laid beside the mixer's own.
         app.recipe.point_colors.push(autoshade::recipe::PointColor::sampled(0.9, 0.7, 0.5));
+        // 2026-11-19: the rows only a photo's own data brings — its camera's
+        // lens corrections, the profile and the look a sidecar named (at a
+        // length no row holds), a key carried for Lightroom, a fill layer.
+        // No layout check had laid them, so nothing said whether they fit.
+        app.photo_lens = autoshade::recipe::LensProfile {
+            vignette: vec![1.0],
+            distortion: vec![1.0],
+            ca_r: vec![1.0],
+            ca_b: vec![1.0],
+            ..Default::default()
+        };
+        app.recipe.camera_profile = "A camera profile with a name as long as a sidecar may give it".into();
+        app.recipe.look = Some(autoshade::recipe::CreativeLook {
+            name: "A creative look with a name as long as a sidecar may give it".into(),
+            ..Default::default()
+        });
+        app.recipe.passthrough.insert("UprightFocalLength35mm".into(), "35".into());
+        app.recipe.pixel_layers.push(autoshade::render::PixelLayer { path: "fill-buttons.png".into(), ..Default::default() });
         // A histogram, so the readout's width can be pinned (2026-09-27).
         app.histogram = Some(vec![[0.5; 4]; 256]);
         app.sel_mask = Some(0);
@@ -478,7 +496,9 @@
     /// languages with the widest rows armed: a second variant card, a mask
     /// brush session, a raster mask selected with a component, a colour
     /// field, a Point Color swatch, a version, a reference, a
-    /// multi-selection. The helpers fill the registry themselves, so a button
+    /// multi-selection, and the rows only a photo's own data brings (its
+    /// camera's lens corrections, a sidecar's profile and look, a carried
+    /// key, a fill layer). The helpers fill the registry themselves, so a button
     /// that bypasses the vocabulary is simply not here; the count floor keeps
     /// the pin from passing on an empty registry.
     ///

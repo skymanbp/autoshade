@@ -94,6 +94,328 @@
         last
     }
 
+    /// How far the rows of the controls column reached past the column they
+    /// were given, at the frame `settled_controls` laid last — in points,
+    /// negative when the widest row ends short of the edge. The LAYOUT's own
+    /// answer (`side_panel::laid_column`): a row cut away by the panel's clip
+    /// is drawn nowhere, so no list of drawn things can report it.
+    fn column_overreach() -> f32 {
+        let (given, covered) = crate::side_panel::laid_column("controls").expect("the controls column was laid");
+        covered.right() - given.right()
+    }
+
+    /// How far past its own right edge the column's clip is opened by
+    /// [`opened_column`].
+    const PAST_ROOM: f32 = 600.0;
+
+    /// The controls panel laid `w` px wide exactly as the app lays it, but
+    /// with the column's clip opened [`PAST_ROOM`] px to the right, so what
+    /// the panel would cut away is drawn: the settled frame's shapes that
+    /// belong to the column, and the rect the column was given. (The
+    /// show-everything hook also pops every tooltip; those are clipped to the
+    /// whole screen and are left out.)
+    fn opened_column(app: &mut AutoShadeApp, w: f32) -> (Vec<egui::epaint::ClippedShape>, egui::Rect) {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+        let stored = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, 100.0));
+        ctx.data_mut(|d| d.insert_persisted(egui::Id::new("controls"), egui::containers::panel::PanelState { rect: stored }));
+        let mut opened = egui::Rect::NOTHING;
+        let mut shapes = Vec::new();
+        for i in 0..6 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w + 2.0 * PAST_ROOM, 16_000.0))),
+                time: Some(i as f64 / 60.0),
+                ..Default::default()
+            };
+            let out = ctx.run(input, |ctx| {
+                ctx.memory_mut(|m| m.set_everything_is_visible(true));
+                crate::side_panel::controls_side_panel(ctx, |ui| {
+                    opened = ui.clip_rect();
+                    opened.max.x += PAST_ROOM;
+                    ui.set_clip_rect(opened);
+                    app.controls_column(ui)
+                });
+            });
+            shapes = out.shapes;
+        }
+        let (given, _) = crate::side_panel::laid_column("controls").expect("the controls column was laid");
+        shapes.retain(|c| c.clip_rect.right() <= opened.right() + 0.5 && c.clip_rect.right() > given.right() + 1.0);
+        (shapes, given)
+    }
+
+    /// Every text and plate of `shapes` as it reaches the screen — cut by its
+    /// own clip (a prompt's hint runs on inside its field and is no
+    /// overflow) — top to bottom, then left to right.
+    fn seen_items(shapes: &[egui::epaint::ClippedShape]) -> Vec<(egui::Rect, String)> {
+        fn walk(s: &egui::Shape, clip: egui::Rect, out: &mut Vec<(egui::Rect, String)>) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, clip, out)),
+                egui::Shape::Noop => {}
+                s => {
+                    let r = s.visual_bounding_rect().intersect(clip);
+                    if r.is_positive() {
+                        let what = match s {
+                            egui::Shape::Text(t) => format!("text {:?}", t.galley.text().trim()),
+                            egui::Shape::Rect(_) => "a plate".to_owned(),
+                            _ => "a drawing".to_owned(),
+                        };
+                        out.push((r, what));
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for c in shapes {
+            walk(&c.shape, c.clip_rect, &mut out);
+        }
+        out.sort_by(|a, b| a.0.top().total_cmp(&b.0.top()).then(a.0.left().total_cmp(&b.0.left())));
+        out
+    }
+
+    /// What a too-wide row pushed past the column's right edge, top to bottom,
+    /// for a failure message that names it ([`opened_column`]). The first
+    /// entries are the rows at fault; a row under one of them may only be
+    /// following it (a `Ui` a row overran hands every later row the wider
+    /// width). The panel's own plate starts left of the column and is not a
+    /// row.
+    fn past_the_column(app: &mut AutoShadeApp, w: f32) -> Vec<String> {
+        let (shapes, given) = opened_column(app, w);
+        seen_items(&shapes)
+            .into_iter()
+            .filter(|(r, _)| r.left() >= given.left() - 0.5 && r.right() > given.right() + 0.5)
+            .map(|(r, what)| format!("y {:.0}: {what} reaches x {:.0}, {:.0} px past", r.top(), r.right(), r.right() - given.right()))
+            .collect()
+    }
+
+    /// Not a check — the list for a person to read when
+    /// `every_kind_of_selected_mask_fits_the_column` is red:
+    /// `AUTOSHADE_SHOT_DIR=<dir> cargo test … mask_rows_table -- --ignored`
+    /// writes, for each kind of mask and of range in both languages, every
+    /// text and plate between the 「Local & Pixel」 and 「Versions & Export」
+    /// captions with how far its right edge stands from the column's (the
+    /// column's clip opened, so nothing is cut away).
+    #[test]
+    #[ignore = "writes tables for a person to read"]
+    fn mask_rows_table() {
+        use autoshade::recipe::RangeMask;
+        let dir = std::path::PathBuf::from(std::env::var("AUTOSHADE_SHOT_DIR").expect("AUTOSHADE_SHOT_DIR"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ranges: [(&str, Option<RangeMask>); 3] = [
+            ("plain", None),
+            ("luminance", Some(RangeMask::Luminance { lo_outer: 0.125, lo: 0.25, hi: 0.75, hi_outer: 0.875 })),
+            ("colour", Some(RangeMask::Color { r: 0.2, g: 0.4, b: 0.8, amount: 0.5, px: 0.5, py: 0.5 })),
+        ];
+        for lang in [crate::i18n::Lang::Zh, crate::i18n::Lang::En] {
+            for (kind, mask) in one_mask_of_each_kind() {
+                for (range_name, range) in ranges {
+                    let mut app = app_with_every_button(lang);
+                    app.recipe.masks = vec![autoshade::recipe::LocalAdjustment { range, ..mask.clone() }];
+                    app.sel_mask = Some(0);
+                    let (shapes, given) = opened_column(&mut app, crate::theme::CONTROLS_W_MIN);
+                    let items = seen_items(&shapes);
+                    let top_of = |caption: &str| items.iter().find(|(_, what)| *what == format!("text {caption:?}")).map(|(r, _)| r.top());
+                    let from = top_of(tr(lang, "Local & Pixel")).expect("the masks' group caption is drawn");
+                    let to = top_of(tr(lang, "Versions & Export")).expect("the next group's caption is drawn");
+                    let mut table = format!("# column right edge {:.1}\ntop\tleft\tright\tpast\twhat\n", given.right());
+                    for (r, what) in items.iter().filter(|(r, _)| r.top() >= from && r.top() < to) {
+                        table.push_str(&format!("{:.0}\t{:.0}\t{:.0}\t{:+.0}\t{what}\n", r.top(), r.left(), r.right(), r.right() - given.right()));
+                    }
+                    let kind = kind.split(',').next().unwrap();
+                    std::fs::write(dir.join(format!("mask-rows-{lang:?}-{kind}-{range_name}.tsv")), table).unwrap();
+                }
+            }
+        }
+    }
+
+    /// Not a check — the camera for a selected mask's rows: each kind of
+    /// mask, plain and with a luminance range, in both languages, as the
+    /// controls panel draws it at its default width; a second, muted mask
+    /// with a name no row holds stands under it in the list.
+    /// `AUTOSHADE_SHOT_DIR=<dir> cargo test … mask_screenshots -- --ignored`.
+    #[test]
+    #[ignore = "writes PNGs for a person to look at"]
+    fn mask_screenshots() {
+        use autoshade::recipe::{LocalAdjustment, RangeMask};
+        let dir = std::path::PathBuf::from(std::env::var("AUTOSHADE_SHOT_DIR").expect("AUTOSHADE_SHOT_DIR"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let luminance = RangeMask::Luminance { lo_outer: 0.125, lo: 0.25, hi: 0.75, hi_outer: 0.875 };
+        for lang in [crate::i18n::Lang::Zh, crate::i18n::Lang::En] {
+            for (kind, mask) in one_mask_of_each_kind() {
+                for (range_name, range) in [("plain", None), ("luminance", Some(luminance))] {
+                    let mut app = app_with_every_button(lang);
+                    let long = LocalAdjustment {
+                        name: "a second mask whose name is longer than any row".into(),
+                        range: Some(luminance),
+                        exposure_ev: 0.5,
+                        enabled: false,
+                        ..Default::default()
+                    };
+                    app.recipe.masks = vec![LocalAdjustment { range, ..mask.clone() }, long];
+                    app.sel_mask = Some(0);
+                    let img = controls_cut_shot(
+                        &mut app,
+                        crate::theme::ThemePref::Dark,
+                        crate::theme::CONTROLS_W_MIN,
+                        tr(lang, "Local & Pixel"),
+                        tr(lang, "Versions & Export"),
+                    );
+                    let kind = kind.split(',').next().unwrap();
+                    img.save(dir.join(format!("mask-{lang:?}-{kind}-{range_name}.png"))).unwrap();
+                }
+            }
+        }
+    }
+
+    /// One mask of each kind the mask list can hold — the kinds whose
+    /// selected rows differ: the 「↻ Redraw」 row (linear, radial), the
+    /// feather / angle / flip rows (radial), the raster tools (a mask
+    /// with pixels) — each carrying one component of every kind and the
+    /// reverse fit's recolour, so every row a selected mask can draw is
+    /// drawn.
+    fn one_mask_of_each_kind() -> Vec<(&'static str, autoshade::recipe::LocalAdjustment)> {
+        use autoshade::recipe::{LocalAdjustment, MaskCombine, MaskComponent, MaskGeometry};
+        let ai = |raster| MaskGeometry::AiMask {
+            name: "Sky 1".into(),
+            subtype: 2,
+            ref_x: 0.5,
+            ref_y: 0.2,
+            blend_mode: 0,
+            value: 1.0,
+            inverted: false,
+            mask_version: 1,
+            provenance: Vec::new(),
+            gesture: Vec::new(),
+            raster,
+        };
+        let geometries: Vec<(&'static str, MaskGeometry)> = vec![
+            ("linear", MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.0, full_x: 0.5, full_y: 0.5 }),
+            ("shaped", MaskGeometry::Shaped { zero_x: 0.5, zero_y: 0.0, full_x: 0.5, full_y: 0.5, falloff: vec![0.0, 0.4, 1.0] }),
+            (
+                "radial",
+                MaskGeometry::Radial {
+                    top: 0.2, left: 0.2, bottom: 0.8, right: 0.8,
+                    feather: 0.5, roundness: 0.0, flipped: false, angle: 15.0,
+                    midpoint: 50.0, mask_version: 2,
+                },
+            ),
+            ("bitmap", MaskGeometry::Bitmap { path: "mask-kinds.png".into() }),
+            ("brush", MaskGeometry::Brush { name: "Brush 1".into(), blend_mode: 0, value: 1.0, inverted: false, strokes: Vec::new() }),
+            ("ai, not yet drawn", ai(None)),
+        ];
+        let components: Vec<MaskComponent> = geometries
+            .iter()
+            .zip([MaskCombine::Add, MaskCombine::Subtract, MaskCombine::Intersect].into_iter().cycle())
+            .map(|((_, g), mode)| MaskComponent { geometry: g.clone(), mode, inverted: false })
+            .collect();
+        geometries
+            .into_iter()
+            .map(|(kind, mask)| {
+                let m = LocalAdjustment {
+                    mask,
+                    components: components.clone(),
+                    name: "sky gradient".into(),
+                    color_gains: Some([1.3, 1.0, 0.7]),
+                    ..Default::default()
+                };
+                (kind, m)
+            })
+            .collect()
+    }
+
+    /// User report 2026-11-19 (a radial mask selected: a black band beside
+    /// the controls panel, every slider under the mask without its number).
+    /// The rows a selected mask draws depend on the KIND of mask and of its
+    /// range, and the layout tests had laid one kind — a bitmap with no
+    /// range. Every kind of mask with every kind of range, one component of
+    /// every kind under it, in both languages, from the narrowest panel to
+    /// its cap: no row reaches past the column it was given, and no row
+    /// stands at another height when the panel is wider.
+    ///
+    /// MUTATIONS THIS CATCHES (each was this pin's own red on 2026-11-19,
+    /// before its fix, at the default width): a control laid beside a slider
+    /// in one `horizontal` — the radial's 「Flip」 beside 「Edge feather」; the
+    /// slider takes the whole row, the box stands past it, and every row
+    /// under it grows by as much (97 px); a list row as wide as its name (a
+    /// mask with a luminance range, 41 px in English); 「↻ Redraw」 beside the
+    /// name with the name floored at 110 px (19 px in Chinese, 38 in
+    /// English); a shape's row laid name-first at its own width (33 px in
+    /// English); the luminance range's four bounds beside their name (12 px
+    /// in Chinese, 59 in English).
+    #[test]
+    fn every_kind_of_selected_mask_fits_the_column() {
+        use autoshade::recipe::RangeMask;
+        use crate::i18n::Lang;
+        let ranges: [(&str, Option<RangeMask>, bool); 4] = [
+            ("no range", None, false),
+            ("a luminance range", Some(RangeMask::Luminance { lo_outer: 0.125, lo: 0.25, hi: 0.75, hi_outer: 0.875 }), false),
+            ("a colour range", Some(RangeMask::Color { r: 0.2, g: 0.4, b: 0.8, amount: 0.5, px: 0.5, py: 0.5 }), false),
+            ("a colour range being sampled", Some(RangeMask::Color { r: 0.2, g: 0.4, b: 0.8, amount: 0.5, px: 0.5, py: 0.5 }), true),
+        ];
+        let narrowest = crate::theme::CONTROLS_W_MIN;
+        let mut wrong: Vec<String> = Vec::new();
+        for lang in [Lang::Zh, Lang::En] {
+            for (kind, mask) in one_mask_of_each_kind() {
+                for (range_name, range, sampling) in ranges {
+                    let make = || {
+                        let mut app = app_with_every_button(lang);
+                        app.recipe.masks = vec![autoshade::recipe::LocalAdjustment { range, ..mask.clone() }];
+                        app.sel_mask = Some(0);
+                        app.range_picking = sampling.then_some(0);
+                        app
+                    };
+                    let what = format!("{lang:?}, a {kind} mask with {range_name}");
+                    let (base, base_panel) = settled_controls(&mut make(), narrowest);
+                    let over = column_overreach();
+                    // Premise: the selected mask's own rows were laid — the
+                    // last slider of its Color group is among what was drawn.
+                    assert!(
+                        base.iter().any(|(_, text, _)| text == tr(lang, "Color tint hue")),
+                        "{what}: the selected mask's rows were not drawn"
+                    );
+                    if over > 0.5 {
+                        let named: Vec<String> = past_the_column(&mut make(), narrowest).into_iter().take(6).collect();
+                        wrong.push(format!(
+                            "{what}: a row reaches {over:.1} px past the {narrowest} px panel's column — the first things past its edge:\n    {}",
+                            named.join("\n    ")
+                        ));
+                    }
+                    // 2000 px is past the cap: the panel stops at its widest.
+                    let (wide, wide_panel) = settled_controls(&mut make(), 2000.0);
+                    let over = column_overreach();
+                    assert!(wide_panel.width() > base_panel.width() + 30.0, "premise: the panel took the wider width ({:.1})", wide_panel.width());
+                    if over > 0.5 {
+                        wrong.push(format!("{what}: a row reaches {over:.1} px past the {:.0} px panel's column", wide_panel.width()));
+                    }
+                    if base.len() != wide.len() {
+                        wrong.push(format!(
+                            "{what}: the panel draws {} things at {narrowest} px and {} at {:.0} px",
+                            base.len(),
+                            wide.len(),
+                            wide_panel.width()
+                        ));
+                        continue;
+                    }
+                    if let Some(((kind, text, at), (_, _, now))) = base
+                        .iter()
+                        .zip(&wide)
+                        .find(|((_, _, at), (_, _, now))| (at.top() - now.top()).abs() > 0.6 || (at.bottom() - now.bottom()).abs() > 0.6)
+                    {
+                        wrong.push(format!(
+                            "{what}: {kind} {text:?} stands at y {:.1}..{:.1} in a {narrowest} px panel and at {:.1}..{:.1} in a {:.0} px one",
+                            at.top(),
+                            at.bottom(),
+                            now.top(),
+                            now.bottom(),
+                            wide_panel.width()
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{} of the selected-mask layouts are wrong:\n{}", wrong.len(), wrong.join("\n"));
+    }
+
     /// An analysis of a few lines: shorter than its box, and long enough to
     /// take a line fewer when the panel is wider.
     fn with_short_analysis(app: &mut AutoShadeApp) {
@@ -160,6 +482,16 @@
                 // 2000 px is past the cap: the panel stops at its widest.
                 for asked in [narrowest, narrowest + 37.0, narrowest + 83.0, 2000.0] {
                     let (items, panel) = settled_controls(&mut make(lang), asked);
+                    // The layout's own word, beside the drawn things below:
+                    // the panel's rect is the laid one whatever its rows do
+                    // (`drag_owned_panel`), and a row past the edge is
+                    // clipped — neither can show a row that is too wide.
+                    let over = column_overreach();
+                    assert!(
+                        over <= 0.5,
+                        "{lang:?}, {what}, panel {:.0} px: a row reaches {over:.1} px past the column it was given",
+                        panel.width()
+                    );
                     if asked > narrowest {
                         assert!(panel.width() > narrowest + 30.0, "premise: the panel took the wider width ({:.1})", panel.width());
                     }
