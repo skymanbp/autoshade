@@ -16,7 +16,7 @@ use super::{form_help, form_row};
 impl AutoShadeApp {
     pub(super) fn settings_update_row(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        let mut check = false;
+        let mut check_now = false;
         let mut open = None;
         let mut skip = None;
         form_row(ui, tr(lang, "Updates"), |ui| {
@@ -50,7 +50,7 @@ impl AutoShadeApp {
             };
             let skipped = newer.as_ref().is_some_and(|rel| u.prefs.skipped.as_deref() == Some(&*rel.version.to_string()));
             ui.horizontal_wrapped(|ui| {
-                check = action(ui, !u.checking(), tr(lang, "Check now")).clicked();
+                check_now = action(ui, !u.checking(), tr(lang, "Check now")).clicked();
                 if let Some(rel) = &newer {
                     if action(ui, true, tr(lang, "Open the download page")).clicked() {
                         open = Some(rel.page.clone());
@@ -68,9 +68,9 @@ impl AutoShadeApp {
             // left as it was.
             if u.env_off {
                 let mut off = false;
-                ui.add_enabled(false, egui::Checkbox::new(&mut off, tr(lang, "Check for updates automatically")));
+                check_if(ui, false, &mut off, tr(lang, "Check for updates automatically"));
                 form_help(ui, tr(lang, "Turned off by the AUTOSHADE_NO_UPDATE_CHECK environment variable."));
-            } else if ui.checkbox(&mut u.prefs.auto, tr(lang, "Check for updates automatically")).changed() {
+            } else if check(ui, &mut u.prefs.auto, tr(lang, "Check for updates automatically")).changed() {
                 self.prefs_save_due = true;
             }
             form_help(
@@ -81,7 +81,7 @@ impl AutoShadeApp {
                 ),
             );
         });
-        if check {
+        if check_now {
             self.start_manual_update_check();
         }
         if let Some(page) = open {
