@@ -97,8 +97,8 @@ pub struct EditRecipe {
     /// build's own numbers and are stamped current as they stand. A payload
     /// is the develop a build exported, and one of v1.18.3 or earlier IS on
     /// that build's scale — but its reader mixes it, leaf by leaf, with the
-    /// numbers Lightroom left in the document, which stand as they are; so
-    /// the payload's own leaves are carried over there
+    /// numbers set in Lightroom, which stand as they are; so each Temp and
+    /// Tint that is still the number that build wrote is carried over there
     /// (`xmp::payload::restore`, 2026-11-20) and the result is stamped once.
     ///
     /// The develop reads the stamp too (`render::mask_wb_gains`,
@@ -3719,9 +3719,9 @@ impl EditRecipe {
     /// [`mask_wb_era`](Self::mask_wb_era)). A sidecar's PAYLOAD is the one
     /// saved develop that is not converted whole: an older build's is
     /// reconciled against the document first, on that build's scale, and
-    /// `xmp::payload::restore` then carries over the leaves it took from the
-    /// payload with the same `render::local_wb_from_legacy` this uses,
-    /// leaving the ones set in Lightroom as they stand (2026-11-20).
+    /// `xmp::payload::restore` then carries over each Temp and Tint that is
+    /// still that build's number with the same `render::local_wb_from_legacy`
+    /// this uses, leaving the ones set in Lightroom as they stand (2026-11-20).
     ///
     /// Gated on the stamp, and the stamp moves with the numbers, so a second
     /// call — the same recipe handed on to another reader, a file saved after

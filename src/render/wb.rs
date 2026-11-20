@@ -166,11 +166,11 @@ pub fn local_tint_to_engine(t: f32) -> f32 {
 /// a door that does not clamp, rendered more than the band's end.
 ///
 /// `EditRecipe::convert_legacy_mask_wb` owns when a saved recipe's numbers
-/// are legacy ones, and the sidecar reader carries over the leaves it takes
-/// from an older build's payload (`xmp::payload::restore`). A `const fn`
-/// because the Portraits skin-warmth limit is the old limit carried over by
-/// this very expression (`face::SKIN_TEMPERATURE_MAX`), so the two cannot
-/// drift.
+/// are legacy ones, and the sidecar reader carries over, leaf by leaf, each
+/// Temp and Tint of an older build's sidecar that is still the number that
+/// build wrote (`xmp::payload::restore`). A `const fn` because the Portraits
+/// skin-warmth limit is the old limit carried over by this very expression
+/// (`face::SKIN_TEMPERATURE_MAX`), so the two cannot drift.
 pub(crate) const fn local_wb_from_legacy(temperature: f32, tint: f32) -> (f32, f32) {
     (
         temperature.clamp(-100.0, 100.0) * (LOCAL_TEMP_MIRED_LEGACY / LOCAL_TEMP_MIRED),

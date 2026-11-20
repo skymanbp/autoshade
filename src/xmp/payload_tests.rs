@@ -1393,19 +1393,42 @@ fn an_older_sidecars_mask_gains_survive_a_fresh_export_with_no_record() {
     assert!(off < 1e-4, "it draws what that build drew: {off:e}");
 }
 
-/// The gains' three numbers moved in Lightroom: the gains go, and the
-/// document's three stand as they are — with or without the record.
+/// One of the gains' three numbers moved in Lightroom: the gains go — the
+/// document's colour already carries them — and the three are read leaf by
+/// leaf, with or without the record. The number Lightroom moved stands as the
+/// document states it; a Temp or Tint it handed back as written is still that
+/// build's number and is carried over like a plain mask's; the Exposure has
+/// one scale and is the document's.
+///
+/// MUTATION THIS CATCHES: a mask whose three moved read whole as the document
+/// states it (the untouched Tint comes back at the number that build wrote,
+/// twice the carried-over one; with only the Exposure moved, the Temp too).
 #[test]
-fn an_older_sidecars_gains_edited_in_lightroom_go_and_the_documents_three_stand() {
+fn an_older_sidecars_gains_edited_in_lightroom_go_and_each_number_left_alone_is_carried_over() {
     let (p, wrote) = older_gains_develop();
-    let mut edited = wrote.clone();
-    edited.masks[0].temperature += 9.0;
-    let rewritten = lightroom_like(&p, &edited);
-    for doc in [with_written_record(&rewritten, &bare_document(&wrote, None)), rewritten] {
-        let back = xmp_to_recipe(&doc);
-        let (m, e) = (&back.masks[0], &edited.masks[0]);
-        assert_eq!(m.color_gains, None, "the document's colour already carries them");
-        assert!(near(m.temperature, e.temperature) && near(m.tint, e.tint) && near(m.exposure_ev, e.exposure_ev), "{m:?} against {e:?}");
+    let w = &wrote.masks[0];
+    let (temperature, tint) = crate::render::local_wb_from_legacy(w.temperature, w.tint);
+    assert!(w.tint.abs() > 0.1 && !near(w.tint, tint), "premise: a Tint worth carrying over: {:?}", mask_wb(&wrote, 0));
+    // (a) the Temp moved in Lightroom; (b) only the Exposure moved.
+    let mut warmer = wrote.clone();
+    warmer.masks[0].temperature += 9.0;
+    let mut brighter = wrote.clone();
+    brighter.masks[0].exposure_ev += 0.3;
+    for (what, edited, want_temperature) in
+        [("Temp moved", &warmer, warmer.masks[0].temperature), ("only Exposure moved", &brighter, temperature)]
+    {
+        let rewritten = lightroom_like(&p, edited);
+        for (record, doc) in
+            [("with the record", with_written_record(&rewritten, &bare_document(&wrote, None))), ("no record", rewritten)]
+        {
+            let back = xmp_to_recipe(&doc);
+            let m = &back.masks[0];
+            assert_eq!(m.color_gains, None, "{what}, {record}: the document's colour already carries them");
+            assert!(near(m.temperature, want_temperature), "{what}, {record}: Temp {} against {want_temperature}", m.temperature);
+            assert!(near(m.tint, tint), "{what}, {record}: the Tint left alone is carried over: {} against {tint}", m.tint);
+            let exposure_ev = edited.masks[0].exposure_ev;
+            assert!(near(m.exposure_ev, exposure_ev), "{what}, {record}: Exposure {} against the document's {exposure_ev}", m.exposure_ev);
+        }
     }
 }
 

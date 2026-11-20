@@ -653,10 +653,15 @@ fn decode_raster(name: &str, crc: &str, data: &str) -> Result<Raster, String> {
 ///   weaker scale, and so are the `crs:LocalTemperature` / `crs:LocalTint`
 ///   it wrote beside them (the slider's own for a plain mask, its projection
 ///   of the gains for a recolour carrier). P, W and C are compared as they
-///   stand, all three on that scale; then a leaf the rule took from P is
-///   carried onto this build's scale and a leaf it took from C — a number
-///   set in Lightroom — stands as it is ([`carry_over_mask_wb`]). The
-///   sidecar imports to the picture it was exported with.
+///   stand, all three on that scale; then each Temp and Tint is restated
+///   leaf by leaf: one the document handed back as written is still that
+///   build's number and is carried onto this build's scale, and one that
+///   came back different — a number set in Lightroom — stands as it is
+///   ([`mask_wb_from_payload`], [`carry_over_mask_wb`]). That holds for a
+///   recolour carrier whose three were moved as well: its gains go, the
+///   number Lightroom moved stands, and the Temp or Tint beside it that was
+///   not moved is carried over. The sidecar imports to the picture it was
+///   exported with.
 ///
 /// Masks are matched, not zipped: the payload's masks that the projection
 /// never wrote (a muted mask, a bitmap-based one) are restored as they were;
@@ -925,10 +930,10 @@ fn approx_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
 /// With an older build's payload (`older_mask_wb`) this is also where each
 /// mask's Temp and Tint are brought onto this build's scale, by where the
 /// rule took them from ([`carry_over_mask_wb`]): a mask the projection never
-/// wrote is the payload's alone, both leaves; a paired mask's leaf is the
-/// payload's where the document handed it back as written
-/// ([`mask_wb_from_payload`]); a correction added in Lightroom is the
-/// document's and stands.
+/// wrote is the payload's alone, both leaves; a paired mask's leaf is that
+/// build's number where the document handed it back as written, whether or
+/// not the mask carries colour gains ([`mask_wb_from_payload`]); a
+/// correction added in Lightroom is the document's and stands.
 fn reconcile_masks(
     p: &[serde_json::Value],
     w: &[serde_json::Value],
@@ -989,7 +994,7 @@ fn reconcile_masks(
             Some(j) => match w_to_c[j] {
                 // Written, then removed in Lightroom.
                 None => continue,
-                Some(k) => (reconcile_mask(pm, &w[j], &c[k]), mask_wb_from_payload(pm, &w[j], &c[k])),
+                Some(k) => (reconcile_mask(pm, &w[j], &c[k]), mask_wb_from_payload(&w[j], &c[k])),
             },
         };
         if older_mask_wb {
@@ -1051,10 +1056,12 @@ fn reconcile_mask(p: &serde_json::Value, w: &serde_json::Value, c: &serde_json::
 /// payload's gains, so they are reconciled together: handed back as written,
 /// the payload's own Temp, Tint, Exposure and gains stand (the leaf rule has
 /// already chosen them); moved — an edit in Lightroom, or a build whose
-/// develop now projects the gains differently — the document's three stand
-/// and the gains go, since the document's colour already carries them. Leaf
-/// by leaf, a moved Temp would have joined the payload's gains and put the
-/// recolour on twice.
+/// develop now projects the gains differently — the document's three are
+/// taken and the gains go, since the document's colour already carries them.
+/// Leaf by leaf, a moved Temp would have joined the payload's gains and put
+/// the recolour on twice. What is taken here is the document's numbers; on
+/// which scale each Temp and Tint among them is read, for an older build's
+/// payload, is settled afterwards and leaf by leaf ([`mask_wb_from_payload`]).
 fn recolour_carrier(
     mut out: serde_json::Value,
     p: &serde_json::Value,
@@ -1082,8 +1089,8 @@ fn mask_leaf(m: &serde_json::Value, k: &str) -> serde_json::Value {
 }
 
 /// Did the document's Temp, Tint and Exposure of a mask whose payload carries
-/// colour gains come back different from what was written — the one question
-/// [`recolour_carrier`] and [`mask_wb_from_payload`] both turn on.
+/// colour gains come back different from what was written — the question
+/// [`recolour_carrier`] turns on.
 fn carrier_moved(p: &serde_json::Value, w: &serde_json::Value, c: &serde_json::Value) -> bool {
     use serde_json::Value;
     let gains = p.get("color_gains").and_then(Value::as_array);
@@ -1091,29 +1098,36 @@ fn carrier_moved(p: &serde_json::Value, w: &serde_json::Value, c: &serde_json::V
     !neutral && !CARRIER.iter().all(|k| approx_eq(&mask_leaf(w, k), &mask_leaf(c, k)))
 }
 
-/// Which of a paired mask's Temp and Tint the rule took from the PAYLOAD
-/// (`[temperature, tint]`): a leaf the document handed back as written is the
-/// payload's ([`choose`]), unless the mask is a recolour carrier that moved —
-/// then both are the document's, with its Exposure
-/// ([`recolour_carrier`]).
-fn mask_wb_from_payload(p: &serde_json::Value, w: &serde_json::Value, c: &serde_json::Value) -> [bool; 2] {
-    if carrier_moved(p, w, c) {
-        return [false; 2];
-    }
+/// Which of a paired mask's Temp and Tint are still the numbers the build
+/// that wrote the payload stated (`[temperature, tint]`): each one the
+/// document handed back as written, leaf by leaf, whether or not the mask
+/// carries colour gains (2026-11-20).
+///
+/// One rule for the whole reader: a number AutoShade wrote keeps AutoShade's
+/// picture, a number set in Lightroom stands as stated. For a plain mask, and
+/// for a recolour carrier whose three came back as written, such a leaf is
+/// the payload's own ([`choose`]). For a carrier one of whose three was moved
+/// in Lightroom the gains go and the document's three are taken
+/// ([`recolour_carrier`]) — and a Temp or Tint among them that came back as
+/// written is still what that build wrote, so it is carried over like a
+/// plain mask's, while the one Lightroom moved stands at the number it
+/// states. The Exposure has one scale and is the document's either way.
+fn mask_wb_from_payload(w: &serde_json::Value, c: &serde_json::Value) -> [bool; 2] {
     ["temperature", "tint"].map(|k| approx_eq(&mask_leaf(w, k), &mask_leaf(c, k)))
 }
 
-/// Carry the leaves of `mask` that came from an older build's payload onto
-/// this build's scale (2026-11-20).
+/// Carry the leaves of `mask` that are still an older build's numbers
+/// (`from_payload`, as [`mask_wb_from_payload`] or the unwritten-mask arm of
+/// [`reconcile_masks`] names them) onto this build's scale (2026-11-20).
 ///
 /// A sidecar AutoShade wrote must import to the picture it was exported
 /// with, whichever build wrote it: the sidecar is the copy of a develop that
 /// travels with the photo. Up to v1.18.3 a mask's Temp and Tint rendered on a
-/// weaker scale, and a payload of that build states them on it; carried over
-/// by the same exact rule as a saved recipe's
-/// (`render::local_wb_from_legacy`), the mask renders what that build
-/// rendered. A leaf that came from the DOCUMENT is not touched: a number set
-/// in Lightroom is read as it stands, the rule for every sidecar Lightroom
+/// weaker scale, and that build states them on it in the payload and in the
+/// `crs:` settings alike; carried over by the same exact rule as a saved
+/// recipe's (`render::local_wb_from_legacy`), the mask renders what that
+/// build rendered. A leaf Lightroom MOVED is not touched: a number set in
+/// Lightroom is read as it stands, the rule for every sidecar Lightroom
 /// wrote. The two scalings are independent and linear, so the leaves are
 /// carried one by one.
 fn carry_over_mask_wb(mask: &mut serde_json::Value, from_payload: [bool; 2]) {

@@ -2220,10 +2220,11 @@ mixes it with the numbers Lightroom left in the document, and those are the
 slider's. So `payload::restore` keeps that build's scale all the way through
 the reconcile — the payload, the document as written and the document as
 found are compared in the numbers that build wrote — and restates each mask
-Temp and Tint afterwards by where it came from: a leaf taken from the payload
-(Lightroom left it alone, or the mask was never written — muted, a bitmap,
-past a cap) is carried over with the same `render::local_wb_from_legacy` a
-`recipe.json` goes through, and a leaf taken from the document stands. The
+Temp and Tint afterwards, leaf by leaf, by whose number it is: one that build
+wrote (Lightroom handed it back as written, or the mask was never written —
+muted, a bitmap, past a cap) is carried over with the same
+`render::local_wb_from_legacy` a `recipe.json` goes through, and one Lightroom
+moved stands. The
 result is stamped once. An .xmp AutoShade wrote therefore imports to the
 picture it was exported with, whichever version since v1.3.1 wrote it
 (`an_older_sidecars_plain_mask_imports_to_the_picture_it_had` and its
@@ -2261,12 +2262,20 @@ fit that build's range (by up to 0.36 of a slider unit) and for 169 of the
 today's runs on); that build's numbers carried over candidate by candidate
 and rendered by today's law, the same law a last bit apart now and then,
 missed for 27 (by up to 0.16); that build's own arithmetic misses none. A
-miss reads as an edit made in Lightroom: the gains go and the document's
-three numbers stand. Two consequences follow and are accepted: a develop
-saved before the change and exported after it writes the smaller, converted
-numbers; and when the three numbers that carry a mask's gains were edited in
-Lightroom, the document's three stand as they are and the gains go, as for
-any sidecar.
+miss reads as an edit made in Lightroom: the gains go, and the number that
+missed is taken as Lightroom's. One consequence follows and is accepted: a
+develop saved before the change and exported after it writes the smaller,
+converted numbers.
+
+When the three numbers that carry a mask's gains WERE edited in Lightroom,
+the gains go, as for any sidecar, and the three are read leaf by leaf like a
+plain mask's (`payload::mask_wb_from_payload`): the number Lightroom moved
+stands as the document states it, a Temp or Tint beside it that came back as
+written is still that build's number and is carried over, and the Exposure,
+which has one scale, is the document's. One rule runs through the whole
+reader: a number AutoShade wrote keeps AutoShade's picture, a number set in
+Lightroom stands as stated
+(`an_older_sidecars_gains_edited_in_lightroom_go_and_each_number_left_alone_is_carried_over`).
 Like `coord_era`, the stamp is a forward break: builds up to v1.18.3 refuse a
 recipe that carries the key (`deny_unknown_fields`), and read a sidecar this
 build wrote from its `crs:` settings alone.
@@ -4207,8 +4216,10 @@ whose best Temp or Tint sits at the end of its range are the one remaining
 value (`payload::recolour_carrier`): handed back as written, the exact gains
 and the mask's own Temp, Tint and Exposure are restored; moved (a Lightroom
 edit, or a build whose develop projects the gains differently), the
-document's three stand and the gains go, so the recolour is never applied
-twice. The projection reads the mask white balance the develop renders, so
+document's three are taken and the gains go, so the recolour is never applied
+twice (in a sidecar v1.18.3 or an earlier build wrote, a Temp or Tint among
+the three that Lightroom left alone is then carried onto today's scale —
+§4.1). The projection reads the mask white balance the develop renders, so
 it followed that law when the law's reach grew (the version after v1.18.3,
 `mask_wb_era` in §4.1): the same gains are carried by a Temp and Tint of
 about half the size, and gains further from neutral fit inside the range
