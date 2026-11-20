@@ -720,9 +720,11 @@ fn the_real_lightroom_rewrites_read_as_measured() {
     // The third pair (2026-09-12, after the release): a v1.3.1 sidecar ITSELF —
     // the 0.85 reference-pair develop, 285,172 bytes with the payload and five
     // rasters — rewritten by Lightroom 9.4 after one mask toggle. The whole
-    // develop comes back; what differs is exactly what Lightroom wrote: its own
-    // Select Sky reference point and provenance on the two zone masks, and the
-    // nine unmodelled keys it materialised (kept as passthrough).
+    // develop comes back, the colour gains of its two zone masks included
+    // (2026-11-20: a writer that old wrote each mask's own three numbers, and
+    // the reader measures the document against that); what differs is what
+    // Lightroom wrote: its own Select Sky reference point and provenance on
+    // the two zone masks, and the values of controls v1.3.1 did not have.
     let (orig, lr) = (read("payload-131-original.xmp"), read("payload-131-lightroom-9.4-rewrite.xmp"));
     assert_ne!(orig, lr, "premise: Lightroom rewrote the v1.3.1 sidecar");
     assert!(orig.contains("asr:Writer=\"AutoShade 1.3.1\""), "premise: written by v1.3.1");
@@ -742,20 +744,47 @@ fn the_real_lightroom_rewrites_read_as_measured() {
         po.rasters.iter().zip(&pl.rasters).all(|(a, b)| a.name == b.name && a.bytes == b.bytes),
         "every raster survived byte for byte, in order"
     );
-    let want = po.recipe;
-    let back = xmp_to_recipe(&lr);
+    assert_eq!((po.writer, po.written.is_none()), (Some([1, 3, 1]), true), "premise: the writer is read, and left no record");
+    // The develop v1.3.1 exported, as THIS build holds it: its masks' Temp and
+    // Tint carried onto today's scale (the payload names none), and its raster
+    // names anchored to the photo's develop folder. The document is read for
+    // a photo, as an import reads it: since v1.15.1 a read with no photo keeps
+    // no raster name it cannot anchor, so it could not show the tiles back.
+    let photo = load_photo();
+    let mut want = po.recipe;
+    want.convert_legacy_mask_wb();
+    crate::store::resolve_mask_paths(&mut want, &crate::store::develop_dir(&photo));
+    let back = xmp_to_recipe_for_photo(&lr, &photo);
     let mut diffs = Vec::new();
     leaf_diffs("", &serde_json::to_value(&want).unwrap(), &serde_json::to_value(&back).unwrap(), &mut diffs);
     diffs.sort();
-    let lightroom_wrote = [
+    // Lightroom materialised nine keys v1.3.1 did not model, and until v1.5.0
+    // they came back as passthrough. Since v1.5.0 they are controls of the
+    // develop: the eight Transform ones came back at the values a develop
+    // without them holds (no difference), and the camera profile is
+    // Lightroom's. `explicit_zero` (v1.5.0) names a zero the DOCUMENT spells
+    // out on a control whose Lightroom default is not zero — here the
+    // Sharpening amount (a member since v1.6.0): v1.3.1 rendered a RAW
+    // unsharpened and wrote `Sharpness="0"`, Lightroom wrote it back, and the
+    // reader keeps that zero a zero. A payload older than a control carries
+    // nothing for it, so the document's value stands in all three.
+    let differs = [
+        "/camera_profile", "/explicit_zero",
         "/masks[0]/mask/provenance", "/masks[0]/mask/ref_x", "/masks[0]/mask/ref_y",
         "/masks[1]/mask/provenance", "/masks[1]/mask/ref_x", "/masks[1]/mask/ref_y",
-        "/passthrough/CameraProfile", "/passthrough/PerspectiveAspect",
-        "/passthrough/PerspectiveHorizontal", "/passthrough/PerspectiveRotate",
-        "/passthrough/PerspectiveScale", "/passthrough/PerspectiveUpright",
-        "/passthrough/PerspectiveVertical", "/passthrough/PerspectiveX", "/passthrough/PerspectiveY",
     ];
-    assert_eq!(diffs, lightroom_wrote, "only what Lightroom wrote differs from the develop");
+    assert_eq!(diffs, differs, "only what the document states and the older payload cannot differs from the develop");
+    assert_eq!((want.camera_profile.as_str(), back.camera_profile.as_str()), ("", "Adobe Standard"));
+    assert!(want.explicit_zero.is_empty(), "premise: a payload older than v1.5.0 names no explicit zero");
+    assert_eq!(back.explicit_zero, ["sharpening"], "the document's Sharpness=\"0\" stays a zero");
+    assert!(back.passthrough.keys().all(|k| !k.starts_with("Perspective") && k != "CameraProfile"), "{:?}", back.passthrough.keys());
+    // The two zone masks carry colour gains. v1.3.1 wrote each one's OWN
+    // Exposure, Temp and Tint and kept the gains in the payload alone; they
+    // are back, and the masks' own numbers with them.
+    for (b, w) in back.masks.iter().zip(&want.masks).take(2) {
+        assert!(w.color_gains.is_some_and(|g| g != [1.0; 3]), "premise: {} carries gains", w.name);
+        assert_eq!((b.color_gains, b.exposure_ev, b.temperature, b.tint), (w.color_gains, w.exposure_ev, w.temperature, w.tint), "{}", w.name);
+    }
     assert_eq!(back.colour_field, want.colour_field, "the colour field is back");
     assert_eq!(back.masks.len(), 6);
     for (b, w) in back.masks.iter().zip(&want.masks) {
@@ -1429,6 +1458,99 @@ fn an_older_sidecars_gains_edited_in_lightroom_go_and_each_number_left_alone_is_
             let exposure_ev = edited.masks[0].exposure_ev;
             assert!(near(m.exposure_ev, exposure_ev), "{what}, {record}: Exposure {} against the document's {exposure_ev}", m.exposure_ev);
         }
+    }
+}
+
+// ── A sidecar written before a mask's gains were projected (2026-11-20) ─────
+//
+// From v1.17.0 a mask's colour gains leave as its Temp, Tint and Exposure.
+// Every writer from the first payload (v1.3.1) to v1.16.x wrote the mask's
+// OWN three and kept the gains in the payload alone. The reader measures the
+// document against what THAT writer wrote, and learns who wrote it from the
+// payload's `Writer="AutoShade X.Y.Z"`.
+
+/// The sidecar whose payload is `p` and whose `crs:` settings state
+/// `settings`, with the payload's writer attribute set to `writer` (the whole
+/// value) or removed.
+fn sidecar_by_writer(p: &EditRecipe, settings: &EditRecipe, writer: Option<&str>) -> String {
+    let doc = lightroom_like(p, settings);
+    let stamped = format!("\n    asr:Writer=\"AutoShade {}\"", env!("CARGO_PKG_VERSION"));
+    assert_eq!(doc.matches(&stamped).count(), 1, "{doc}");
+    doc.replacen(&stamped, &writer.map(|w| format!("\n    asr:Writer=\"{w}\"")).unwrap_or_default(), 1)
+}
+
+/// An older build's develop whose one mask carries colour gains over a Temp
+/// and Tint of its own, and the `crs:` settings a writer older than v1.17.0
+/// left for it: the mask's own three, the gains nowhere.
+fn unprojected_gains_develop() -> (EditRecipe, EditRecipe) {
+    let p = older_recipe(vec![older_mask("sky", 12.0, -6.0, Some(OLDER_GAINS))]);
+    let mut own = p.clone();
+    own.masks[0].color_gains = None;
+    (p, own)
+}
+
+/// Untouched, such a sidecar keeps its mask's gains, and the mask's own Temp
+/// and Tint are that build's numbers, carried over (12 → 6.4, −6 → −3): the
+/// import is the saved develop carried over, and it draws what the older law
+/// draws for that develop.
+///
+/// MUTATION THIS CATCHES: the written document not restated for a writer
+/// older than v1.17.0 (measured against today's projection of the gains the
+/// mask reads as moved in Lightroom: the gains go, and its own Temp and Tint
+/// stand at twice their strength).
+#[test]
+fn a_sidecar_written_before_the_gains_projection_keeps_its_masks_gains() {
+    use crate::render::v1_18_3::{developed, developed_then, worst};
+    let (p, own) = unprojected_gains_develop();
+    for writer in ["AutoShade 1.16.0", "AutoShade 1.3.1"] {
+        let doc = sidecar_by_writer(&p, &own, Some(writer));
+        let found = payload::find(&doc).expect("a payload").expect("decodes");
+        assert!(found.writer.is_some_and(|v| v < [1, 17, 0]) && found.written.is_none(), "premise: {writer}: {:?}", found.writer);
+        let back = xmp_to_recipe(&doc);
+        assert_eq!(back.masks[0].color_gains, Some(OLDER_GAINS), "{writer}: the untouched gains survive");
+        assert_eq!(back.masks, carried_over(&p).masks, "{writer}: with the mask's own Temp and Tint, carried over");
+        assert!(near(mask_wb(&back, 0).0, 6.4) && near(mask_wb(&back, 0).1, -3.0), "{writer}: {:?}", mask_wb(&back, 0));
+        let off = worst(&developed(&back), &developed_then(&p));
+        assert!(off < 1e-4, "{writer}: it draws what the older law draws: {off:e}");
+    }
+}
+
+/// One of the three moved in Lightroom: read like any mask whose three moved
+/// — the gains go, Lightroom's number stands as stated, and the Temp or Tint
+/// it left alone is still that build's and is carried over.
+#[test]
+fn a_sidecar_written_before_the_gains_projection_reads_a_lightroom_edit_leaf_by_leaf() {
+    let (p, own) = unprojected_gains_develop();
+    let mut warmer = own.clone();
+    warmer.masks[0].temperature += 9.0;
+    let back = xmp_to_recipe(&sidecar_by_writer(&p, &warmer, Some("AutoShade 1.16.0")));
+    let m = &back.masks[0];
+    assert_eq!(m.color_gains, None, "the three read as moved");
+    assert!(near(m.temperature, 21.0), "Lightroom's Temp stands: {}", m.temperature);
+    assert!(near(m.tint, -3.0), "the Tint left alone is carried over: {}", m.tint);
+    assert!(near(m.exposure_ev, own.masks[0].exposure_ev), "the Exposure is the document's: {}", m.exposure_ev);
+}
+
+/// The restatement is for a writer older than v1.17.0 and nobody else. The
+/// same document under a writer that projects the gains, under a writer
+/// attribute that is not `AutoShade X.Y.Z`, or with none, is read by today's
+/// rule: measured against today's projection its three read as moved, the
+/// gains go and the document's Temp and Tint stand as it states them.
+///
+/// MUTATION THIS CATCHES: the restatement applied whatever the writer (the
+/// gains of a v1.17.0 sidecar whose three were moved come back on top of the
+/// document's numbers).
+#[test]
+fn the_gains_restatement_is_for_writers_older_than_the_projection_only() {
+    let (p, own) = unprojected_gains_develop();
+    for writer in [Some("AutoShade 1.17.0"), Some("AutoShade 1.18.3"), Some("AutoShade 1.16"), Some("somebody 1.16.0"), None] {
+        let doc = sidecar_by_writer(&p, &own, writer);
+        let found = payload::find(&doc).expect("a payload").expect("decodes");
+        assert!(found.writer.is_none_or(|v| v >= [1, 17, 0]), "premise: {writer:?} reads as {:?}", found.writer);
+        let back = xmp_to_recipe(&doc);
+        let m = &back.masks[0];
+        assert_eq!(m.color_gains, None, "{writer:?}: against today's projection the three read as moved");
+        assert!(near(m.temperature, 12.0) && near(m.tint, -6.0), "{writer:?}: the document's stand: {:?}", mask_wb(&back, 0));
     }
 }
 

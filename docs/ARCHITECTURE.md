@@ -2236,6 +2236,27 @@ as it does a Lightroom document's, so that sidecar's mask Temp and Tint reach
 about twice as far as the build that wrote it drew them. The reader has no
 rule that carries those over.
 
+**What a mask's colour gains were written as depends on the writer
+(2026-11-20).** From v1.17.0 the writer spells a mask's gains as its Temp,
+Tint and Exposure (`render::gains_as_white`). Every writer from v1.3.1 to
+v1.16.x wrote the mask's OWN three and kept the gains in the payload alone,
+naming the recolour as a loss. The document the reader measures against is
+today's projection, so every such mask read as moved in Lightroom and lost
+its gains — on a sidecar nobody had touched, from v1.17.0 on. The payload's
+root names its writer (`Writer="AutoShade X.Y.Z"`, read by
+`payload::decode`), and for a writer older than v1.17.0 that left no record
+of the document, `reconcile_masks` restates the written mask as that writer
+wrote it — the payload mask's own three
+(`payload::written_before_the_projection`) — before any rule runs, the same
+principle as the scale. Untouched, the gains stay and the mask's own Temp and
+Tint are carried over; a leaf moved in Lightroom makes the three read as
+moved, as for any mask with gains. A payload whose writer is absent or is not
+that shape is read by the rule for today's writer. Pinned by
+`a_sidecar_written_before_the_gains_projection_keeps_its_masks_gains` and its
+two siblings, and on the v1.3.1 sidecar a real Lightroom 9.4 rewrote
+(`the_real_lightroom_rewrites_read_as_measured`, which runs where the fixture
+root is named).
+
 **The develop reads the stamp as well (2026-11-20).** The mask stage takes a
 mask's Temp and Tint through `render::mask_wb_gains`, which reads them on the
 scale the recipe states: today's law for a stamped recipe, and for a recipe
