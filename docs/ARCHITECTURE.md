@@ -268,10 +268,10 @@
 > `scripts/roundtrip_gate.py` is an optional developer instrument (Photoshop
 > with Camera Raw, driven through `scripts/acr_render.ps1`), not part of the
 > release battery.
-> 2013 library + 29 CLI + 356 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1991 pass + 22 `#[ignore]`d forensic probes and
-> the GUI result is 347 pass + nine ignored (an explicit scratch-recipe export
-> probe and the offline panel, window, mode-workspace, Settings, controls-width, library, Versions-section and .xmp-question screenshots) in the ordinary battery. One of the
+> 2050 library + 30 CLI + 374 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 2027 pass + 23 `#[ignore]`d forensic probes and
+> the GUI result is 363 pass + eleven ignored (an explicit scratch-recipe export
+> probe, a table of a selected mask's row widths and the offline panel, window, mode-workspace, Settings, controls-width, library, Versions-section, .xmp-question and selected-mask screenshots) in the ordinary battery. One of the
 > ignored library names is not a probe:
 > `the_real_reverse_fit_reproduces_a_stated_look_on_a_small_frame` is the production reverse fit end to
 > end on a small synthetic pair, ignored for its duration (most of an hour) and run by name for a
@@ -307,7 +307,24 @@
 > edit read as the edit, a maskless edit sending no mask and layering only
 > what changed, and the ignored tuning bench on real answers) and two GUI names
 > (no side-panel text runs under the scrollbar, and the ignored offline panel
-> screenshots). For v1.18.3, by name against the v1.18.2 battery: library
+> screenshots). For v1.18.4, by name against the v1.18.3 battery: library
+> +37 / −0 — fourteen in the renderer (ten on the frames a mask resumes
+> from: a pass resumed from one is the pass from nothing bit for bit, what a
+> frame is kept with, the bound on what is held; four on a mask's Temp and
+> Tint read on the scale the recipe states, one of them an ignored measurement
+> over many masks), fourteen on the .xmp (an older build's sidecar imports to
+> the picture it had, a number set in Lightroom stands, a recoloured mask's
+> three numbers by its writer and by whether the file carries the document as
+> written, the store's own .xmp carried over once), two each in the recipe
+> (the stamp, the one carry-over), the store and the web server, and one each
+> on the AI reply, the Portraits warmth limit and the pipeline's doors; CLI +1
+> (`apply` reads an older build's recipe on this build's mask scale); GUI
+> +18 / −0 — ten on the draft a slow photo is drawn in while a slider moves
+> and the full frame that settles it, four on an older build's develop
+> opening unedited on this build's scale and the slider showing the number it
+> holds, two on a selected mask's rows fitting their column, and two ignored
+> (the offline camera for a selected mask's rows and a table of their
+> widths). For v1.18.3, by name against the v1.18.2 battery: library
 > +26 / −16 — thirteen in the store (an .xmp beside a photo is reported and
 > asked about once per version of the file, never adopted; a develop commit
 > has no .xmp member; a clear with nothing stored writes nothing; a test
