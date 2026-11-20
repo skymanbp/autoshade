@@ -241,6 +241,13 @@ impl MaskRasterSnapshot {
         snapshot
     }
 
+    /// The decoded raster `geometry` reads, as the snapshot holds it: the
+    /// one object every snapshot of the same file state hands out
+    /// ([`load_mask_bitmap`]), so the same object is the same bytes.
+    pub(super) fn held(&self, geometry: &MaskGeometry) -> Option<&std::sync::Arc<MaskBitmap>> {
+        self.images.get(geometry_raster_path(geometry)?)
+    }
+
     pub(super) fn get(&self, geometry: &MaskGeometry) -> Option<Bmp<'_>> {
         self.images.get(geometry_raster_path(geometry)?).map(|b| b.bmp())
     }

@@ -105,7 +105,18 @@ pub(super) fn apply_masks(
         .iter()
         .any(|m| m.enabled && m.amount.clamp(0.0, 1.0) != 0.0 && m.dehaze != 0.0)
         .then(|| dehaze_airlight(data, w));
-    for stored_mask in &r.masks {
+    // The masks an earlier develop of this very frame already applied are not
+    // applied again: the pass starts at the first one that differs, on the
+    // frame that one found ([`super::mask_memo::MaskChain`], which owns the
+    // rule and why a kept frame cannot be stale). The airlight above is read
+    // first, on the frame the masks found.
+    let mut chain = super::mask_memo::MaskChain::open(data, (w, h), r, rasters, frame, film);
+    let first = chain.resume(data);
+    for (index, stored_mask) in r.masks.iter().enumerate() {
+        chain.reached(index, data);
+        if index < first {
+            continue;
+        }
         // The eye toggle: a disabled mask renders nothing at any Amount —
         // the lossless mute (recipe.rs `LocalAdjustment::enabled`).
         if !stored_mask.enabled {
@@ -410,6 +421,7 @@ pub(super) fn apply_masks(
             detail::luma_nr(data, w, h, &p, film, spatial_weight);
         }
     }
+    chain.close(r.masks.len(), data);
 }
 
 /// The brush rasters one adjustment stamps at a frame size (a BRUSH group
@@ -750,12 +762,14 @@ impl<'a> MaskFrame<'a> {
     }
 
     /// The inverse map for this frame, or `None` when nothing moves.
+    ///
+    /// Built once for a profile, an amount and a size and kept
+    /// (`mask_memo::unwarp_of`): the pass, each mask's LINEAR handles and
+    /// the colour field's partition all ask for the same one.
     pub(super) fn unwarp(self, dims: (f32, f32)) -> Option<MaskUnwarp> {
         match self {
-            MaskFrame::WarpedDownstream { profile, amount } => {
-                MaskUnwarp::new(profile, amount, dims)
-            }
-            MaskFrame::Corrected { profile } => MaskUnwarp::corrected(profile, dims),
+            MaskFrame::WarpedDownstream { profile, amount } => super::mask_memo::unwarp_of(profile, amount, false, dims),
+            MaskFrame::Corrected { profile } => super::mask_memo::unwarp_of(profile, 0.0, true, dims),
             MaskFrame::AsRendered => None,
         }
     }
@@ -896,15 +910,19 @@ fn carry_linear_handles(geometry: &mut MaskGeometry, u: &MaskUnwarp) -> bool {
 /// 61 MP. The map is radial, so [`LUT_N`] nodes over the normalised radius
 /// carry it exactly as the resampler's own per-channel LUTs carry the forward
 /// map, at the same node density.
+///
+/// Its tables are shared, so a copy is two counts: the kept one is handed
+/// to every caller that asks ([`MaskFrame::unwarp`]).
+#[derive(Clone)]
 pub(super) struct MaskUnwarp {
     /// Factor `r_corrected / r_original` at node `i` = radius `i/(LUT_N−1)` of
     /// the half-diagonal.
-    lut: Vec<f32>,
+    lut: std::sync::Arc<Vec<f32>>,
     /// [`MaskFrame::Corrected`] only: the resample's own green-channel factor
     /// `r_original / r_corrected` over the corrected radius
     /// ([`super::channel_luts`]), which takes a corrected pixel to the
     /// original-frame point it was resampled from ([`MaskUnwarp::source_point`]).
-    pre: Option<Vec<f32>>,
+    pre: Option<std::sync::Arc<Vec<f32>>>,
     rr: f32,
     w: f32,
     h: f32,
@@ -953,7 +971,7 @@ impl MaskUnwarp {
         if lut.iter().all(|f| (f - 1.0).abs() * rr < 0.01) {
             return None;
         }
-        Some(MaskUnwarp { lut, pre: None, rr, w, h })
+        Some(MaskUnwarp { lut: std::sync::Arc::new(lut), pre: None, rr, w, h })
     }
 
     /// [`MaskFrame::Corrected`]'s map: [`MaskUnwarp::new`]'s, with the camera
@@ -961,7 +979,7 @@ impl MaskUnwarp {
     pub(super) fn corrected(profile: &crate::recipe::LensProfile, dims: (f32, f32)) -> Option<Self> {
         let mut u = Self::new(profile, 0.0, dims)?;
         let [_, green, _] = super::channel_luts(profile, 0.0, dims);
-        u.pre = Some(green);
+        u.pre = Some(std::sync::Arc::new(green));
         Some(u)
     }
 

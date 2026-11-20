@@ -60,6 +60,7 @@ mod lens_blur;
 mod luma;
 mod mask_band;
 mod mask_falloff;
+mod mask_memo;
 mod mask_raster;
 mod mask_warp;
 mod mask_weight;

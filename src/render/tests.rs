@@ -25,3 +25,4 @@ include!("tests/baked_masters.rs");
 include!("tests/mask_raster_frame.rs");
 include!("tests/mask_band.rs");
 include!("tests/mask_band_frame.rs");
+include!("tests/mask_memo.rs");

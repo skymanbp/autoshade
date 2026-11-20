@@ -2325,6 +2325,8 @@ frame a mask is sampled in), `mask_weight.rs` / `mask_falloff.rs` /
 measured falloffs, rasters, Lightroom's stored mask frame, the brush),
 `mask_owed.rs` / `mask_band.rs` (what a raster mask's band on a content edge
 is owed and the layer fold; the read that finds it, v1.18.0),
+`mask_memo.rs` (what the mask pass keeps from one develop of a frame to the
+next: the lens map, and the frame the first changed mask finds),
 `geometry.rs` (lens geometry), `orient.rs` (orientation and coordinate frames),
 `resample.rs` (flips, downscale, straightening, the bilinear fetches),
 `base_look.rs` (the camera-matched base look), `export.rs` (delivery colour
