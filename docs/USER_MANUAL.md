@@ -628,6 +628,16 @@ Noise at every pixel. The red overlay shows coverage.
 A selected mask's sliders come in Lightroom's groups — **Tone**, **Detail**,
 **Color**, then the mask's own **Curve**; **Hue shift** turns colours by
 ±30° at ±100, and Moiré and Defringe are not rendered.
+**Temp shift** and **Tint shift** warm or cool, and move toward magenta or
+green, inside the mask only: relative moves around a fixed point, not
+Kelvin (the tooltip says what the Temp on the slider is worth in Kelvin).
+From the version after v1.18.3 they reach about twice as far as they did. A
+photo saved before that looks exactly as it was saved: when it is opened its
+numbers are restated on the stronger scale, so its sliders read smaller —
+Temp a little over half the old number, Tint half — and an .xmp exported
+for it carries those smaller numbers. An .xmp is read at the numbers it
+states, so a mask Temp or Tint set in Lightroom reaches about twice as far
+here as it did in earlier versions.
 The **Color** group holds
 **Saturation**, **Hue shift**, **Temp shift**, **Tint shift** and, since
 v1.17.0, **Color tint** with its **Color tint hue** (Lightroom's mask

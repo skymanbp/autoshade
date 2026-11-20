@@ -2169,6 +2169,48 @@ v1.5.0's parametric curve; 2 = before its colour keys — the Calibration panel,
 the B&W treatment and the point colours) — for the same
 class of reason: see 「the merge treats ignorance as ignorance」 in §4.5.
 
+A third stamp follows the same precedent for the MASK WHITE BALANCE (the
+version after v1.18.3): `mask_wb_era` says which scale the masks'
+`temperature` and `tint` are stated in. The mask Temp and Tint sliders were
+too weak to see — measured on a photograph, Temp +48 moved the mask centre's
+blue from 76 to 73 of 255 — so their reach grew: `render::local_temp_to_kelvin`
+now moves ∓150 mired at ±100 around its fixed 5500 K anchor (∓80 until
+v1.18.3; +100 is about 31 400 K and −100 about 3 000 K, both inside the
+Kelvin model's 1 000–40 000 K band, which a 160-mired scale would leave), and
+`render::local_tint_to_engine` hands the shared `wb_gains` model twice the
+mask's number (green gain 1.4 … 0.6, where it was 1.2 … 0.8). The model's own
+Tint constant is untouched, so the global Tint slider and the reverse fit's
+white-balance inversion do not move. Both laws are linear in the stored
+number, so a saved pair is carried over exactly — Temp × 80/150, Tint × 1/2
+(`EditRecipe::convert_legacy_mask_wb`, the one owner; pinned at the gains by
+`a_legacy_mask_white_balance_renders_the_same_gains_once_converted` and at
+the picture by `a_legacy_recipes_mask_white_balance_renders_as_it_did`) — and
+every photo saved before the change renders as it did, with sliders that
+read about half.
+
+An absent key is the legacy scale (0); a fresh recipe is stamped 1. The
+current stamp is always written and the legacy one never is, so an older
+build's recipe that is only passed along — a version snapshot the backup
+gate takes, the deleted-version fingerprint — re-serialises exactly as that
+build wrote it. The conversion is not in the deserialiser: each door that
+reads a SAVED recipe calls it — the desktop app's open, its batch twin and
+its version loader, the variant strip's reader, the pipeline's calibration
+snapshot, load funnel and export door, the CLI's `apply`, and the web's
+`/api/recipe` before the page gets a copy — and none of them rewrites the
+file by reading it; the file states the new scale once a save writes it. The
+store's own .xmp, where an older build saved only that, is carried over the
+same way (`convert_mask_wb_saved_as_xmp`). What is NOT a saved recipe is
+stamped and left alone: the model's reply, a request body that states no
+scale, and a sidecar the user imports. `crs:LocalTemperature` and
+`crs:LocalTint` carry the slider's number as it stands in both directions,
+and so does the payload's copy of the two. Two consequences follow and are
+accepted: a develop saved before the change and exported after it writes the
+smaller, converted numbers, and a sidecar from Lightroom — or one an older
+build exported — renders its mask Temp and Tint at this build's strength.
+Like `coord_era`, the stamp is a forward break: builds up to v1.18.3 refuse a
+recipe that carries the key (`deny_unknown_fields`), and read a sidecar this
+build wrote from its `crs:` settings alone.
+
 The migration's crop arm has one subtlety worth naming, because a reader will
 otherwise look for the hole R24 registered and not find it (R27 L-16c). A crop
 rectangle is normalised against the STRAIGHTENED frame — `render_pipeline`
@@ -4088,7 +4130,11 @@ value (`payload::recolour_carrier`): handed back as written, the exact gains
 and the mask's own Temp, Tint and Exposure are restored; moved (a Lightroom
 edit, or a build whose develop projects the gains differently), the
 document's three stand and the gains go, so the recolour is never applied
-twice. The verdicts are
+twice. The projection reads the mask white balance the develop renders, so
+it followed that law when the law's reach grew (the version after v1.18.3,
+`mask_wb_era` in §4.1): the same gains are carried by a Temp and Tint of
+about half the size, and gains further from neutral fit inside the range
+before the `Recolour` loss is named. The verdicts are
 the writer's own, produced by the ONE loop that emits the mask block (so the claim
 cannot drift from the file) and handed back with the document itself —
 `xmp::recipe_to_xmp_with_losses` / `MergeOutcome::losses`, one pass per save;
