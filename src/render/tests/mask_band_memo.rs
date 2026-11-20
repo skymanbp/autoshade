@@ -306,8 +306,10 @@ fn the_kept_planes_are_not_served_for_another_block_edge() {
 #[test]
 fn each_strip_of_a_tall_frame_keeps_its_own_planes() {
     let (w, h) = (4096usize, 800usize);
-    let data = band_frame(w, h, 2048, 0.5, 0.1);
-    let coverage = |x: usize, _: usize| ((x as f32 - 2045.0) / 6.0).clamp(0.0, 1.0);
+    // The edge slants down the frame, so no two strips' planes are alike.
+    let edge = |y: usize| 2048.0 + y as f32 / 20.0;
+    let data = grey_frame(w, h, |x, y| if (x as f32) < edge(y) { 0.5 } else { 0.1 });
+    let coverage = |x: usize, y: usize| ((x as f32 - edge(y) + 3.0) / 6.0).clamp(0.0, 1.0);
     let shape = mask_band_memo::LayerShape::named("a tall layer");
     let memo = std::sync::Arc::new(mask_band_memo::BandMemo::new(1 << 30));
     mask_band_memo::using(memo.clone(), || {
