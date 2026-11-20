@@ -20,9 +20,10 @@
 //!     recipe has since moved on goes on the canvas (same photo, same card,
 //!     same base, newer than what is there) instead of being dropped, and the
 //!     develop of the live recipe still follows.
-//!  3. **The full frame on settle.** With no pointer down and no edit for
-//!     [`DRAFT_SETTLE`], the full base is developed and replaces the draft in
-//!     place. That frame is the preview build on the full base — what the
+//!  3. **The full frame on settle.** With no pointer down, no draft in
+//!     flight, and the canvas still for the settle time ([`settle_time`]: no
+//!     edit, no new frame), the full base is developed and replaces the draft
+//!     in place. That frame is the preview build on the full base — what the
 //!     canvas showed before this module existed, byte for byte.
 //!
 //! A photo whose full develop is inside the budget never drafts: its ticks
@@ -56,11 +57,28 @@ pub(crate) const DRAFT_EDGE_FLOOR: u32 = 1024;
 /// one time than the next does not have the reduced base cut again.
 const DRAFT_EDGE_STEP: u32 = 256;
 
-/// How long after the last edit, with no pointer down, the full develop is
-/// started. Longer than a key's auto-repeat gap and a wheel notch's (30–
-/// 50 ms), so a held arrow key or a scrolled value box stays one gesture;
-/// short enough that the sharp frame is on its way before the eye asks.
+/// The shortest time the canvas must have been still, with no pointer down,
+/// before the full develop is started. Longer than a key's auto-repeat gap
+/// and a wheel notch's (30–50 ms), so a held arrow key or a scrolled value
+/// box stays one gesture; short enough that the sharp frame is on its way
+/// before the eye asks.
 pub(crate) const DRAFT_SETTLE: Duration = Duration::from_millis(150);
+
+/// …and the share of a photo's own full develop time the canvas must have
+/// been still for, when that is longer. A full develop cannot be called back,
+/// and a draft that shares the workers with one takes two to three times as
+/// long (measured on a ten-mask card at 4096 px, release build: 0.7 s alone,
+/// 1.2–2.5 s beside the 5 s full develop). So the full develop gives a hand
+/// that looks at the draft and moves again the time to do it — and the sharp
+/// frame comes at most a fifth later than it could have.
+const DRAFT_SETTLE_SHARE: f32 = 0.2;
+
+/// How long the canvas must have been still before the full develop of a
+/// photo whose last full develop took `full_ms` is started.
+pub(crate) fn settle_time(full_ms: Option<f32>) -> Duration {
+    let share = Duration::from_millis((full_ms.unwrap_or(0.0).max(0.0) * DRAFT_SETTLE_SHARE).round() as u64);
+    DRAFT_SETTLE.max(share)
+}
 
 /// Which develop a tick is owed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,8 +87,9 @@ pub(crate) enum DevelopPlan {
     Full,
     /// A draft at this long edge.
     Draft(u32),
-    /// The gesture has not settled and there is nothing newer to draw: the
-    /// live recipe's draft is on its way or shown, or its full frame is.
+    /// Nothing to start yet: the gesture has not settled and the live
+    /// recipe's draft is on its way or shown (or its full frame is), or it
+    /// has settled and the full develop is waiting for the draft in flight.
     Wait,
 }
 
@@ -106,9 +125,11 @@ pub(crate) struct Draft {
     reduced: Option<(BaseId, u32, Arc<image::DynamicImage>)>,
     /// A draft develop is in flight (one at a time, beside at most one full).
     pub(crate) inflight: bool,
-    /// The recipe as the scheduler last saw it, and when it last changed.
+    /// The recipe as the scheduler last saw it.
     seen: Option<EditRecipe>,
-    last_edit: Option<Instant>,
+    /// When the canvas last moved: the last edit, or the last passing frame
+    /// put on it — a hand can only answer a picture it has seen.
+    last_stir: Option<Instant>,
     /// The draft last dispatched: for which base and which recipe.
     drafted: Option<(BaseId, EditRecipe)>,
     /// The dispatch counter, and the number of the frame on the canvas.
@@ -187,7 +208,7 @@ impl Draft {
     fn observe(&mut self, recipe: &EditRecipe, now: Instant) {
         if self.seen.as_ref() != Some(recipe) {
             self.seen = Some(recipe.clone());
-            self.last_edit = Some(now);
+            self.last_stir = Some(now);
         }
         // The reduced copy of a base that is gone is let go with it.
         if self.reduced.as_ref().is_some_and(|(of, ..)| of.strong_count() == 0) {
@@ -195,15 +216,20 @@ impl Draft {
         }
     }
 
-    /// Is an edit gesture running at `now`: a pointer held down, or an edit
-    /// inside the settle time?
-    pub(crate) fn in_gesture(&self, now: Instant, pointer_down: bool) -> bool {
-        pointer_down || self.last_edit.is_some_and(|t| now.saturating_duration_since(t) < DRAFT_SETTLE)
+    /// Is an edit gesture running at `now`: a pointer held down, or the
+    /// canvas moved inside the settle time?
+    fn in_gesture(&self, now: Instant, pointer_down: bool, settle: Duration) -> bool {
+        pointer_down || self.last_stir.is_some_and(|t| now.saturating_duration_since(t) < settle)
     }
 
-    /// The time left at `now` until the gesture's last edit has settled.
-    fn until_settled(&self, now: Instant) -> Option<Duration> {
-        self.last_edit.map(|t| DRAFT_SETTLE.saturating_sub(now.saturating_duration_since(t)))
+    /// The time left at `now` until the canvas has been still for `settle`.
+    fn until_settled(&self, now: Instant, settle: Duration) -> Option<Duration> {
+        self.last_stir.map(|t| settle.saturating_sub(now.saturating_duration_since(t)))
+    }
+
+    /// Is a draft of this base in flight?
+    fn inflight_on(&self, base: &Arc<image::DynamicImage>) -> bool {
+        self.inflight && self.drafted.as_ref().is_some_and(|(of, _)| names(of, base))
     }
 
     /// What the last full develop of `base` cost, in milliseconds.
@@ -266,6 +292,17 @@ impl AutoShadeApp {
         FrameTag { card: self.card_tag(), seq: self.draft.seq }
     }
 
+    /// The settle time of the photo on the canvas ([`settle_time`]).
+    fn settle(&self) -> Duration {
+        settle_time(self.base_preview.as_ref().and_then(|base| self.draft.full_cost_of(base)))
+    }
+
+    /// Is an edit gesture running on the canvas at `now`?
+    fn gesture_running(&self, now: Instant) -> bool {
+        let pointer_down = self.egui_ctx.input(|i| i.pointer.any_down());
+        self.draft.in_gesture(now, pointer_down, self.settle())
+    }
+
     /// Which develop the canvas is owed at `now` (module head). Also where an
     /// edit is noticed, and where the wake-up for the settle is asked for: a
     /// gesture that ends with no further input would otherwise leave its
@@ -278,14 +315,18 @@ impl AutoShadeApp {
             return DevelopPlan::Full;
         };
         let pointer_down = self.egui_ctx.input(|i| i.pointer.any_down());
-        if !self.draft.in_gesture(now, pointer_down) {
-            return DevelopPlan::Full;
+        let settle = self.settle();
+        if !self.draft.in_gesture(now, pointer_down, settle) {
+            // The full develop waits for this photo's draft in flight: beside
+            // each other both are slow, and the draft is the frame the hand
+            // is waiting for. Its landing asks again.
+            return if self.draft.inflight_on(base) { DevelopPlan::Wait } else { DevelopPlan::Full };
         }
         if !self.draft.drafted_is(base, &self.recipe) && !self.draft.shows_full_of(base, &self.recipe) {
             return DevelopPlan::Draft(edge);
         }
         // A held pointer wakes the window itself when it is let go.
-        if !pointer_down && let Some(left) = self.draft.until_settled(now) {
+        if !pointer_down && let Some(left) = self.draft.until_settled(now, settle) {
             self.egui_ctx.request_repaint_after(left);
         }
         DevelopPlan::Wait
@@ -297,19 +338,21 @@ impl AutoShadeApp {
     /// be the live recipe's own draft, or a frame a running gesture has moved
     /// past; and not be a draft of the very recipe whose full frame is there.
     pub(crate) fn passing_frame_shows(&self, frame: &PreviewDone, now: Instant) -> bool {
-        let pointer_down = self.egui_ctx.input(|i| i.pointer.any_down());
         frame.tag.card == self.card_tag()
             && frame.tag.seq > self.draft.shown_seq
-            && (frame.recipe == self.recipe || self.draft.in_gesture(now, pointer_down))
+            && (frame.recipe == self.recipe || self.gesture_running(now))
             && !self.draft.shows_full_of(&frame.base, &frame.recipe)
     }
 
     /// Put a passing frame on the canvas: the picture, its histogram and its
     /// clipping layer. `develop_count` and the mask overlay's refresh wait
     /// for the full frame of the live recipe, and so does the card's
-    /// thumbnail — this frame's is dropped with it.
-    pub(crate) fn show_passing_frame(&mut self, ctx: &egui::Context, frame: PreviewDone) {
+    /// thumbnail — this frame's is dropped with it. The canvas moved at `now`:
+    /// the settle is counted from here, so the full develop leaves the hand
+    /// the time to answer what it has just been shown.
+    pub(crate) fn show_passing_frame(&mut self, ctx: &egui::Context, frame: PreviewDone, now: Instant) {
         self.draft.passing_count += 1;
+        self.draft.last_stir = Some(now);
         let _ = self.show_frame(ctx, frame);
         ctx.request_repaint();
     }
@@ -336,7 +379,7 @@ impl AutoShadeApp {
             self.dirty = true;
         }
         if self.passing_frame_shows(&frame, now) {
-            self.show_passing_frame(ctx, frame);
+            self.show_passing_frame(ctx, frame, now);
         }
     }
 }

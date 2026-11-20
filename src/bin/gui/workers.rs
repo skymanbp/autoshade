@@ -293,7 +293,8 @@ impl AutoShadeApp {
     /// `plan_develop`'s answer (`draft.rs`): the full base, or — on a photo
     /// whose full develop is slow, while its edit gesture runs — a draft.
     /// Each of the two has its own in-flight guard, so a draft may start
-    /// beside a full develop the gesture has already moved past.
+    /// beside a full develop the gesture has already moved past; the full
+    /// develop itself waits for the photo's draft in flight.
     pub(crate) fn start_redevelop_at(&mut self, now: Instant) {
         let plan = self.plan_develop(now);
         let busy = match plan {
@@ -536,7 +537,7 @@ impl AutoShadeApp {
             // then it is the newest picture there is, and it is shown on its
             // way to the live recipe's own.
             if same_base && self.passing_frame_shows(&frame, now) {
-                self.show_passing_frame(ctx, frame);
+                self.show_passing_frame(ctx, frame, now);
             }
             return;
         }

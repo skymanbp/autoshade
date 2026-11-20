@@ -130,8 +130,9 @@
         // Inside the settle time nothing more is started…
         app.start_redevelop_at(at(100));
         assert!(!app.develop_inflight && !app.draft.inflight, "the gesture has not settled and its draft is shown");
-        // …and DRAFT_SETTLE after the last edit (at 40 ms) the full base is.
-        app.start_redevelop_at(at(40) + DRAFT_SETTLE);
+        // …and once the canvas has been still for it (the draft went on at
+        // 90 ms) the full base is.
+        app.start_redevelop_at(at(90) + settle_time(Some(2000.0)));
         assert!(app.develop_inflight && !app.draft.inflight, "the settle develops the full base");
         assert!(!app.dirty, "…which pays the debt");
         let full = next_full(&app, 2000);
@@ -272,33 +273,34 @@
         app.dirty = true;
         app.start_redevelop_at(at(0));
         app.finish_draft_at(&ctx, Ok(next_draft(&app)), at(10));
-        app.start_redevelop_at(at(200));
+        let settle = settle_time(Some(2000.0));
+        app.start_redevelop_at(at(10) + settle);
         assert!(app.develop_inflight, "premise: the settle's full develop is in flight");
         let overtaken = next_full(&app, 2000);
         // The hand moves again: a draft starts beside it, and lands first.
         app.recipe.exposure_ev = 0.7;
         app.dirty = true;
-        app.start_redevelop_at(at(300));
+        app.start_redevelop_at(at(600));
         assert!(app.draft.inflight && app.develop_inflight, "a draft starts beside the full develop the gesture moved past");
-        app.finish_draft_at(&ctx, Ok(next_draft(&app)), at(320));
+        app.finish_draft_at(&ctx, Ok(next_draft(&app)), at(620));
         assert_eq!(app.draft.passing_count, 2);
-        app.finish_redevelop_at(&ctx, Ok(overtaken), at(330));
+        app.finish_redevelop_at(&ctx, Ok(overtaken), at(630));
         assert_eq!(app.draft.passing_count, 2, "the overtaken full frame does not go over the newer draft");
         assert_eq!(app.last_rgb.as_ref().map(|p| p.width()), Some(1024), "the canvas still shows the live recipe's draft");
         assert!(app.dirty && !app.develop_inflight);
 
         // The settle: the full frame of the live recipe is on the canvas.
-        app.start_redevelop_at(at(300) + DRAFT_SETTLE);
+        app.start_redevelop_at(at(620) + settle);
         let full = next_full(&app, 2000);
         let full_rgb = full.rgb.clone();
-        app.finish_redevelop_at(&ctx, Ok(full), at(900));
+        app.finish_redevelop_at(&ctx, Ok(full), at(1500));
         assert_eq!(app.develop_count, 1);
         // A draft of that same recipe, dispatched later (the hand left and
         // came back to the value), lands in a running gesture.
         let (film, source) = (app.film_short_edge(), app.source_frame().unwrap());
         let (late, edge, reduced) = build_draft(base.clone(), None, 1024, app.recipe.clone(), false, film, source);
         let late = late.tagged(app.frame_tag());
-        app.finish_draft_at(&ctx, Ok((late, edge, reduced)), at(910));
+        app.finish_draft_at(&ctx, Ok((late, edge, reduced)), at(1510));
         assert_eq!(app.draft.passing_count, 2, "a draft does not replace the full frame of its own recipe");
         assert!(app.last_rgb.as_ref() == Some(&full_rgb));
         assert_eq!(app.draft.stands_for, None);
@@ -334,7 +336,8 @@
         assert!(app.variants[0].thumb.is_none(), "a draft is never the card's thumbnail");
         assert!(app.dirty || app.develop_inflight, "…and never counts as the recipe's develop having landed");
 
-        app.start_redevelop_at(at(0) + DRAFT_SETTLE);
+        app.start_redevelop_at(at(20) + settle_time(Some(2000.0)));
+        assert!(app.develop_inflight, "premise: the settle's full develop is in flight");
         assert!(app.dirty || app.develop_inflight, "the full develop is in flight, not landed");
         let full = next_full(&app, 2000);
         let mut expect = expected_frame(&mut app, base.clone());
@@ -349,6 +352,54 @@
         assert!(app.clip_tex.is_none());
         app.toggle_clipping(&ctx);
         assert_eq!(app.clip_tex.as_ref().unwrap().size(), [2048, 1366]);
+    }
+
+    /// The full develop cannot be called back, and a draft beside one takes
+    /// two to three times as long. So it starts only when (1) the photo's
+    /// draft is no longer in flight — that draft is the frame the hand is
+    /// waiting for — and (2) the canvas has been still, since the last edit
+    /// AND since the last draft went on it, for a time that grows with what
+    /// the full develop costs: a hand that looks at the draft and moves again
+    /// finds the workers free.
+    ///
+    /// MUTATION: the `inflight_on` wait dropped from `plan_develop` (the full
+    /// develop starts beside the draft in flight); the settle counted from
+    /// the last edit alone (`show_passing_frame` no longer stirs: the full
+    /// develop starts the moment the draft lands); `settle_time` without the
+    /// share of the develop's own time (a two-second develop starts 150 ms
+    /// after its draft is shown).
+    #[test]
+    fn the_full_develop_waits_for_the_draft_in_flight_and_for_a_look_at_it() {
+        let (mut app, _scrub) = draft_fixture("settle");
+        let ctx = egui::Context::default();
+        let base = app.base_preview.clone().unwrap();
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        app.draft.note_full_cost(&base, Duration::from_millis(2000));
+
+        app.recipe.exposure_ev = 0.5;
+        app.dirty = true;
+        app.start_redevelop_at(at(0));
+        let draft = next_draft(&app);
+        // Five seconds on the draft has still not landed (the workers are
+        // busy): the settle time is long past, and the full develop waits.
+        app.start_redevelop_at(at(5000));
+        assert!(!app.develop_inflight, "the full develop does not start beside the draft in flight");
+        assert!(app.dirty, "…and stays owed");
+        app.finish_draft_at(&ctx, Ok(draft), at(5010));
+        assert_eq!(app.draft.passing_count, 1, "the draft of the live recipe is shown whenever it lands");
+        // The draft has just been shown: the hand gets its time to answer it.
+        app.start_redevelop_at(at(5020));
+        assert!(!app.develop_inflight, "the full develop waits for a look at the draft");
+        app.start_redevelop_at(at(5010) + DRAFT_SETTLE);
+        assert!(!app.develop_inflight, "a two-second develop waits longer than the shortest settle");
+        app.start_redevelop_at(at(5010) + settle_time(Some(2000.0)));
+        assert!(app.develop_inflight && !app.dirty, "…and then starts");
+
+        // The settle time: never under DRAFT_SETTLE, a fifth of the develop's own time.
+        for (ms, settle) in [(None, 150), (Some(80.0), 150), (Some(750.0), 150), (Some(2000.0), 400), (Some(5000.0), 1000)] {
+            assert_eq!(settle_time(ms), Duration::from_millis(settle), "{ms:?}");
+        }
     }
 
     /// A frame is shown on the card it was developed for and nowhere else: a
