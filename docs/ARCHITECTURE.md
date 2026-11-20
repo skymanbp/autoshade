@@ -3355,6 +3355,49 @@ before it was written. The fit renders every candidate through this pass, so
 the law is its forward model as well; the ruler is unchanged. Lightroom
 renders an exported mask by its own law.
 
+**What the mask pass keeps from one develop to the next** (2026-11-19;
+`render/mask_memo.rs`). The editor develops the frame again on every move of
+a slider, and a move changes one thing. Two things are kept, each under every
+input it is computed from, compared exactly — a kept value is the value a
+fresh computation gives, or it is not served — so a develop is the same
+bytes with them as without, and the rendered result of every caller is
+unchanged.
+
+The lens map a frame's masks are read through (`MaskUnwarp`: a 256-step scan
+and 40 bisection steps at each of 4096 nodes, about 11 ms whatever the
+frame's size). One develop of a lens-corrected source asked for it once for
+its own position passes, once for the mask pass, once for every mask and
+four times for the colour field's partition — 17 builds on a card of eleven
+masks — and now it is built once for a profile, an amount, a frame size and
+a builder (`mask_memo::unwarp_of`, the last eight kept).
+
+And the frame as the first mask that differs from the last develop's finds
+it (`MaskChain`). A later develop of the same frame whose earlier masks are
+the same takes that frame and starts at that mask; the colour field's band,
+read on the frame the masks find before any of them runs, is handed out with
+it. It is served only when the frame the masks found is the last develop's
+bit for bit (compared with a kept copy), the frame's size is the same, the
+recipe less its masks, the lens frame and the film scale are the same by
+their exact `Debug` text (a value holding a NaN has no text and is never
+served), and every earlier mask is the same by that text and by each of its
+rasters being the same decoded object — the object's allocation, held
+weakly, so a file repainted under its path, which the loader decodes anew,
+is another. A range mask needs no entry of its own: its weight is read from
+the pixels the mask finds, and those are the kept frame's. A slider of the
+whole photo, or of the first mask, leaves nothing before it unchanged, and
+the pass runs whole.
+
+A frame is copied from its second sight on (a 64-bit hint of 4096 of its
+pixels says it was seen before, and never says two frames are one), so a
+develop that does not come again copies no pixel. The kept frames hold
+96 MiB together at most, the least recently developed dropped first, and a
+frame whose two copies would not fit is not remembered at all: over
+4.19 MP, which is every export and the editor's 4096 px canvas — the drafts
+drawn while a slider is held are under it. The memory is one lock, held for
+a lookup or a put and never for a build or a develop; a develop takes its
+frame's entry out and puts its own back, and one that finds it taken runs as
+a first sight.
+
 **The mask Color tint** (v1.17.0; `toning_amount` / `toning_hue`, Lightroom's
 mask 「颜色」 swatch, `crs:LocalToningSaturation` / `LocalToningHue`) is the last
 step of that fused pass and sits outside its blend (`render::tint_px`): once
