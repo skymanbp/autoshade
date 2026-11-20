@@ -44,6 +44,7 @@ pub mod sha256;
 pub mod serve;
 pub mod stack;
 pub mod store;
+pub mod update;
 pub mod xmp;
 pub mod xmp_pair;
 
