@@ -102,21 +102,76 @@ pub(crate) fn wb_gains(as_shot_k: f32, target_k: f32, tint: f32) -> [f32; 3] {
 /// until batch 29 taught it the photo's stamped as-shot Kelvin; a local
 /// slider is a relative gel, so it keeps the fixed anchor and the two
 /// deliberately differ — R12.) Full scale ±100
-/// ⇒ ∓80 mired (≈ half a CTO/CTB gel): +100 → ~9823 K (warmer — matching
-/// wb_gains' "higher target K = warmer" convention), −100 → ~3820 K. Both
-/// endpoints sit inside kelvin_to_rgb's 1000–40000 K validity. ACR's exact
+/// ⇒ ∓[`LOCAL_TEMP_MIRED`] = ∓150 mired: +100 → ~31429 K (warmer — matching
+/// wb_gains' "higher target K = warmer" convention), −100 → ~3014 K. Both
+/// endpoints sit inside kelvin_to_rgb's 1000–40000 K validity (a 160-mired
+/// scale would put +100 at ~45833 K, past it). ACR's exact
 /// local-temp model is proprietary — this is our documented approximation
 /// (same stance as [`manual_vignette_lut`]); the XMP carries the raw slider value,
 /// so Lightroom re-renders with its own model.
+///
+/// Until 2026-11-19 the full scale was ∓80 mired (+100 → ~9821 K, −100 →
+/// ~3819 K): measured on a photograph, Temp +48 moved the mask centre's blue
+/// from 76 to 73 of 255 and the whole slider reached 70, which read as a
+/// slider that did nothing. A number saved under that scale is brought onto
+/// this one by [`local_wb_from_legacy`].
 // `pub`, not `pub(crate)`: the mask panel's Temp-shift tooltip states the
 // equivalent Kelvin for the value on the slider, and it must be THIS
 // function's answer — a number retyped into the GUI would drift the moment
 // the anchor or the mired scale moves.
 pub fn local_temp_to_kelvin(t: f32) -> f32 {
     const ANCHOR_K: f32 = 5500.0;
-    const MIRED_FULL_SCALE: f32 = 80.0;
-    let mired = 1e6 / ANCHOR_K - (t.clamp(-100.0, 100.0) / 100.0) * MIRED_FULL_SCALE;
+    let mired = 1e6 / ANCHOR_K - (t.clamp(-100.0, 100.0) / 100.0) * LOCAL_TEMP_MIRED;
     1e6 / mired
+}
+
+/// The mired a mask's Temp moves at full scale ([`local_temp_to_kelvin`]).
+const LOCAL_TEMP_MIRED: f32 = 150.0;
+/// …and what it moved up to v1.18.3.
+const LOCAL_TEMP_MIRED_LEGACY: f32 = 80.0;
+/// The engine Tint a mask's Tint of 1 stands for ([`local_tint_to_engine`]);
+/// up to v1.18.3 it was 1.
+const LOCAL_TINT_SCALE: f32 = 2.0;
+
+/// Map the local mask Tint slider (±100, + magenta, − green) to the Tint the
+/// shared [`wb_gains`] model expects: twice the number, so the green gain
+/// runs 1.4 at −100 to 0.6 at +100. The mask has a scale of its own because
+/// the model's own constant ([`ENGINE_TINT_GREEN`]) is also the global Tint
+/// slider's law and the one the reverse fit inverts ([`WbLaw::invert`]); a
+/// stronger mask Tint must not move either. The number is held to ±100
+/// first, as [`local_temp_to_kelvin`] holds its own, so no stored value can
+/// bring the green gain to zero.
+///
+/// Until 2026-11-19 a mask's Tint went into the model as it stood (green
+/// 1.2 … 0.8), the same too-weak reading as the Temp beside it;
+/// [`local_wb_from_legacy`] carries a number saved under that scale over.
+/// The XMP carries the raw slider value here too.
+pub fn local_tint_to_engine(t: f32) -> f32 {
+    t.clamp(-100.0, 100.0) * LOCAL_TINT_SCALE
+}
+
+/// A mask's (Temp, Tint) as saved under the scale of v1.18.3 and earlier, on
+/// the current one: the pair that renders, by [`local_temp_to_kelvin`] and
+/// [`local_tint_to_engine`], the gains that pair rendered then.
+///
+/// Both laws are linear in the stored number — the same mired shift and the
+/// same green gain come out of the old number times a constant — so the
+/// carry-over is exact up to float rounding (pinned by
+/// `a_legacy_mask_white_balance_renders_the_same_gains_once_converted`). The
+/// old number is held to ±100 first. The old Temp law clamped it there
+/// itself, so that half is exact for any stored number. The old Tint went
+/// into the model unclamped, but ±100 is all the app ever wrote (the slider,
+/// `EditRecipe::clamp` on the AI's reply, on a sidecar's import and on the
+/// desktop app's open), so only a file edited by hand past the band, read by
+/// a door that does not clamp, rendered more than the band's end.
+///
+/// The ONE caller is `EditRecipe::convert_legacy_mask_wb`, which owns when a
+/// recipe's numbers are legacy ones.
+pub(crate) fn local_wb_from_legacy(temperature: f32, tint: f32) -> (f32, f32) {
+    (
+        temperature.clamp(-100.0, 100.0) * (LOCAL_TEMP_MIRED_LEGACY / LOCAL_TEMP_MIRED),
+        tint.clamp(-100.0, 100.0) / LOCAL_TINT_SCALE,
+    )
 }
 
 /// Build one LUT per channel for a linear-light RGB gain. The exact transform

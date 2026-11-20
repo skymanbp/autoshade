@@ -272,6 +272,16 @@ pub fn read_variants_checked(src: &Path) -> VariantsRead {
             }
         }
         resolve_mask_paths(&mut e.recipe, &dir);
+        // A card is a saved recipe like `recipe.json`, and one an older build
+        // wrote states its masks' Temp and Tint on that build's scale
+        // (2026-11-19, `EditRecipe::convert_legacy_mask_wb`). Converted HERE,
+        // in the one reader of this file, so every holder of the record sees
+        // one scale: the live strip, the mirror the desktop app compares it
+        // against to say "unsaved" (a strip converted beside an unconverted
+        // mirror would light that for every photo with a second card), and
+        // the read-modify-write in [`variants_member`]. In memory — the file
+        // keeps the older build's numbers until a save writes the strip.
+        e.recipe.convert_legacy_mask_wb();
     }
     VariantsRead::Strip(rec)
 }

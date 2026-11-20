@@ -379,6 +379,9 @@ pub const SKIN_SATURATION_MAX: f32 = 15.0;
 /// Skin hues rotate by at most this many degrees either way.
 pub const SKIN_HUE_MAX_DEG: f32 = 8.0;
 /// Skin warmth moves by at most this much either way (the relative ±100 scale).
+/// The number is the slider's, and it was not rescaled when the mask Temp
+/// slider's reach grew on 2026-11-19 (`render::local_temp_to_kelvin`): ±20 is
+/// now ∓30 mired where it was ∓16.
 pub const SKIN_TEMPERATURE_MAX: f32 = 20.0;
 /// Softening stops here: texture no lower than this…
 pub const SKIN_TEXTURE_MIN: f32 = -60.0;

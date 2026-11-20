@@ -68,6 +68,55 @@ pub struct EditRecipe {
     #[serde(default = "schema_era_legacy")]
     pub schema_era: u32,
 
+    /// Which SCALE every mask's `temperature` and `tint` numbers are in —
+    /// see [`MASK_WB_ERA`]. Absent in any recipe written up to v1.18.3, which
+    /// is exactly what `0` (the weaker scale those builds rendered) means.
+    ///
+    /// On 2026-11-19 a mask's Temp and Tint were made about twice as strong
+    /// (`render::local_temp_to_kelvin`, `render::local_tint_to_engine`), and
+    /// a number saved before that must keep rendering what it rendered: it
+    /// is carried onto the new scale ONCE, by
+    /// [`convert_legacy_mask_wb`](Self::convert_legacy_mask_wb), wherever a
+    /// recipe an older build may have written is read. This stamp is what
+    /// makes "once" checkable — nothing else in the file could say whether a
+    /// stored 48 is the old 48 or the new one.
+    ///
+    /// Deliberately NOT folded into [`version`](Self::version),
+    /// [`coord_era`](Self::coord_era) or [`schema_era`](Self::schema_era),
+    /// for the reason those three already give: they are the CURVE's
+    /// provenance, the GEOMETRY's frame and the CONTROL SET the file has
+    /// seen, each moved by its own rule (`version` is transplanted between
+    /// recipes on purpose; `schema_era` is lowered to the base's by a Refine,
+    /// `pipeline::carry_over_unrepresentable`). Riding any of them, a mask
+    /// number would be converted a second time — or never — the day that
+    /// other fact moved. A fourth, independent fact, a fourth field.
+    ///
+    /// NOT converted inside `Deserialize`: the advisor's reply
+    /// (`advisor::openai`), a request body (`serve`) and a sidecar's payload
+    /// (`xmp::payload`) are parsed as recipes too, and none of them is
+    /// carried over — the first two are this build's own numbers, and a
+    /// sidecar's are the slider's, taken as they stand whichever build wrote
+    /// the file. Those readers stamp the current era instead.
+    ///
+    /// **Serialisation: the current stamp is always written, the legacy one
+    /// never.** Always, for the reason `quarter_turns` states for the eras: an
+    /// ABSENT key means something different from the value a fresh recipe
+    /// stamps, so the fresh one must be spelled out — on a recipe with no
+    /// mask Temp or Tint too. Leaving the key off such a recipe would be
+    /// lossless on the day it is written (zeros are zeros on both scales) and
+    /// not after: recipe JSON is also edited as JSON — the sidecar payload's
+    /// leaf-by-leaf reconcile (`xmp::payload`), the advisor's merge, the web
+    /// page's own object — and a number put into a key-less document there
+    /// would read back as a legacy number and be weakened on the next open.
+    /// It is therefore the same class-① forward break `coord_era` made: a
+    /// build up to v1.18.3 refuses, by this field's name, every recipe this
+    /// one saves. Never the legacy `0`, because an absent key already means
+    /// exactly that: a recipe that is read and written back unconverted (a
+    /// version snapshot, the legacy-folder move, `store::recipe_struct_hash`)
+    /// stays byte for byte what the older build wrote.
+    #[serde(default = "mask_wb_era_legacy", skip_serializing_if = "is_mask_wb_era_legacy")]
+    pub mask_wb_era: u32,
+
     // --- Tone ---------------------------------------------------------------
     /// Global exposure in stops (EV). 0.0 = unchanged.
     pub exposure_ev: f32,
@@ -1097,6 +1146,37 @@ fn schema_era_legacy() -> u32 {
     0
 }
 
+/// The current MASK WHITE-BALANCE era, stamped into every recipe this build
+/// writes: which scale a mask's `temperature` and `tint` are stated in.
+///
+/// Era 0 = every recipe written up to v1.18.3. A mask's Temp moved ∓80 mired
+/// at ±100 and its Tint went into the engine's white-balance model as it
+/// stood. Era 1 (2026-11-19) = ∓150 mired and twice the Tint
+/// (`render::local_temp_to_kelvin`, `render::local_tint_to_engine`).
+///
+/// Both laws are linear in the stored number, so an era-0 number has an exact
+/// era-1 equivalent (`render::local_wb_from_legacy`: Temp × 80/150, Tint ×
+/// 1/2), and [`EditRecipe::convert_legacy_mask_wb`] is the one place that
+/// applies it and moves the stamp.
+pub const MASK_WB_ERA: u32 = 1;
+
+/// Serde default for [`EditRecipe::mask_wb_era`] — the legacy scale, NOT the
+/// container's `Default::default()` value, by the argument
+/// [`coord_era_legacy`] makes: a file with no `mask_wb_era` key was written
+/// before the field existed, and every one of those states its masks' Temp
+/// and Tint on the weaker scale. Pinned by
+/// `absent_mask_wb_era_reads_as_the_legacy_scale`.
+fn mask_wb_era_legacy() -> u32 {
+    0
+}
+
+/// `skip_serializing_if` predicate for [`EditRecipe::mask_wb_era`]: only the
+/// legacy stamp is left unwritten — see that field's doc.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's predicate signature
+fn is_mask_wb_era_legacy(era: &u32) -> bool {
+    *era == mask_wb_era_legacy()
+}
+
 /// `skip_serializing_if` predicate for [`EditRecipe::quarter_turns`] — see
 /// that field's doc for why THIS field is skipped when the era stamps beside
 /// it never are. Pinned by
@@ -1150,6 +1230,7 @@ impl Default for EditRecipe {
             version: CALIB_ERA,
             coord_era: COORD_ERA,
             schema_era: SCHEMA_ERA,
+            mask_wb_era: MASK_WB_ERA,
             exposure_ev: 0.0,
             contrast: 0.0,
             highlights: 0.0,
@@ -2264,8 +2345,13 @@ pub struct LocalAdjustment {
     /// frame — the one shape of colour move a global mixer cannot make. Added
     /// in R23-1b beside `sharpness`, for the same reason.
     pub hue: f32,
-    /// Relative warm/cool shift (NOT Kelvin) → `crs:LocalTemperature`.
+    /// Relative warm/cool shift (NOT Kelvin), ±100 → `crs:LocalTemperature`.
+    /// Rendered by `render::local_temp_to_kelvin`; which scale this number
+    /// and the Tint below are stated in is the recipe's
+    /// [`EditRecipe::mask_wb_era`].
     pub temperature: f32,
+    /// Relative green/magenta shift, ±100 (+ magenta) → `crs:LocalTint`.
+    /// Rendered by `render::local_tint_to_engine`.
     pub tint: f32,
     /// Lightroom's mask "Color" swatch, its hue → `crs:LocalToningHue`, 0..360°
     /// stored as written (the file carries degrees, unscaled). A colour TINT,
@@ -3607,6 +3693,53 @@ impl EditRecipe {
     /// abuse bound: an honest run writes a few tens of kilobytes.
     pub(crate) const MAX_RATIONALE: usize = 512 * 1024;
 
+    /// Bring every mask's Temp and Tint onto this build's scale — the
+    /// load-time half of [`MASK_WB_ERA`] and its ONE owner. `true` when a
+    /// number moved.
+    ///
+    /// Every reader of a recipe an OLDER BUILD may have saved calls this once
+    /// the JSON is parsed: the store's `recipe.json` and its legacy `./out`
+    /// twin, a version snapshot, a card in `variants.json`, a recipe file
+    /// named on the command line. A reader of anything else — the advisor's
+    /// reply, a request body that states no scale, a sidecar's numbers (the
+    /// `crs:` keys and the payload's copy of them alike) — stamps the current
+    /// era instead and never comes here (see
+    /// [`mask_wb_era`](Self::mask_wb_era)).
+    ///
+    /// Gated on the stamp, and the stamp moves with the numbers, so a second
+    /// call — the same recipe handed on to another reader, a file saved after
+    /// its conversion and opened again — does nothing. In memory only: the
+    /// file keeps what the older build wrote until the user saves, exactly
+    /// as the coordinate migration leaves it, and opening it twice gives the
+    /// same answer twice.
+    pub fn convert_legacy_mask_wb(&mut self) -> bool {
+        if self.mask_wb_era >= MASK_WB_ERA {
+            return false;
+        }
+        let mut moved = false;
+        for m in &mut self.masks {
+            let (temperature, tint) = crate::render::local_wb_from_legacy(m.temperature, m.tint);
+            moved |= temperature != m.temperature || tint != m.tint;
+            (m.temperature, m.tint) = (temperature, tint);
+        }
+        self.mask_wb_era = MASK_WB_ERA;
+        moved
+    }
+
+    /// [`convert_legacy_mask_wb`](Self::convert_legacy_mask_wb) for a recipe
+    /// the XMP reader built from a develop AN OLDER BUILD KEPT IN THE STORE
+    /// as an .xmp (`store::xmp_target`, `store::legacy_xmp` — the save of a
+    /// photo that has no `recipe.json`; nothing has written one since
+    /// 2026-11-18, and the next save retires it). The reader stamps what it
+    /// builds current, which is right for a sidecar the photographer hands
+    /// over — its numbers are the sliders' — and wrong for this one: its mask
+    /// Temp and Tint are the numbers that build saved and rendered, so they
+    /// are carried over like a `recipe.json`'s.
+    pub fn convert_mask_wb_saved_as_xmp(&mut self) -> bool {
+        self.mask_wb_era = mask_wb_era_legacy();
+        self.convert_legacy_mask_wb()
+    }
+
     /// Clamp every slider into its documented legal range. The AI is
     /// instructed to stay in range, but we never trust the input blindly —
     /// an out-of-range value would otherwise corrupt the render downstream.
@@ -4620,6 +4753,11 @@ impl EditRecipe {
                 // still lose the `SavedDevelop::NoopOnly` precedence contest
                 // to a sidecar that holds real edits.
                 schema_era: EditRecipe::default().schema_era,
+                // …and for the mask white-balance stamp: which scale a
+                // recipe's mask Temp and Tint are stated in is provenance
+                // too. A recipe that carries such a number is not neutral
+                // because of the NUMBER, whatever the stamp says.
+                mask_wb_era: EditRecipe::default().mask_wb_era,
                 base_curve: Vec::new(),
                 // The as-shot WB anchor is the same kind of stamped
                 // calibration — a fresh-open stamp must still count as no-op.
@@ -4872,6 +5010,27 @@ impl Default for GradeStrength {
     fn default() -> Self {
         Self(Self::DEFAULT)
     }
+}
+
+/// A recipe file as v1.18.3 wrote it — every era key that build knew, no
+/// `mask_wb_era`, one mask whose Temp and Tint are on that build's scale —
+/// for the tests of every door a saved recipe is read through: carried over,
+/// the mask reads Temp 25.6 and Tint −10 ([`EditRecipe::convert_legacy_mask_wb`]).
+#[cfg(test)]
+pub(crate) const V1_18_3_MASK_WB: &str = r#"{"version":3,"coord_era":2,"schema_era":2,"contrast":7.0,
+    "masks":[{"name":"sky","exposure_ev":-0.4,"temperature":48.0,"tint":-20.0}]}"#;
+
+/// Is `r` [`V1_18_3_MASK_WB`] carried over: its mask on this build's scale,
+/// the recipe stamped, the rest as the file states it?
+#[cfg(test)]
+pub(crate) fn is_v1_18_3_mask_wb_carried_over(r: &EditRecipe) -> bool {
+    let near = |got: f32, want: f32| (got - want).abs() < 1e-4;
+    r.mask_wb_era == MASK_WB_ERA
+        && r.contrast == 7.0
+        && r.masks.len() == 1
+        && r.masks[0].exposure_ev == -0.4
+        && near(r.masks[0].temperature, 25.6)
+        && near(r.masks[0].tint, -10.0)
 }
 
 #[cfg(test)]
@@ -5918,6 +6077,108 @@ mod tests {
         // A mask WITHOUT a "range" key (pre-range recipes) defaults to None.
         let old_mask = r#"{ "masks": [ { "name": "sky" } ] }"#;
         assert_eq!(serde_json::from_str::<EditRecipe>(old_mask).unwrap().masks[0].range, None);
+    }
+
+    /// THE CONTRACT the mask white-balance carry-over is gated on
+    /// (2026-11-19), and the same serde subtlety as `coord_era`'s: the
+    /// field-level default must beat the container's, or every recipe from
+    /// v1.18.3 and earlier would read as "already on this build's scale" and
+    /// its mask Temp and Tint would render about twice as strong as saved.
+    ///
+    /// The other half is what is WRITTEN. The current stamp always is; the
+    /// legacy one never is, so an older build's recipe that is only passed
+    /// along (a version snapshot, the fingerprint `store::recipe_struct_hash`
+    /// takes) re-serialises exactly as that build wrote it.
+    ///
+    /// MUTATION THIS CATCHES: the `default = "mask_wb_era_legacy"` attribute
+    /// dropped (the legacy file reads as era 1), the `skip_serializing_if`
+    /// dropped (an unconverted file gains a `"mask_wb_era":0` key) or widened
+    /// to the current stamp (a fresh recipe is written without its stamp and
+    /// read back as legacy), or the conversion moved into the deserialiser.
+    #[test]
+    fn absent_mask_wb_era_reads_as_the_legacy_scale() {
+        let read: EditRecipe = serde_json::from_str(V1_18_3_MASK_WB).unwrap();
+        assert_eq!(read.mask_wb_era, 0, "a file with no mask_wb_era key is on the scale of v1.18.3");
+        assert_eq!(
+            (read.masks[0].temperature, read.masks[0].tint),
+            (48.0, -20.0),
+            "reading a file converts nothing: the numbers stand until the recipe's own function moves them"
+        );
+        assert_eq!(EditRecipe::default().mask_wb_era, MASK_WB_ERA, "a fresh recipe is on this build's scale");
+        assert_ne!(mask_wb_era_legacy(), EditRecipe::default().mask_wb_era);
+        // The current stamp is written, and read back as written.
+        let json = serde_json::to_string(&EditRecipe::default()).unwrap();
+        assert!(json.contains(&format!("\"mask_wb_era\":{MASK_WB_ERA}")), "{json}");
+        assert_eq!(serde_json::from_str::<EditRecipe>(&json).unwrap().mask_wb_era, MASK_WB_ERA);
+        // The legacy one is not: an unconverted file goes back out without the key.
+        let back = serde_json::to_string(&read).unwrap();
+        assert!(!back.contains("mask_wb_era"), "{back}");
+        assert_eq!(serde_json::from_str::<EditRecipe>(&back).unwrap(), read);
+        // PROVENANCE, not an edit: a neutral recipe from an older build is
+        // still "no edits" (`schema_era`'s argument).
+        let neutral_legacy: EditRecipe = serde_json::from_str(r#"{"version":2}"#).unwrap();
+        assert_eq!(neutral_legacy.mask_wb_era, 0, "premise: it really is the legacy scale");
+        assert!(neutral_legacy.is_noop(), "the scale stamp is not an edit");
+    }
+
+    /// The carry-over itself: an older build's mask Temp and Tint land on
+    /// 80/150 and 1/2 of themselves, the recipe is stamped, nothing else in
+    /// it moves, and it happens ONCE — in memory, and across a save and a
+    /// re-read, which is where a second halving would otherwise creep in.
+    ///
+    /// MUTATION THIS CATCHES: the stamp not written by the conversion (the
+    /// re-read file converts again: 25.6 becomes 13.65), the gate on the
+    /// stamp dropped (a current recipe's Temp 48 is halved), or a control
+    /// beside Temp and Tint rescaled with them.
+    #[test]
+    fn a_legacy_mask_white_balance_is_carried_over_once() {
+        let near = |got: f32, want: f32| (got - want).abs() < 1e-4;
+        let mut r: EditRecipe = serde_json::from_str(V1_18_3_MASK_WB).unwrap();
+        let before = r.clone();
+        assert!(r.convert_legacy_mask_wb(), "the numbers moved");
+        assert!(near(r.masks[0].temperature, 25.6) && near(r.masks[0].tint, -10.0), "{:?}", r.masks[0]);
+        assert_eq!(r.mask_wb_era, MASK_WB_ERA);
+        assert!(is_v1_18_3_mask_wb_carried_over(&r), "the shared fixture's own check agrees");
+        assert!(!is_v1_18_3_mask_wb_carried_over(&before), "…and tells the unconverted file apart");
+        // Nothing but those two numbers and the stamp.
+        let mut expected = before.clone();
+        expected.mask_wb_era = MASK_WB_ERA;
+        (expected.masks[0].temperature, expected.masks[0].tint) = (r.masks[0].temperature, r.masks[0].tint);
+        assert_eq!(r, expected);
+        // Once in memory…
+        let once = r.clone();
+        assert!(!r.convert_legacy_mask_wb());
+        assert_eq!(r, once);
+        // …and once across a save: the file states its scale, and the next
+        // reader finds nothing to do.
+        let saved = serde_json::to_string(&r).unwrap();
+        assert!(saved.contains(&format!("\"mask_wb_era\":{MASK_WB_ERA}")), "{saved}");
+        let mut reread: EditRecipe = serde_json::from_str(&saved).unwrap();
+        assert!(!reread.convert_legacy_mask_wb());
+        assert_eq!(reread, once, "a saved, carried-over recipe reads back as it was saved");
+        // A recipe that states this build's scale is never converted.
+        let wb_mask = || LocalAdjustment { temperature: 48.0, tint: -20.0, ..Default::default() };
+        let mut current = EditRecipe { masks: vec![wb_mask()], ..Default::default() };
+        assert!(!current.convert_legacy_mask_wb());
+        assert_eq!((current.masks[0].temperature, current.masks[0].tint), (48.0, -20.0));
+        // An older recipe with no mask white balance is stamped and reports no move.
+        let mut plain: EditRecipe =
+            serde_json::from_str(r#"{"version":2,"masks":[{"name":"sky","exposure_ev":0.3}]}"#).unwrap();
+        assert!(!plain.convert_legacy_mask_wb());
+        assert_eq!(plain.mask_wb_era, MASK_WB_ERA);
+        assert_eq!((plain.masks[0].temperature, plain.masks[0].tint, plain.masks[0].exposure_ev), (0.0, 0.0, 0.3));
+        // The store's own .xmp — an older build's SAVE, read by a reader that
+        // builds on `EditRecipe::default()` and so arrives stamped current —
+        // is carried over whatever its stamp says, and also only once.
+        let mut from_store_xmp = EditRecipe { masks: vec![wb_mask()], ..Default::default() };
+        assert!(from_store_xmp.convert_mask_wb_saved_as_xmp());
+        assert!(
+            near(from_store_xmp.masks[0].temperature, 25.6) && near(from_store_xmp.masks[0].tint, -10.0),
+            "{:?}",
+            from_store_xmp.masks[0]
+        );
+        assert_eq!(from_store_xmp.mask_wb_era, MASK_WB_ERA);
+        assert!(!from_store_xmp.convert_legacy_mask_wb(), "stamped: the JSON door leaves it alone afterwards");
     }
 
     /// The serialisation choice `quarter_turns` makes and the two things it

@@ -381,7 +381,7 @@ fn trim_num(v: f32) -> String {
 /// Every field of [`EditRecipe`], in DECLARATION order — which is also the
 /// order the strict schema's `required` array takes, so the generated schema
 /// is byte-identical to the hand-written mirror it replaced.
-pub const RECIPE_CONTROLS: [Control; 116] = [
+pub const RECIPE_CONTROLS: [Control; 117] = [
     Control {
         name: "version",
         shape: Shape::Integer,
@@ -426,6 +426,22 @@ pub const RECIPE_CONTROLS: [Control; 116] = [
         tier: None,
         purpose: "engine bookkeeping: which control set this recipe was written against \
                   (0 = before the R25 carried keys existed, 1 = current)",
+    },
+    Control {
+        name: "mask_wb_era",
+        shape: Shape::Integer,
+        range: None,
+        neutral: "1",
+        // ENGINE-ONLY for `schema_era`'s reason: this says which SCALE the
+        // masks' `temperature` and `tint` were saved in, a fact about the
+        // file a recipe came from. The model is told one scale — the mask
+        // rows below — and answers in it, so its reply is stamped current
+        // where it becomes a recipe (`advisor::openai`), never asked.
+        engine_only: true,
+        crs: CrsKey::None,
+        tier: None,
+        purpose: "engine bookkeeping: which scale the masks' temperature and tint are stated in \
+                  (0 = the weaker scale of v1.18.3 and earlier, 1 = current)",
     },
     Control {
         name: "exposure_ev",
@@ -3069,6 +3085,7 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         version,
         coord_era,
         schema_era,
+        mask_wb_era,
         exposure_ev,
         contrast,
         highlights,
@@ -3185,6 +3202,7 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         "version" => GlobalValue::Int(*version),
         "coord_era" => GlobalValue::Int(*coord_era),
         "schema_era" => GlobalValue::Int(*schema_era),
+        "mask_wb_era" => GlobalValue::Int(*mask_wb_era),
         "exposure_ev" => GlobalValue::Num(*exposure_ev),
         "contrast" => GlobalValue::Num(*contrast),
         "highlights" => GlobalValue::Num(*highlights),
@@ -4395,6 +4413,11 @@ mod tests {
                 // the same reason `camera_profile` is — Adobe's own block, not
                 // a number to ask a model for.
                 "look",
+                // 2026-11-19: `mask_wb_era` joins for `schema_era`'s reason —
+                // a declaration about the file a recipe came from (which
+                // scale its masks' Temp and Tint were saved in). The model
+                // answers in the one scale the catalogue states.
+                "mask_wb_era",
                 "nr_contrast",
                 "nr_detail",
                 // v1.5.0: the parametric curve, on the second kind's ground —

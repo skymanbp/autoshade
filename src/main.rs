@@ -1215,7 +1215,15 @@ fn read_recipe_at(recipe_path: &Path, raw: &Path) -> Result<EditRecipe> {
         }
         return Ok(r);
     }
-    serde_json::from_str(&text).with_context(|| format!("parse recipe {}", recipe_path.display()))
+    let mut r: EditRecipe = serde_json::from_str(&text)
+        .with_context(|| format!("parse recipe {}", recipe_path.display()))?;
+    // A recipe FILE may be an older build's, and one that names no
+    // `mask_wb_era` states its masks' Temp and Tint on that build's weaker
+    // scale (2026-11-19): carried over here, where the file is read, so
+    // `apply` renders it as the build that wrote it did. The .xmp arm above
+    // is a sidecar's own numbers and is not touched.
+    r.convert_legacy_mask_wb();
+    Ok(r)
 }
 
 /// `export-xmp`: the saved develop, through the pipeline's export doors. The
@@ -3377,6 +3385,63 @@ mod tests {
         std::fs::write(&junk, "this is not a sidecar").unwrap();
         let neutral = read_recipe_at(&junk, &photo).expect("an unreadable sidecar is not an error");
         assert_eq!(neutral.exposure_ev, EditRecipe::default().exposure_ev);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 2026-11-19: a recipe FILE handed to `apply` may be an older build's,
+    /// whose mask Temp and Tint are on that build's weaker scale: it is
+    /// carried over where the file is read, so `apply` renders it as the
+    /// build that wrote it did — once, and without touching the file. A
+    /// sidecar on the same door is the slider's own numbers and is taken as
+    /// it stands.
+    ///
+    /// MUTATION THIS CATCHES: the carry-over dropped from the JSON arm (the
+    /// older file renders its mask Temp about twice as strong), or added to
+    /// the sidecar arm.
+    #[test]
+    fn apply_reads_an_older_builds_recipe_on_this_builds_mask_scale() {
+        use autoshade::recipe::MASK_WB_ERA;
+        let root = std::env::temp_dir().join(format!("autoshade-cli-mask-wb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let photo = root.join("photo.ARW"); // need not exist, as above
+
+        let older = r#"{"version":3,"coord_era":2,"schema_era":2,"masks":[{"name":"sky","temperature":48.0,"tint":-20.0}]}"#;
+        let js = root.join("older.recipe.json");
+        std::fs::write(&js, older).unwrap();
+        let read = read_recipe_at(&js, &photo).expect("an older build's recipe reads");
+        assert!(
+            (read.masks[0].temperature - 25.6).abs() < 1e-4 && read.masks[0].tint == -10.0,
+            "{:?}",
+            read.masks[0]
+        );
+        assert_eq!(read.mask_wb_era, MASK_WB_ERA);
+        assert_eq!(std::fs::read_to_string(&js).unwrap(), older, "reading a recipe must not rewrite it");
+        // Written by this build and read again: nothing moves a second time.
+        let current = root.join("current.recipe.json");
+        std::fs::write(&current, serde_json::to_string(&read).unwrap()).unwrap();
+        assert_eq!(read_recipe_at(&current, &photo).expect("this build's recipe reads"), read);
+
+        let slider = EditRecipe {
+            masks: vec![autoshade::recipe::LocalAdjustment {
+                name: "sky".into(),
+                mask: autoshade::recipe::MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.2, full_x: 0.5, full_y: 0.8 },
+                amount: 1.0,
+                temperature: 48.0,
+                tint: -20.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let side = root.join("edit.xmp");
+        std::fs::write(&side, autoshade::xmp::recipe_to_xmp(&slider)).unwrap();
+        let from_xmp = read_recipe_at(&side, &photo).expect("a sidecar is a recipe file");
+        assert_eq!(
+            (from_xmp.masks[0].temperature, from_xmp.masks[0].tint, from_xmp.mask_wb_era),
+            (48.0, -20.0, MASK_WB_ERA),
+            "a sidecar's Temp and Tint are taken as they stand"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

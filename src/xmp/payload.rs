@@ -720,6 +720,15 @@ pub(crate) fn restore(
             r = back;
         }
     }
+    // A sidecar's mask Temp and Tint are the slider's own numbers, taken as
+    // they stand whichever build wrote them (2026-11-19) — the rule for the
+    // `crs:` keys, and so for the payload's copy of the same two numbers. A
+    // payload from v1.18.3 or earlier names no `mask_wb_era`, and the leaf
+    // rule above would hand that silence on: the recipe would render at this
+    // build's strength now and be carried over as an older build's save the
+    // next time its file was read (`EditRecipe::convert_legacy_mask_wb`) —
+    // one import, two pictures. Stamped here instead, never converted.
+    r.mask_wb_era = crate::recipe::MASK_WB_ERA;
     if let Some(dir) = develop_dir {
         if materialize {
             place_rasters(&mut r, &payload.rasters, dir, &warn);

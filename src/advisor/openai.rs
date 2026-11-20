@@ -789,6 +789,13 @@ impl OpenAiProvider {
         // own zero would be read as "never seen" and the XMP merge would leave
         // the photographer's old `crs:Texture` standing over it.
         recipe.schema_era = crate::recipe::SCHEMA_ERA;
+        // …and for the MASK WHITE-BALANCE stamp (2026-11-19): `mask_wb_era`'s
+        // serde default means "saved by a build whose mask Temp and Tint were
+        // weaker", and the model was told ONE scale — the catalogue's mask
+        // rows, rendered by this build's law. Its numbers are stamped, never
+        // converted: left at the legacy default, the next open of the saved
+        // recipe would take a mask Temp the model asked for and weaken it.
+        recipe.mask_wb_era = crate::recipe::MASK_WB_ERA;
         super::project_remote_recipe_text(&mut recipe, &[key], base);
         // The provider's own disclosures, appended to the English rationale AND
         // carried as typed notes (A10): `push_note` does both, so the persisted
@@ -1839,6 +1846,41 @@ mod tests {
         assert_eq!(seen.len(), 3, "one probe, then straight to chat");
         let third: Value = serde_json::from_str(&seen[2]).unwrap();
         assert!(third.get("messages").is_some(), "the second propose went to chat first");
+    }
+
+    /// 2026-11-19: a mask Temp or Tint the model returns is a number on THIS
+    /// build's scale — the one scale the catalogue describes and the develop
+    /// renders — so the reply is stamped and its numbers are left alone, now
+    /// and at every later read of the recipe it becomes.
+    ///
+    /// MUTATION THIS CATCHES: the stamp dropped (the saved proposal reads as
+    /// an older build's file and its mask Temp is weakened to 8/15 on the
+    /// next open), or the reply run through the saved-file carry-over.
+    #[test]
+    fn a_replys_mask_white_balance_is_this_builds_and_is_never_converted() {
+        let reply = r#"{"exposure_ev":0.3,"masks":[{"name":"warm sky","amount":1.0,
+            "mask":{"kind":"linear","zero_x":0.5,"zero_y":0.0,"full_x":0.5,"full_y":0.5},
+            "temperature":48.0,"tint":-20.0}]}"#;
+        let (url, _seen, handle) = stub_endpoint(vec![
+            (404, "text/plain", "no such route".to_string()),
+            (200, "application/json", chat_reply(reply)),
+        ]);
+        let p = OpenAiProvider::new(&cfg_for(&url));
+        let mut recipe = p
+            .propose(
+                &Preview { jpeg: b"J".to_vec() },
+                &meta_fixture(),
+                &hist_fixture(),
+                &ProposeContext::default(),
+            )
+            .expect("the reply parses");
+        join_stub(handle);
+        let wb = |r: &EditRecipe| (r.masks[0].temperature, r.masks[0].tint, r.mask_wb_era);
+        assert_eq!(wb(&recipe), (48.0, -20.0, crate::recipe::MASK_WB_ERA));
+        // Saved and read back like any recipe file, it is still the model's answer.
+        let mut reread: EditRecipe = serde_json::from_str(&serde_json::to_string(&recipe).unwrap()).unwrap();
+        assert!(!reread.convert_legacy_mask_wb() && !recipe.convert_legacy_mask_wb());
+        assert_eq!(wb(&reread), (48.0, -20.0, crate::recipe::MASK_WB_ERA));
     }
 
     /// An explicit `chat` family skips the probe entirely, and the response

@@ -2144,6 +2144,11 @@ impl AutoShadeApp {
                     let s =
                         autoshade::store::read_text_capped(&p, autoshade::store::MAX_STORE_JSON)?;
                     let mut r = serde_json::from_str::<EditRecipe>(&s)?;
+                    // A snapshot an older build took states its masks' Temp
+                    // and Tint on that build's scale (2026-11-19): carried
+                    // over here, where the file is read, like the working
+                    // recipe's on open. The snapshot file is not rewritten.
+                    r.convert_legacy_mask_wb();
                     let dropped = r.clamp();
                     // Snapshots name their rasters by bare file name, like
                     // the working recipe — re-anchor them to the develop dir.

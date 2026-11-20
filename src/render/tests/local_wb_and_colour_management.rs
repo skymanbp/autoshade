@@ -272,7 +272,10 @@ fn full_frame_local_wb_matches_the_global_wb_stage() {
         &mut global,
         &EditRecipe {
             temperature_k: Some(local_temp_to_kelvin(t_rel)),
-            tint,
+            // The mask's Tint has a scale of its own since 2026-11-19
+            // (`local_tint_to_engine`), as its Temp always had: the global
+            // stage takes the engine Tint that mask number stands for.
+            tint: local_tint_to_engine(tint),
             ..Default::default()
         },
     );
@@ -300,6 +303,121 @@ fn full_frame_local_wb_matches_the_global_wb_stage() {
                 "full-frame local WB drifted from the global stage: {a:?} vs {b:?}"
             );
         }
+    }
+}
+
+/// The mask white-balance law of v1.18.3 and earlier, frozen here as NUMBERS
+/// rather than read from the engine's constants, which the two tests below
+/// exist to check: Temp ±100 moved ∓80 mired around 5500 K (the number held
+/// to ±100 by the law itself), and Tint went into `wb_gains` as it stood.
+fn legacy_mask_wb(temperature: f32, tint: f32) -> (f32, f32) {
+    let mired = 1e6 / 5500.0 - (temperature.clamp(-100.0, 100.0) / 100.0) * 80.0;
+    (1e6 / mired, tint)
+}
+
+/// The carry-over of a saved mask Temp/Tint onto the stronger scale of
+/// 2026-11-19 is EXACT: the converted pair gives, by today's law, the gains
+/// the saved pair gave by the old one — which is what "every saved photo
+/// looks as it did" rests on. Across both ends, both signs, the zero and the
+/// small numbers where a wrong constant hides in rounding.
+///
+/// MUTATION THIS CATCHES: either conversion constant off (80/150 retyped as
+/// 1/2, the Tint left unhalved), the new law's mired or Tint scale changed
+/// without its legacy twin, or the conversion's Temp and Tint swapped.
+#[test]
+fn a_legacy_mask_white_balance_renders_the_same_gains_once_converted() {
+    for temperature in [-100.0_f32, -60.0, -3.0, 0.0, 3.0, 48.0, 100.0] {
+        for tint in [-100.0_f32, -20.0, 0.0, 35.0, 100.0] {
+            let (then_k, then_tint) = legacy_mask_wb(temperature, tint);
+            let then = wb_gains(5500.0, then_k, then_tint);
+            let (t, n) = local_wb_from_legacy(temperature, tint);
+            let now = wb_gains(5500.0, local_temp_to_kelvin(t), local_tint_to_engine(n));
+            for c in 0..3 {
+                assert!(
+                    (now[c] - then[c]).abs() < 1e-5,
+                    "Temp {temperature} Tint {tint} -> ({t}, {n}): channel {c} renders {} where it rendered {}",
+                    now[c],
+                    then[c]
+                );
+            }
+        }
+    }
+    // The numbers the carry-over lands on: 80/150 of the Temp, half the Tint.
+    let (t, n) = local_wb_from_legacy(48.0, -20.0);
+    assert!((t - 25.6).abs() < 1e-4 && (n + 10.0).abs() < 1e-6, "({t}, {n})");
+    assert_eq!(local_wb_from_legacy(0.0, 0.0), (0.0, 0.0), "a mask with no white balance stays without one");
+    // …and the slider did get stronger: the same number moves further than it did.
+    let (old_k, _) = legacy_mask_wb(48.0, 0.0);
+    assert!(local_temp_to_kelvin(48.0) > old_k + 500.0, "{} vs {old_k}", local_temp_to_kelvin(48.0));
+    assert_eq!(local_tint_to_engine(-20.0), -40.0);
+    // Both ends of the new Temp stay inside the Kelvin band the model is
+    // fitted on (1000–40000 K), at the numbers the law's own comment states…
+    for (end, kelvin) in [(-100.0_f32, 3013.7_f32), (100.0, 31428.6)] {
+        let k = local_temp_to_kelvin(end);
+        assert!((1000.0..=40000.0).contains(&k) && (k - kelvin).abs() < 1.0, "Temp {end} -> {k} K");
+    }
+    // …and so do the old law's, which that comment states too.
+    for (end, kelvin) in [(-100.0_f32, 3819.4_f32), (100.0, 9821.4)] {
+        let (k, _) = legacy_mask_wb(end, 0.0);
+        assert!((k - kelvin).abs() < 1.0, "the old Temp {end} -> {k} K");
+    }
+}
+
+/// The same promise at the PICTURE: a recipe file from v1.18.3 or earlier
+/// (no `mask_wb_era`), carried over by the recipe's own function and rendered
+/// by today's develop, lands where the old law put it. The old law's picture
+/// is the global white-balance stage at the old law's Kelvin and Tint — the
+/// identity `full_frame_local_wb_matches_the_global_wb_stage` pinned for that
+/// law, at the tolerance it pinned it at.
+///
+/// MUTATION THIS CATCHES: the render reading the saved number on the new
+/// scale without the carry-over (Temp 48 rendered as 48, not 25.6), or the
+/// carry-over applied to a recipe that already states the current scale.
+#[test]
+fn a_legacy_recipes_mask_white_balance_renders_as_it_did() {
+    let src = [[0.7_f32, 0.55, 0.35], [0.2, 0.35, 0.6], [0.5, 0.5, 0.5]];
+    let render = |r: &EditRecipe| {
+        let mut px = src.to_vec();
+        apply_develop_anon(&mut px, 3, 1, r);
+        px
+    };
+    let worst = |a: &[[f32; 3]], b: &[[f32; 3]]| {
+        a.iter().zip(b).flat_map(|(x, y)| (0..3).map(move |c| (x[c] - y[c]).abs())).fold(0.0_f32, f32::max)
+    };
+    for (temperature, tint) in [(48.0_f32, -20.0_f32), (60.0, -25.0), (-60.0, 35.0)] {
+        let json = format!(
+            r#"{{"version":3,"coord_era":2,"schema_era":2,"masks":[{{"name":"sky","amount":1.0,
+                "mask":{{"kind":"linear","zero_x":0.5,"zero_y":0.5,"full_x":0.5,"full_y":0.5}},
+                "temperature":{temperature},"tint":{tint}}}]}}"#
+        );
+        let mut saved: EditRecipe = serde_json::from_str(&json).expect("a v1.18.3 recipe parses");
+        assert_eq!(saved.mask_wb_era, 0, "premise: no key is the legacy scale");
+        let unconverted = render(&saved);
+        assert!(saved.convert_legacy_mask_wb(), "the numbers move");
+        let now = render(&saved);
+
+        let (then_k, then_tint) = legacy_mask_wb(temperature, tint);
+        let mut then = src.to_vec();
+        apply_recipe_wb(
+            &mut then,
+            &EditRecipe { temperature_k: Some(then_k), tint: then_tint, ..Default::default() },
+        );
+        apply_develop_anon(&mut then, 3, 1, &EditRecipe::default());
+
+        assert!(
+            worst(&now, &then) < 3e-3,
+            "Temp {temperature} Tint {tint}: carried over it renders {now:?}, v1.18.3 rendered {then:?}"
+        );
+        // The test has teeth: the same file read WITHOUT the carry-over is
+        // visibly another picture, well outside that tolerance.
+        assert!(
+            worst(&unconverted, &then) > 1e-2,
+            "premise: the stronger scale moves the picture ({unconverted:?} vs {then:?})"
+        );
+        // Carried over once: a second pass finds the stamp and moves nothing.
+        let once = saved.clone();
+        assert!(!saved.convert_legacy_mask_wb());
+        assert_eq!(saved, once);
     }
 }
 

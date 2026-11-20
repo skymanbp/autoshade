@@ -246,8 +246,10 @@ use tone::{apply_rgb_curves, engine_channel_curves, hermite_eval};
 pub(crate) use mask_gains::gains_as_white;
 #[cfg(test)]
 pub(crate) use tone::{limit_tone_sliders, parametric_lut};
-pub use wb::{local_temp_to_kelvin, solve_wb_for, solve_wb_from_neutral};
-pub(crate) use wb::{WHITE_CLIP, WbLaw, blown_white, linear_to_srgb, srgb_to_linear, wb_gains};
+pub use wb::{local_temp_to_kelvin, local_tint_to_engine, solve_wb_for, solve_wb_from_neutral};
+pub(crate) use wb::{
+    WHITE_CLIP, WbLaw, blown_white, linear_to_srgb, local_wb_from_legacy, srgb_to_linear, wb_gains,
+};
 use wb::{
     apply_recipe_wb, colour_gain_luts, decode_wide, encode_wide, keep_blown_white, ramp, smoothstep, transfer_luts,
 };

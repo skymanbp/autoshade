@@ -28,6 +28,11 @@ pub(crate) fn resolve_snapshot_develop(
     // this closes.)
     if let Some((text, from)) = &snap.recipe {
         let mut r = serde_json::from_str::<EditRecipe>(text)?;
+        // The batch twin of the open path's mask white-balance conversion
+        // (2026-11-19): an older build's recipe.json states its masks' Temp
+        // and Tint on that build's scale, and a photo exported without being
+        // opened must render what it renders when it is.
+        r.convert_legacy_mask_wb();
         if r.is_noop() {
             // A neutral recipe.json restores NOTHING — on the open path and
             // here alike (2026-09-13): the projection beside it is derived
@@ -84,6 +89,9 @@ fn xmp_arm(
     // reads the recipe the document produced.
     let diag = autoshade::diag::photo(p);
     let (mut r, imported_clamp) = autoshade::xmp::xmp_to_recipe_clamped_with_diag(text, &diag);
+    // The store's own .xmp is an older build's SAVE (the open path's rule):
+    // its mask Temp and Tint are that build's numbers, carried over.
+    r.convert_mask_wb_saved_as_xmp();
     // Collected for EVERY consulted file — a no-op import included (the
     // persist.rs rule, Codex 32-#1 + review R12-11): a sidecar whose ONLY
     // edit is corrupt restores nothing, and the next save overwrites it in

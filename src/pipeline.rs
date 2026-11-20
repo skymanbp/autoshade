@@ -2515,6 +2515,12 @@ pub struct LoadMigration {
     /// reason — said, because the photo then renders with its saved geometry
     /// off the picture until the cause is fixed.
     pub reframe_error: Option<String>,
+    /// A mask's Temp or Tint was carried from the scale of v1.18.3 and
+    /// earlier onto this build's (`EditRecipe::convert_legacy_mask_wb`,
+    /// 2026-11-19). The NUMBERS changed and the picture did not, so this is a
+    /// change ([`any`](Self::any)) with nothing to disclose
+    /// ([`note`](Self::note) is about what renders differently).
+    pub rescaled: bool,
 }
 
 impl LoadMigration {
@@ -2522,7 +2528,7 @@ impl LoadMigration {
     /// that only need "is this recipe different now".) A failed reframe
     /// changed nothing.
     pub fn any(&self) -> bool {
-        self.relook.is_some() || self.reframe.is_some()
+        self.relook.is_some() || self.reframe.is_some() || self.rescaled
     }
 
     /// The chained ENGINE sentence for the CLI / HTTP surfaces. The GUI has
@@ -2791,13 +2797,17 @@ fn turn_raster_file(
 /// order — the load-time migration funnel. Order is not arbitrary: the repair
 /// reads the photo's PIXELS (decode + neutral develop) while the reframe reads
 /// only its metadata, and the repair's early-out is the cheaper of the two.
+///
+/// The mask white-balance scale goes first (2026-11-19): it reads nothing but
+/// the recipe, so it cannot fail and never waits on the photo.
 pub fn migrate_loaded_recipe(raw: &Path, r: &mut EditRecipe) -> LoadMigration {
+    let rescaled = r.convert_legacy_mask_wb();
     let relook = repair_pre_era_base_curve(raw, r);
     let (reframe, reframe_error) = match migrate_recipe_coord_frame(raw, r) {
         Ok(c) => (c, None),
         Err(e) => (None, Some(e.to_string())),
     };
-    LoadMigration { relook, reframe, reframe_error }
+    LoadMigration { relook, reframe, reframe_error, rescaled }
 }
 
 /// The photo's saved recipe (central store first, then legacy), parsed once —
@@ -2820,6 +2830,12 @@ fn saved_recipe_snapshot(raw: &Path, d: &crate::diag::Diag) -> Option<EditRecipe
         if let Ok(text) = crate::store::read_text_capped(&p, crate::store::MAX_STORE_JSON)
             && let Ok(mut r) = serde_json::from_str::<EditRecipe>(&text)
         {
+            // …and the mask white-balance scale (2026-11-19), in the same
+            // funnel: today's callers read only the calibration halves off
+            // this snapshot, but it is the WHOLE recipe that is handed over,
+            // so its masks' Temp and Tint leave here on this build's scale
+            // like every other read of the file.
+            r.convert_legacy_mask_wb();
             if let Some(note) = repair_pre_era_base_curve_in(raw, &mut r, d) {
                 d.warn(note);
             }
@@ -4320,11 +4336,20 @@ pub fn saved_develop_for_xmp_export(raw: &Path) -> Result<EditRecipe> {
             crate::store::resolve_mask_paths(&mut r, base);
         }
         migrate_recipe_coord_frame(raw, &mut r)?;
+        // The mask white-balance scale, like the frame: an older build's
+        // recipe.json is carried over before it is exported, so the document
+        // states the numbers this build's sliders show for that develop —
+        // smaller than the ones the older build would have written for it.
+        r.convert_legacy_mask_wb();
         r
     } else if let Some(err) = &snap.recipe_err {
         anyhow::bail!("the saved develop cannot be read ({err})");
     } else if let Some((text, _)) = &snap.store_xmp {
-        xmp::xmp_to_recipe_for_photo(text, raw)
+        let mut r = xmp::xmp_to_recipe_for_photo(text, raw);
+        // The store's own .xmp is an older build's save, not a sidecar
+        // handed over (`EditRecipe::convert_mask_wb_saved_as_xmp`).
+        r.convert_mask_wb_saved_as_xmp();
+        r
     } else {
         anyhow::bail!("{nothing}");
     };
@@ -7541,6 +7566,84 @@ mod tests {
             .expect("the store still answers");
         assert_eq!(kept.exposure_ev, 0.5);
         assert!(collector.take().is_empty(), "nothing to say about a file the store never reads");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// 2026-11-19: a recipe.json from v1.18.3 or earlier leaves each of this
+    /// module's doors with its mask Temp and Tint carried onto this build's
+    /// scale — the calibration snapshot, the load funnel the web serves
+    /// through, and the export door — and none of them rewrites the file it
+    /// read. The other side of the rule rides along: a sidecar the user
+    /// imports is the slider's own numbers and is NOT carried over, whether
+    /// Lightroom wrote it or an older AutoShade did.
+    ///
+    /// MUTATION THIS CATCHES: the carry-over dropped from any one of the
+    /// three doors (that door hands Temp 48 on, about twice as strong as
+    /// saved), the export door writing the older build's number for a develop
+    /// whose slider now reads 25.6, or the import door converting a sidecar.
+    #[test]
+    fn an_older_builds_saved_recipe_leaves_every_door_on_this_builds_mask_scale() {
+        use crate::recipe::{is_v1_18_3_mask_wb_carried_over, MASK_WB_ERA, V1_18_3_MASK_WB};
+        let dir = std::env::temp_dir().join(format!("autoshade-pipeline-test-mask-wb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_pipe_mask_wb.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = crate::store::develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(crate::store::recipe_target(&raw), V1_18_3_MASK_WB).unwrap();
+
+        let snapshot = saved_recipe_snapshot(&raw, &crate::diag::photo(&raw)).expect("the store answers");
+        assert!(is_v1_18_3_mask_wb_carried_over(&snapshot), "the calibration snapshot: {:?}", snapshot.masks);
+
+        let mut loaded: EditRecipe = serde_json::from_str(V1_18_3_MASK_WB).unwrap();
+        let first = migrate_loaded_recipe(&raw, &mut loaded);
+        assert!(first.rescaled && first.any(), "the load funnel reports the change");
+        assert_eq!(first.note(), None, "the picture is what it was: there is nothing to disclose");
+        assert!(is_v1_18_3_mask_wb_carried_over(&loaded), "the load funnel: {:?}", loaded.masks);
+        let second = migrate_loaded_recipe(&raw, &mut loaded);
+        assert!(!second.rescaled && !second.any(), "…once");
+        assert!(is_v1_18_3_mask_wb_carried_over(&loaded));
+
+        let exported = saved_develop_for_xmp_export(&raw).expect("a saved develop exports");
+        assert!(is_v1_18_3_mask_wb_carried_over(&exported), "the export door: {:?}", exported.masks);
+        // The document carries the slider's number as this build shows it.
+        let document = crate::xmp::recipe_to_xmp(&exported);
+        let read_back = crate::xmp::xmp_to_recipe(&document);
+        assert!(is_v1_18_3_mask_wb_carried_over(&read_back), "{:?}", read_back.masks);
+
+        assert_eq!(
+            std::fs::read_to_string(crate::store::recipe_target(&raw)).unwrap(),
+            V1_18_3_MASK_WB,
+            "no door rewrites the file it read"
+        );
+
+        // Saved by this build, then read again: every door finds it stamped.
+        std::fs::write(crate::store::recipe_target(&raw), serde_json::to_string(&exported).unwrap()).unwrap();
+        let reread = saved_recipe_snapshot(&raw, &crate::diag::photo(&raw)).expect("the store answers");
+        assert!(is_v1_18_3_mask_wb_carried_over(&reread), "a saved recipe is not carried over twice");
+        assert!(is_v1_18_3_mask_wb_carried_over(&saved_develop_for_xmp_export(&raw).unwrap()));
+
+        // A SIDECAR the user imports is not a saved recipe: its Temp and Tint
+        // are taken as they stand. Lightroom's own document (no payload)…
+        let wb = |r: &EditRecipe| (r.masks[0].temperature.round(), r.masks[0].tint.round(), r.mask_wb_era);
+        let slider = EditRecipe {
+            masks: vec![crate::recipe::LocalAdjustment { temperature: 48.0, tint: -20.0, ..Default::default() }],
+            ..Default::default()
+        };
+        let lightrooms = crate::xmp::bare_document(&slider, None);
+        assert!(!lightrooms.contains("asr:Recipe="), "premise: no AutoShade payload");
+        assert_eq!(wb(&import_xmp(&raw, &lightrooms, crate::diag::silent()).recipe), (48.0, -20.0, MASK_WB_ERA));
+        // …and one an older AutoShade exported, whose payload names no scale
+        // (`xmp::payload`'s own test pins that the payload is read as such).
+        let mut older = slider.clone();
+        older.mask_wb_era = 0;
+        let older_export = crate::xmp::recipe_to_xmp(&older);
+        assert!(older_export.contains("asr:Recipe="), "premise: the document carries the develop itself");
+        assert_eq!(wb(&import_xmp(&raw, &older_export, crate::diag::silent()).recipe), (48.0, -20.0, MASK_WB_ERA));
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);

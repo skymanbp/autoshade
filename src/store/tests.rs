@@ -4072,3 +4072,87 @@ fn a_test_build_never_resolves_the_per_user_store() {
         }
     }
 }
+
+/// A background card saved by v1.18.3 or earlier states its mask Temp and
+/// Tint on that build's weaker scale (2026-11-19). The strip's one reader
+/// carries it over, so the live strip, the mirror the desktop app compares it
+/// against and the read-modify-write all hold one scale — in memory: the file
+/// is not rewritten by being read, and once a save has written it the next
+/// read finds it stamped and moves nothing.
+///
+/// MUTATION THIS CATCHES: the carry-over dropped from `read_variants_checked`
+/// (the card comes back at Temp 48, about twice as strong as it was saved),
+/// the read rewriting the file, or a second carry-over after the save (the
+/// re-read card lands on 13.65).
+#[test]
+fn a_strip_card_from_an_older_build_is_carried_over_once() {
+    let (dir, raw, dev) = commit_fixture("mask-wb-strip");
+    let file = format!(
+        r#"{{"v":1,"active_kind":"original","active_pos":0,"others":[{{"kind":"fitted","recipe":{}}}]}}"#,
+        crate::recipe::V1_18_3_MASK_WB
+    );
+    std::fs::write(variants_path(&raw), &file).unwrap();
+    let VariantsRead::Strip(read) = read_variants_checked(&raw) else {
+        panic!("an older build's strip must read");
+    };
+    let card = &read.others[0].recipe;
+    assert!(crate::recipe::is_v1_18_3_mask_wb_carried_over(card), "{:?}", card.masks);
+    assert_eq!(
+        std::fs::read_to_string(variants_path(&raw)).unwrap(),
+        file,
+        "reading the strip must not rewrite it"
+    );
+    // Saved, then read again: the card is what was saved.
+    write_variants(&raw, &read).unwrap();
+    let on_disk: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(variants_path(&raw)).unwrap()).unwrap();
+    assert_eq!(
+        on_disk["others"][0]["recipe"]["mask_wb_era"],
+        crate::recipe::MASK_WB_ERA,
+        "the saved strip states its scale: {on_disk}"
+    );
+    let VariantsRead::Strip(again) = read_variants_checked(&raw) else {
+        panic!("the saved strip must read back");
+    };
+    assert_eq!(again.others[0].recipe, *card, "a saved card reads back as it was saved");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dev);
+}
+
+/// The backup gate compares the save on disk with the recipe about to replace
+/// it, and that recipe has already been carried onto this build's mask
+/// white-balance scale by whichever reader opened it. An older build's file
+/// is compared as that reader would hand it over — so opening such a photo
+/// and saving it untouched makes no version — while a version the gate DOES
+/// write is the file exactly as the older build wrote it.
+///
+/// MUTATION THIS CATCHES: the comparison copy left unconverted (every photo
+/// with a mask Temp or Tint snapshots itself on its first save under this
+/// build), or the conversion applied to the snapshot too (the version states
+/// the new numbers under the old, unstamped scale and is halved again on load).
+#[test]
+fn an_older_builds_save_saved_untouched_makes_no_version() {
+    let (dir, raw, dev) = commit_fixture("mask-wb-gate");
+    std::fs::write(recipe_target(&raw), crate::recipe::V1_18_3_MASK_WB).unwrap();
+    let mut opened: EditRecipe = serde_json::from_str(crate::recipe::V1_18_3_MASK_WB).unwrap();
+    assert!(opened.convert_legacy_mask_wb(), "premise: the reader moved the numbers");
+    assert_eq!(backup_saved_develop(&raw, Some(&opened)).unwrap(), None, "the same develop needs no version");
+    assert!(list_versions(&raw).is_empty());
+    assert_eq!(
+        std::fs::read_to_string(recipe_target(&raw)).unwrap(),
+        crate::recipe::V1_18_3_MASK_WB,
+        "the gate reads the save and never rewrites it"
+    );
+    // A real change is preserved, as the older build wrote it.
+    let edited = EditRecipe { contrast: 9.0, ..opened.clone() };
+    let n = backup_saved_develop(&raw, Some(&edited)).unwrap().expect("a replaced save is preserved");
+    let snapshot = std::fs::read_to_string(version_target(&raw, n)).unwrap();
+    assert!(!snapshot.contains("mask_wb_era"), "the snapshot keeps the older build's silence: {snapshot}");
+    let mut version: EditRecipe = serde_json::from_str(&snapshot).unwrap();
+    assert_eq!((version.masks[0].temperature, version.masks[0].tint), (48.0, -20.0), "…and its numbers");
+    // …which is what lets the version's own reader carry it over, once.
+    assert!(version.convert_legacy_mask_wb());
+    assert_eq!(version, opened, "loaded, the version is the develop that was open");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dev);
+}

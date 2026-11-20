@@ -1041,16 +1041,31 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
         // render funnels instead would have turned browser-authored geometry.
         // Re-serialised only when a migration actually fired; an untouched
         // recipe still goes out byte-for-byte, forward-schema fields and all.
-        if let Ok(mut r) = serde_json::from_str::<EditRecipe>(&text)
-            && let Some(note) = crate::pipeline::migrate_loaded_recipe(raw, &mut r).note()
-            && let Ok(fixed) = serde_json::to_string(&r)
-        {
+        //
+        // "Fired" is `any()` as well as "has a sentence" (2026-11-19): a mask
+        // Temp or Tint carried over from an older build's scale changes the
+        // recipe's NUMBERS and its stamp while the picture stays what it was,
+        // so there is nothing to say and everything to serve — a page handed
+        // the old numbers would post them back as its own, and a body is
+        // read on this build's scale (`body_recipe`).
+        let migrated = serde_json::from_str::<EditRecipe>(&text).ok().and_then(|mut r| {
+            let migration = crate::pipeline::migrate_loaded_recipe(raw, &mut r);
+            // A reframe that FAILED changed nothing and still has a sentence
+            // (the geometry is off the picture), so the sentence alone keeps
+            // deciding too, as it did before `any()` joined it.
+            let note = migration.note();
+            if !migration.any() && note.is_none() {
+                return None;
+            }
+            Some((serde_json::to_string(&r).ok()?, note))
+        });
+        if let Some((fixed, note)) = migrated {
             // SAID, not just done: the photo renders differently than it did
             // yesterday, and the GUI tells its user exactly that. The client
             // already surfaces this header for corrupt-recipe fallbacks.
             // ASCII by construction — it travels in an HTTP header.
             let mut resp = json_text(fixed);
-            if let Some(h) = header("X-Recipe-Warning", &note) {
+            if let Some(h) = note.and_then(|note| header("X-Recipe-Warning", &note)) {
                 resp.add_header(h);
             }
             // The accumulated warning rides EVERY answer shape (review
@@ -1108,6 +1123,10 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
         {
             let diag = crate::diag::photo(raw);
             let mut r = crate::xmp::xmp_to_recipe_with_diag(&text, &diag);
+            // The store's own .xmp is an older build's SAVE, not a sidecar
+            // handed over: its mask Temp and Tint are that build's numbers
+            // (`EditRecipe::convert_mask_wb_saved_as_xmp`, the GUI's rule).
+            r.convert_mask_wb_saved_as_xmp();
             // First consulted file wins the disclosure slot (GUI accumulates
             // the same way) — set regardless of noop-ness.
             if xmp_warn.is_none() {
@@ -1406,11 +1425,27 @@ where
 /// v1.5.0 every body was stamped current, which made a v1.4 recipe (era 1)
 /// saved from the browser own the parametric keys at their defaults: the
 /// merge stripped the photographer's own Lightroom curve from the sidecar.
+///
+/// The MASK WHITE-BALANCE era ([`crate::recipe::MASK_WB_ERA`], 2026-11-19)
+/// follows the same split. Silence is the page's own, and the page's numbers
+/// are this build's: `/api/recipe` carries an older build's mask Temp and
+/// Tint over BEFORE it serves them (`pipeline::migrate_loaded_recipe`), and a
+/// file it serves untouched and unstamped holds no such number, so a mask
+/// Temp the page then sets is set on this build's scale. Unlike `schema_era`
+/// the page never states `0` for a silent file — that would hand those new
+/// numbers back as old ones. A body that DOES state an era is a client
+/// carrying a file's own numbers, and they are converted like the file's.
 fn body_recipe(body: serde_json::Value) -> std::result::Result<EditRecipe, serde_json::Error> {
     let states_era = body.get("schema_era").is_some();
+    let states_mask_wb = body.get("mask_wb_era").is_some();
     let mut r = EditRecipe::deserialize(body)?;
     if !states_era {
         r.schema_era = crate::recipe::SCHEMA_ERA;
+    }
+    if states_mask_wb {
+        r.convert_legacy_mask_wb();
+    } else {
+        r.mask_wb_era = crate::recipe::MASK_WB_ERA;
     }
     Ok(r)
 }
@@ -3744,6 +3779,117 @@ mod tests {
         // Assembled so this test cannot match itself.
         let legacy = concat!("if (!(\"schema_era\" in loaded)) loaded", ".schema_era = 0;");
         assert!(INDEX_HTML.contains(legacy), "the page must state a legacy file's era");
+    }
+
+    /// 2026-11-19: the scale a request body's mask Temp and Tint are on. A
+    /// body that states none is the page's own, set on this build's sliders —
+    /// stamped, never converted. A body that states an older scale is a
+    /// client carrying a file's numbers, and they are carried over like the
+    /// file's. On the save, the preview and the refine base alike.
+    ///
+    /// MUTATION THIS CATCHES: `body_recipe` converting a silent body (every
+    /// mask Temp the page sets is weakened to 8/15 on its way to the render),
+    /// leaving a silent body unstamped (it is saved as an older build's file
+    /// and weakened on the next read), or the page learning to state a silent
+    /// file as legacy the way it does for `schema_era`.
+    #[test]
+    fn a_bodys_mask_white_balance_is_this_builds_unless_it_states_an_older_scale() {
+        use crate::recipe::MASK_WB_ERA;
+        let mask = r#""masks":[{"name":"sky","temperature":48.0,"tint":-20.0}]"#;
+        let wb = |r: &EditRecipe| (r.masks[0].temperature, r.masks[0].tint, r.mask_wb_era);
+        let save = |recipe: String| {
+            serde_json::from_str::<SaveReq>(&format!(r#"{{"id":0,"recipe":{recipe}}}"#)).expect("a save body").recipe
+        };
+        assert_eq!(wb(&save(format!("{{{mask}}}"))), (48.0, -20.0, MASK_WB_ERA), "silent: the page's own numbers");
+        assert_eq!(
+            wb(&save(format!(r#"{{"mask_wb_era":{MASK_WB_ERA},{mask}}}"#))),
+            (48.0, -20.0, MASK_WB_ERA),
+            "stated current: as it stands"
+        );
+        let carried = save(format!(r#"{{"mask_wb_era":0,{mask}}}"#));
+        assert!(
+            (carried.masks[0].temperature - 25.6).abs() < 1e-4 && carried.masks[0].tint == -10.0,
+            "stated older: carried over like the file it came from: {:?}",
+            wb(&carried)
+        );
+        assert_eq!(carried.mask_wb_era, MASK_WB_ERA);
+        let develop = serde_json::from_str::<DevelopReq>(&format!(r#"{{"id":0,"recipe":{{{mask}}}}}"#))
+            .expect("a develop body")
+            .recipe;
+        assert_eq!(wb(&develop), (48.0, -20.0, MASK_WB_ERA), "the preview renders what the slider says");
+        let base = serde_json::from_str::<AnalyzeReq>(&format!(r#"{{"id":0,"base":{{{mask}}}}}"#))
+            .expect("an analyze body")
+            .base
+            .expect("a refine base");
+        assert_eq!(wb(&base), (48.0, -20.0, MASK_WB_ERA), "…and a refine starts from it");
+        // Assembled so this test cannot match itself.
+        assert!(
+            !INDEX_HTML.contains(concat!("mask_wb", "_era")),
+            "the page must not restate the scale: a file it was served untouched holds no mask white \
+             balance, and one that did was carried over before it was served"
+        );
+    }
+
+    /// 2026-11-19: `/api/recipe` is the one place the web reads a recipe FILE,
+    /// so it is where an older build's mask Temp and Tint are carried onto
+    /// this build's scale — before the page gets a copy, stamped so the page's
+    /// post-back is not carried over a second time, and without rewriting the
+    /// file that was read.
+    ///
+    /// MUTATION THIS CATCHES: the re-serialise gated on the disclosure
+    /// sentence alone again (the file goes out verbatim, the page posts Temp
+    /// 48 back as its own and the save renders it about twice as strong), or
+    /// the carry-over dropped from `pipeline::migrate_loaded_recipe`.
+    #[test]
+    fn an_older_builds_recipe_is_served_on_this_builds_mask_scale() {
+        use crate::recipe::{is_v1_18_3_mask_wb_carried_over, V1_18_3_MASK_WB};
+        let (dir, raw, state) = one_photo_state("mask-wb-served", "_serve_mask_wb.arw");
+        let dev = crate::store::develop_dir(&raw);
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(crate::store::recipe_target(&raw), V1_18_3_MASK_WB).unwrap();
+
+        let (_s, request, client) = loopback_request(get("/api/recipe?id=0"));
+        let body = body_of(api_recipe(&request, &state).expect("the saved recipe answers"));
+        drop(request);
+        client.join().unwrap();
+        let served: EditRecipe = serde_json::from_slice(&body).expect("the body is the recipe");
+        assert!(is_v1_18_3_mask_wb_carried_over(&served), "{}", String::from_utf8_lossy(&body));
+        assert_eq!(
+            std::fs::read_to_string(crate::store::recipe_target(&raw)).unwrap(),
+            V1_18_3_MASK_WB,
+            "serving the recipe must not rewrite the file"
+        );
+        // The page posts the object it was served back whole: the save lands
+        // on the numbers that were served, not on a second carry-over.
+        let posted = serde_json::from_str::<SaveReq>(&format!(
+            r#"{{"id":0,"recipe":{}}}"#,
+            String::from_utf8(body).unwrap()
+        ))
+        .expect("the served recipe is a valid save body")
+        .recipe;
+        assert!(is_v1_18_3_mask_wb_carried_over(&posted), "{:?}", posted.masks);
+
+        // The store's own .xmp — an older build's save with no recipe.json —
+        // answers on this build's scale too. The document is built as that
+        // build built it: its payload names no `mask_wb_era`.
+        std::fs::remove_file(crate::store::recipe_target(&raw)).unwrap();
+        let old: EditRecipe = serde_json::from_str(V1_18_3_MASK_WB).unwrap();
+        assert_eq!(old.mask_wb_era, 0, "premise: the older build's recipe");
+        std::fs::write(pipeline::xmp_target(&raw), crate::xmp::recipe_to_xmp(&old)).unwrap();
+        let (_s, request, client) = loopback_request(get("/api/recipe?id=0"));
+        let body = body_of(api_recipe(&request, &state).expect("the stored .xmp answers"));
+        drop(request);
+        client.join().unwrap();
+        let served: EditRecipe = serde_json::from_slice(&body).expect("the body is the recipe");
+        assert!(
+            (served.masks[0].temperature - 25.6).abs() < 1e-3 && (served.masks[0].tint + 10.0).abs() < 1e-3,
+            "{:?}",
+            served.masks[0]
+        );
+        assert_eq!(served.mask_wb_era, crate::recipe::MASK_WB_ERA);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
     }
 
     /// L04-7: the warning header must SURVIVE its worst real payloads — the

@@ -521,6 +521,9 @@ pub(crate) fn calibration_recipe(root: &std::path::Path) -> crate::recipe::EditR
         .expect("calibration fitted.recipe.json");
     let mut recipe: crate::recipe::EditRecipe =
         serde_json::from_str(&text).expect("saved calibration recipe");
+    // A saved develop like any other: one an older build wrote states its
+    // masks' Temp and Tint on that build's scale (2026-11-19).
+    recipe.convert_legacy_mask_wb();
     for mask in &mut recipe.masks {
         for path in mask.bitmap_paths_mut() {
             let Some(name) = std::path::Path::new(path.as_str()).file_name() else { continue };

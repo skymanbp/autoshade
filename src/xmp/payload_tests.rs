@@ -1191,3 +1191,52 @@ fn a_switched_off_profile_says_off_and_no_profile_leaves_the_documents_switch() 
     assert!(kept.contains("crs:LensProfileEnable=\"1\""), "a recipe with no profile does not touch the switch: {kept}");
     assert!(!recipe_to_xmp(&bare).contains("LensProfileEnable"));
 }
+
+/// 2026-11-19: a sidecar's mask Temp and Tint are the slider's own numbers,
+/// taken as they stand whichever build wrote the file — on the `crs:` keys,
+/// and on the payload's copy of the same two numbers. A payload from v1.18.3
+/// or earlier names no `mask_wb_era`; the restored recipe is stamped with
+/// this build's all the same, so the import is not mistaken for an older
+/// build's SAVE the next time its recipe file is read.
+///
+/// MUTATION THIS CATCHES: the stamp dropped from `restore` (the import reads
+/// Temp 48 now and 25.6 once it has been saved and reopened — one import, two
+/// pictures), or a conversion added to the sidecar's numbers.
+#[test]
+fn a_sidecars_mask_white_balance_is_taken_as_it_stands_whoever_wrote_it() {
+    use crate::recipe::MASK_WB_ERA;
+    let slider = EditRecipe {
+        masks: vec![crate::recipe::LocalAdjustment {
+            name: "sky".into(),
+            mask: linear(0.2, 0.8),
+            amount: 1.0,
+            temperature: 48.0,
+            tint: -20.0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let wb = |r: &EditRecipe| (r.masks[0].temperature, r.masks[0].tint, r.mask_wb_era);
+    // This build's own document.
+    assert_eq!(wb(&xmp_to_recipe(&recipe_to_xmp(&slider))), (48.0, -20.0, MASK_WB_ERA));
+    // An older build's: the payload is that build's recipe, silent about the scale.
+    let mut older = slider.clone();
+    older.mask_wb_era = 0;
+    let doc = recipe_to_xmp(&older);
+    let found = payload::find(&doc).expect("a payload").expect("decodes");
+    assert_eq!(found.recipe.mask_wb_era, 0, "premise: the payload names no scale");
+    let imported = xmp_to_recipe(&doc);
+    assert_eq!(wb(&imported), (48.0, -20.0, MASK_WB_ERA), "taken as it stands, and stamped");
+    // The `crs:` settings alone — Lightroom's own file, or a rewrite that lost the payload.
+    let crs_only = xmp_to_recipe(&strip_attrs(&doc, |a| a == "xmlns:asr" || a.starts_with("asr:")));
+    assert!(
+        (crs_only.masks[0].temperature - 48.0).abs() < 1e-3 && (crs_only.masks[0].tint + 20.0).abs() < 1e-3,
+        "{:?}",
+        crs_only.masks[0]
+    );
+    assert_eq!(crs_only.mask_wb_era, MASK_WB_ERA);
+    // Saved as a recipe file and read back, the import is still what was imported.
+    let mut reread: EditRecipe = serde_json::from_str(&serde_json::to_string(&imported).unwrap()).unwrap();
+    assert!(!reread.convert_legacy_mask_wb(), "an import is not an older build's save");
+    assert_eq!(reread, imported);
+}

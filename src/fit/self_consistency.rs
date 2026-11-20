@@ -382,6 +382,8 @@ fn the_preview_of_a_finished_recipe_against_its_resampled_export() {
         let (raw, recipe_path) = (std::path::Path::new(raw), std::path::Path::new(recipe_path));
         let mut finished: EditRecipe =
             serde_json::from_str(&std::fs::read_to_string(recipe_path).expect("recipe")).expect("recipe json");
+        // A saved recipe file: an older build's mask Temp and Tint are on its scale (2026-11-19).
+        finished.convert_legacy_mask_wb();
         let dir = recipe_path.parent().expect("recipe dir");
         for mask in &mut finished.masks {
             for path in mask.bitmap_paths_mut() {
@@ -428,6 +430,8 @@ fn the_joint_objective_of_finished_global_recipes() {
         let raw = std::path::Path::new(raw);
         let mut global: EditRecipe =
             serde_json::from_str(&std::fs::read_to_string(recipe_path).expect("recipe")).expect("recipe json");
+        // A saved recipe file: an older build's mask Temp and Tint are on its scale (2026-11-19).
+        global.convert_legacy_mask_wb();
         let keep_local = crate::config::live_env_os("AUTOSHADE_JOINT_KEEP_LOCAL").is_some();
         if keep_local {
             let dir = std::path::Path::new(recipe_path).parent().expect("recipe dir");

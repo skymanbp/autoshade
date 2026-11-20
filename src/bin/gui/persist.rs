@@ -144,6 +144,12 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         any = true;
         match serde_json::from_str::<EditRecipe>(&text) {
             Ok(mut r) => {
+                // A recipe.json an older build saved states its masks' Temp
+                // and Tint on that build's weaker scale (2026-11-19): carried
+                // onto this one here, where the file becomes the canvas, so
+                // the photo opens rendering what it rendered when it was
+                // saved. In memory — the file changes on the next save.
+                r.convert_legacy_mask_wb();
                 if !r.is_noop() {
                     clamp_dropped.absorb(r.clamp());
                     // Store recipes reference rasters by bare file name —
@@ -221,6 +227,10 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         let diag = autoshade::diag::photo(src);
         let (mut r, imported_clamp) =
             autoshade::xmp::xmp_to_recipe_clamped_with_diag(&text, &diag);
+        // The .xmp an older build kept in the store is that build's SAVE, not
+        // a sidecar handed over: its mask Temp and Tint are converted like a
+        // recipe.json's (`EditRecipe::convert_mask_wb_saved_as_xmp`).
+        r.convert_mask_wb_saved_as_xmp();
         // Accumulated regardless of noop-ness — see the accumulator's
         // contract above.
         for k in autoshade::xmp::unparsable_crs_numbers(&text) {

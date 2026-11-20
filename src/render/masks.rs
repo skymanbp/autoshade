@@ -176,7 +176,11 @@ pub(super) fn apply_masks(
         // then compile the exact linear-light formula into channel LUTs.
         // None when neutral, so tone-only masks pay no colour-stage cost.
         let local_wb = m.temperature != 0.0 || m.tint != 0.0;
-        let local_wb_gains = if local_wb { wb_gains(5500.0, local_temp_to_kelvin(m.temperature), m.tint) } else { [1.0; 3] };
+        let local_wb_gains = if local_wb {
+            wb_gains(5500.0, local_temp_to_kelvin(m.temperature), local_tint_to_engine(m.tint))
+        } else {
+            [1.0; 3]
+        };
         let colour_luts =
             (local_wb || m.color_gains.is_some()).then(|| {
                 let g = local_wb_gains;

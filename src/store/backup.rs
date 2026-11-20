@@ -100,6 +100,13 @@ fn backup_store_half_unlocked(
         if let Some(base) = rj.parent() {
             resolve_mask_paths(&mut existing, base);
         }
+        // …and `incoming` is a recipe a reader has already carried onto this
+        // build's mask white-balance scale (2026-11-19), while an older
+        // build's file still states the old numbers: compared as the same
+        // reader would hand it over, or opening such a photo and saving it
+        // untouched would snapshot itself. Only this COPY is converted — the
+        // snapshot below is written from the file as it stands.
+        existing.convert_legacy_mask_wb();
         if existing == *inc {
             return Ok(None); // rewriting the same content needs no snapshot
         }
@@ -304,6 +311,12 @@ fn snapshot_xmp_text(src: &Path, text: String) -> std::io::Result<Option<u32>> {
     }
     let diag = crate::diag::photo(src);
     let mut derived = crate::xmp::xmp_to_recipe_with_diag(&text, &diag);
+    // The document is an older build's save (nothing has written the store's
+    // .xmp since 2026-11-18), so its mask Temp and Tint are that build's
+    // numbers: the derived recipe states them on this build's scale, as every
+    // reader of that .xmp does (`EditRecipe::convert_mask_wb_saved_as_xmp`),
+    // and a version loaded from it renders what the save rendered.
+    derived.convert_mask_wb_saved_as_xmp();
     // A6 disclosure: numbers the import cannot read become silent neutrals
     // in this derived snapshot. Background path — the trace goes to stderr;
     // the interactive surfaces disclose the same fact at restore time.

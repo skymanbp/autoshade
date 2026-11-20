@@ -454,6 +454,87 @@
         );
     }
 
+    /// 2026-11-19: a develop saved by v1.18.3 or earlier states its masks'
+    /// Temp and Tint on that build's weaker scale. Every door the desktop app
+    /// reads a saved develop through carries them onto this build's — the
+    /// open path, its batch twin, the version loader, and the store's own
+    /// .xmp where an older build saved only that — so the photo looks as it
+    /// was saved; none of them rewrites the file it read, and a develop this
+    /// build has saved is not carried over a second time.
+    ///
+    /// MUTATION THIS CATCHES: the carry-over dropped from any one door (that
+    /// door hands Temp 48 on, about twice as strong as saved, and the batch
+    /// export stops matching what opening the photo shows), or applied to a
+    /// develop that already states this build's scale (25.6 becomes 13.65
+    /// after one save and reopen).
+    #[test]
+    fn an_older_builds_saved_develop_opens_on_this_builds_mask_scale() {
+        let dir = std::env::temp_dir().join(format!("autoshade-gui-mask-wb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("_gui_mask_wb.ARW");
+        std::fs::write(&src, b"raw").unwrap();
+        let dev = autoshade::store::develop_dir(&src);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let _scrub = Scrub(vec![dir.clone(), dev.clone()]);
+        // The file as v1.18.3 wrote it: every era key that build knew, no `mask_wb_era`.
+        let older = r#"{"version":3,"coord_era":2,"schema_era":2,"contrast":7.0,"masks":[{"name":"sky","temperature":48.0,"tint":-20.0}]}"#;
+        let carried = |r: &EditRecipe| {
+            r.mask_wb_era == autoshade::recipe::MASK_WB_ERA
+                && r.masks.len() == 1
+                && (r.masks[0].temperature - 25.6).abs() < 1e-3
+                && (r.masks[0].tint + 10.0).abs() < 1e-3
+        };
+        let batch = |src: &std::path::Path| {
+            let snap = autoshade::store::read_develop_snapshot(src).unwrap();
+            crate::export::resolve_snapshot_develop(src, &snap, &mut Vec::new())
+                .unwrap()
+                .expect("the saved develop resolves for the batch")
+        };
+        let rj = autoshade::store::recipe_target(&src);
+
+        // recipe.json: the open path and its batch twin.
+        std::fs::write(&rj, older).unwrap();
+        let SavedDevelop::Restored(open, kind) = read_saved_develop(&src).saved else {
+            panic!("the saved develop restores");
+        };
+        assert_eq!(kind, "recipe.json");
+        assert!(carried(&open), "the open path: {:?}", open.masks);
+        assert!(carried(&batch(&src).0), "the batch twin");
+        assert_eq!(std::fs::read_to_string(&rj).unwrap(), older, "opening must not rewrite the save");
+
+        // A version the older build took, through the real loader.
+        let v1 = autoshade::store::version_target(&src, 1);
+        std::fs::write(&v1, older).unwrap();
+        let mut app = AutoShadeApp { src_path: Some(src.clone()), ..Default::default() };
+        app.load_version(1);
+        assert!(carried(&app.recipe), "the version loader: {:?} ({})", app.recipe.masks, app.status);
+        assert_eq!(std::fs::read_to_string(&v1).unwrap(), older, "loading a version must not rewrite it");
+
+        // Saved by this build, then opened again: nothing moves a second time.
+        std::fs::write(&rj, serde_json::to_string(&open).unwrap()).unwrap();
+        let SavedDevelop::Restored(again, _) = read_saved_develop(&src).saved else {
+            panic!("this build's save restores");
+        };
+        assert!(carried(&again), "a saved develop is carried over once: {:?}", again.masks);
+        assert_eq!(again.masks, open.masks);
+        assert!(carried(&batch(&src).0));
+
+        // The store's own .xmp where an older build saved only that. Built as
+        // that build built it: the document's payload names no `mask_wb_era`.
+        std::fs::remove_file(&rj).unwrap();
+        let old: EditRecipe = serde_json::from_str(older).unwrap();
+        assert_eq!(old.mask_wb_era, 0, "premise: the older build's recipe");
+        std::fs::write(autoshade::store::xmp_target(&src), autoshade::xmp::recipe_to_xmp(&old)).unwrap();
+        let SavedDevelop::Restored(from_xmp, kind) = read_saved_develop(&src).saved else {
+            panic!("the stored .xmp restores");
+        };
+        assert_eq!(kind, "XMP");
+        assert!(carried(&from_xmp), "the stored .xmp: {:?}", from_xmp.masks);
+        assert!(carried(&batch(&src).0), "…and its batch twin");
+    }
+
     /// The reopen note's claim is about the WHOLE saved develop, so it must
     /// be decided from the whole store. Deciding it from the active card
     /// alone reported "holds no effective edits" on photos whose saved work

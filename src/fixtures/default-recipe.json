@@ -2,6 +2,7 @@
   "version": 3,
   "coord_era": 2,
   "schema_era": 2,
+  "mask_wb_era": 1,
   "exposure_ev": 0.0,
   "contrast": 0.0,
   "highlights": 0.0,
