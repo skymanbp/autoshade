@@ -418,11 +418,16 @@ fn rasters_are_placed_beside_the_develop_on_a_disclosing_read_and_never_on_a_sil
 /// crafted or foreign sidecar puts a relative or share path in front of the
 /// reader.
 fn with_payload_recipe(doc: &str, r: &EditRecipe) -> String {
+    with_payload_json(doc, &serde_json::to_vec(r).unwrap())
+}
+
+/// `doc` with its payload's JSON swapped for `json` byte for byte and the
+/// checksum stamped over it — for a spelling no serialiser of ours produces.
+fn with_payload_json(doc: &str, json: &[u8]) -> String {
     use base64::Engine as _;
     use std::io::Write as _;
-    let json = serde_json::to_vec(r).unwrap();
     let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
-    z.write_all(&json).unwrap();
+    z.write_all(json).unwrap();
     let packed = base64::engine::general_purpose::STANDARD.encode(z.finish().unwrap());
     let recipe = payload::simple_property(doc, "asr", "Recipe").unwrap();
     let crc = payload::simple_property(doc, "asr", "RecipeCrc32").unwrap();
@@ -430,7 +435,7 @@ fn with_payload_recipe(doc: &str, r: &EditRecipe) -> String {
         .replacen(&format!("asr:Recipe=\"{recipe}\""), &format!("asr:Recipe=\"{packed}\""), 1)
         .replacen(
             &format!("asr:RecipeCrc32=\"{crc}\""),
-            &format!("asr:RecipeCrc32=\"{:08x}\"", crc32fast::hash(&json)),
+            &format!("asr:RecipeCrc32=\"{:08x}\"", crc32fast::hash(json)),
             1,
         );
     assert_ne!(out, doc, "the swap landed");
@@ -1192,51 +1197,298 @@ fn a_switched_off_profile_says_off_and_no_profile_leaves_the_documents_switch() 
     assert!(!recipe_to_xmp(&bare).contains("LensProfileEnable"));
 }
 
-/// 2026-11-19: a sidecar's mask Temp and Tint are the slider's own numbers,
-/// taken as they stand whichever build wrote the file — on the `crs:` keys,
-/// and on the payload's copy of the same two numbers. A payload from v1.18.3
-/// or earlier names no `mask_wb_era`; the restored recipe is stamped with
-/// this build's all the same, so the import is not mistaken for an older
-/// build's SAVE the next time its recipe file is read.
-///
-/// MUTATION THIS CATCHES: the stamp dropped from `restore` (the import reads
-/// Temp 48 now and 25.6 once it has been saved and reopened — one import, two
-/// pictures), or a conversion added to the sidecar's numbers.
-#[test]
-fn a_sidecars_mask_white_balance_is_taken_as_it_stands_whoever_wrote_it() {
-    use crate::recipe::MASK_WB_ERA;
-    let slider = EditRecipe {
-        masks: vec![crate::recipe::LocalAdjustment {
-            name: "sky".into(),
-            mask: linear(0.2, 0.8),
-            amount: 1.0,
-            temperature: 48.0,
-            tint: -20.0,
-            ..Default::default()
-        }],
+/// A mask as v1.18.3 or an earlier build saved it: its Temp and Tint on that
+/// build's scale, with or without colour gains.
+fn older_mask(name: &str, temperature: f32, tint: f32, gains: Option<[f32; 3]>) -> crate::recipe::LocalAdjustment {
+    crate::recipe::LocalAdjustment {
+        name: name.into(),
+        mask: linear(0.2, 0.8),
+        amount: 1.0,
+        exposure_ev: -0.25,
+        temperature,
+        tint,
+        color_gains: gains,
         ..Default::default()
-    };
-    let wb = |r: &EditRecipe| (r.masks[0].temperature, r.masks[0].tint, r.mask_wb_era);
-    // This build's own document.
-    assert_eq!(wb(&xmp_to_recipe(&recipe_to_xmp(&slider))), (48.0, -20.0, MASK_WB_ERA));
-    // An older build's: the payload is that build's recipe, silent about the scale.
-    let mut older = slider.clone();
-    older.mask_wb_era = 0;
-    let doc = recipe_to_xmp(&older);
+    }
+}
+
+/// The develop that build held: it names no mask scale.
+fn older_recipe(masks: Vec<crate::recipe::LocalAdjustment>) -> EditRecipe {
+    EditRecipe { contrast: 8.0, masks, mask_wb_era: 0, ..Default::default() }
+}
+
+/// What that build wrote into the `crs:` settings for `p`: a plain mask's
+/// Temp and Tint as they stood, a mask's colour gains as the three numbers
+/// ITS projection gave — `render::v1_18_3`, that build's law and search kept
+/// as they were, not today's writer.
+fn v1_18_3_settings(p: &EditRecipe) -> EditRecipe {
+    let mut wrote = p.clone();
+    for m in &mut wrote.masks {
+        if let Some([temperature, tint, exposure_ev]) = crate::render::v1_18_3::projection(p, m) {
+            m.color_gains = None;
+            m.temperature = temperature * 100.0;
+            m.tint = tint * 100.0;
+            m.exposure_ev += exposure_ev;
+        }
+    }
+    wrote
+}
+
+/// `doc` with the record of the document as written (`asr:Written`) beside
+/// its payload — what a merge into an existing sidecar adds.
+fn with_written_record(doc: &str, written: &str) -> String {
+    let anchor = "\n    crs:HasSettings=\"True\"";
+    assert_eq!(doc.matches(anchor).count(), 1, "{doc}");
+    let record = payload::written_attrs(written, "asr");
+    assert!(!record.is_empty(), "premise: the record fits");
+    doc.replacen(anchor, &format!("{record}{anchor}"), 1)
+}
+
+/// An older build's saved develop carried onto this build's scale by the
+/// recipe's own function — what its `recipe.json` reads as.
+fn carried_over(p: &EditRecipe) -> EditRecipe {
+    let mut r = p.clone();
+    r.convert_legacy_mask_wb();
+    r
+}
+
+// ── A sidecar an older build wrote (2026-11-20) ─────────────────────────────
+//
+// A sidecar AutoShade wrote with its develop inside — every one since v1.3.1
+// — imports to the picture it was exported with, whichever build wrote it. A
+// payload of v1.18.3 or earlier names no `mask_wb_era`: its masks' Temp and
+// Tint, and the `crs:` ones that build wrote beside them, are on its weaker
+// scale. Read back, a leaf Lightroom did not touch is that build's number,
+// carried over exactly as its `recipe.json` is — the import EQUALS the saved
+// develop carried over, and draws the frame that build drew — while a number
+// set in Lightroom stands as it is. The numbers the sidecars below state are
+// that build's: its develop as the payload, and for a mask's gains the three
+// `crs:` numbers ITS projection gave (`render::v1_18_3`, that build's law and
+// search kept as they were), never today's projection. One test a claim, so
+// that a broken rule names the claim it broke.
+
+/// The gains the older develop's mask carries in the tests below.
+const OLDER_GAINS: [f32; 3] = [0.8, 1.02, 1.3];
+
+fn mask_wb(r: &EditRecipe, i: usize) -> (f32, f32) {
+    (r.masks[i].temperature, r.masks[i].tint)
+}
+
+fn near(a: f32, b: f32) -> bool {
+    (a - b).abs() < 1e-3
+}
+
+/// An older build's develop whose one mask carries colour gains over a Temp
+/// and Tint of its own, and the `crs:` settings that build wrote for it.
+fn older_gains_develop() -> (EditRecipe, EditRecipe) {
+    let p = older_recipe(vec![older_mask("sky", 12.0, -6.0, Some(OLDER_GAINS))]);
+    let wrote = v1_18_3_settings(&p);
+    assert!(
+        wrote.masks[0].color_gains.is_none() && wrote.masks[0].temperature.abs() > 5.0,
+        "premise: the gains went out as a Temp: {:?}",
+        mask_wb(&wrote, 0)
+    );
+    (p, wrote)
+}
+
+/// A plain mask, untouched in Lightroom: the import is the saved develop
+/// carried over (48 → 25.6, −20 → −10), it draws the frame that build drew,
+/// and it is stamped — saved and read again, it is not carried over twice.
+///
+/// MUTATION THIS CATCHES: the carry-over kept from a leaf taken from the
+/// payload (Temp 48 comes back 48, about twice as strong), or the stamp
+/// dropped from `restore` (the saved import is carried over again).
+#[test]
+fn an_older_sidecars_plain_mask_imports_to_the_picture_it_had() {
+    use crate::recipe::MASK_WB_ERA;
+    use crate::render::v1_18_3::{developed, developed_then, worst};
+    let p = older_recipe(vec![older_mask("sky", 48.0, -20.0, None)]);
+    let doc = lightroom_like(&p, &p);
     let found = payload::find(&doc).expect("a payload").expect("decodes");
     assert_eq!(found.recipe.mask_wb_era, 0, "premise: the payload names no scale");
-    let imported = xmp_to_recipe(&doc);
-    assert_eq!(wb(&imported), (48.0, -20.0, MASK_WB_ERA), "taken as it stands, and stamped");
-    // The `crs:` settings alone — Lightroom's own file, or a rewrite that lost the payload.
-    let crs_only = xmp_to_recipe(&strip_attrs(&doc, |a| a == "xmlns:asr" || a.starts_with("asr:")));
-    assert!(
-        (crs_only.masks[0].temperature - 48.0).abs() < 1e-3 && (crs_only.masks[0].tint + 20.0).abs() < 1e-3,
-        "{:?}",
-        crs_only.masks[0]
-    );
+    let back = xmp_to_recipe(&doc);
+    assert_eq!((&back.masks, back.mask_wb_era, back.contrast), (&carried_over(&p).masks, MASK_WB_ERA, 8.0));
+    assert!(near(mask_wb(&back, 0).0, 25.6) && near(mask_wb(&back, 0).1, -10.0), "{:?}", mask_wb(&back, 0));
+    let off = worst(&developed(&back), &developed_then(&p));
+    assert!(off < 1e-4, "a plain mask draws what that build drew: {off:e}");
+    // The comparison has teeth: that build's numbers under today's stamp —
+    // what an import that stamped without carrying over would hold — are
+    // another picture.
+    let stamped_only = EditRecipe { mask_wb_era: MASK_WB_ERA, ..p.clone() };
+    assert!(worst(&developed(&stamped_only), &developed_then(&p)) > 1e-2, "premise: read on today's scale it is another picture");
+    // Saved as a recipe file and read back, the import is not carried over again.
+    let mut reread: EditRecipe = serde_json::from_str(&serde_json::to_string(&back).unwrap()).unwrap();
+    assert!(!reread.convert_legacy_mask_wb(), "an import is stamped");
+    assert_eq!(reread, back);
+    // The app's own untouched file — intent attributes and all — reads the same.
+    assert_eq!(xmp_to_recipe(&recipe_to_xmp(&p)).masks, back.masks);
+    // A payload that spells the old scale out is the same statement. No build
+    // writes one (the legacy stamp is never serialised), so an explicit 0
+    // cannot come from AutoShade; it is read like the absent key.
+    let mut spelled = serde_json::to_value(payload::portable(&p)).unwrap();
+    spelled["mask_wb_era"] = 0.into();
+    let explicit = with_payload_json(&doc, &serde_json::to_vec(&spelled).unwrap());
+    assert_eq!(xmp_to_recipe(&explicit), back, "an explicit 0 reads like the absent key");
+}
+
+/// The same mask with one number moved in Lightroom: Lightroom's number
+/// stands as it states it, and the one beside it — still that build's — is
+/// carried over.
+///
+/// MUTATION THIS CATCHES: the carry-over given to a leaf taken from the
+/// document (Lightroom's Temp 60 comes back 32, its Tint 30 comes back 15).
+#[test]
+fn an_older_sidecars_number_set_in_lightroom_stands_as_it_is() {
+    let p = older_recipe(vec![older_mask("sky", 48.0, -20.0, None)]);
+    let mut warmer = p.clone();
+    warmer.masks[0].temperature = 60.0;
+    let back = xmp_to_recipe(&lightroom_like(&p, &warmer));
+    assert!(near(mask_wb(&back, 0).0, 60.0), "Lightroom's Temp stands: {:?}", mask_wb(&back, 0));
+    assert!(near(mask_wb(&back, 0).1, -10.0), "the Tint beside it is that build's, carried over: {:?}", mask_wb(&back, 0));
+    assert_eq!(back.mask_wb_era, crate::recipe::MASK_WB_ERA);
+    let mut greener = p.clone();
+    greener.masks[0].tint = 30.0;
+    let back = xmp_to_recipe(&lightroom_like(&p, &greener));
+    assert!(near(mask_wb(&back, 0).1, 30.0), "Lightroom's Tint stands: {:?}", mask_wb(&back, 0));
+    assert!(near(mask_wb(&back, 0).0, 25.6), "the Temp beside it is carried over: {:?}", mask_wb(&back, 0));
+}
+
+/// A mask with colour gains, untouched, in a sidecar that carries the record
+/// of the document as written (a merge into an existing file adds one): the
+/// gains and the mask's own Temp and Tint come back, carried over, and the
+/// frame is the one that build drew.
+#[test]
+fn an_older_sidecars_mask_gains_survive_beside_the_written_record() {
+    use crate::render::v1_18_3::{developed, developed_then, worst};
+    let (p, wrote) = older_gains_develop();
+    let doc = with_written_record(&lightroom_like(&p, &wrote), &bare_document(&wrote, None));
+    assert!(payload::find(&doc).unwrap().unwrap().written.is_some(), "premise: the record is there");
+    let back = xmp_to_recipe(&doc);
+    assert_eq!(back.masks, carried_over(&p).masks, "the gains and the mask's own Temp, carried over");
+    assert_eq!(back.masks[0].color_gains, Some(OLDER_GAINS));
+    let off = worst(&developed(&back), &developed_then(&p));
+    assert!(off < 1e-4, "it draws what that build drew: {off:e}");
+}
+
+/// The same with NO record — what a fresh export is. The reader projects the
+/// payload again to learn what the document said when it was written, and it
+/// must find the numbers THAT build wrote, or the untouched file reads as
+/// edited in Lightroom and the gains go.
+///
+/// MUTATION THIS CATCHES: the develop reading an older recipe's mask Temp and
+/// Tint on today's scale (`render::mask_wb_gains` without its older law: the
+/// projection's three numbers come out about half of what that build wrote,
+/// the document reads as moved, the gains are dropped and its three numbers
+/// render at twice their strength).
+#[test]
+fn an_older_sidecars_mask_gains_survive_a_fresh_export_with_no_record() {
+    use crate::render::v1_18_3::{developed, developed_then, worst};
+    let (p, wrote) = older_gains_develop();
+    let doc = lightroom_like(&p, &wrote);
+    assert!(payload::find(&doc).unwrap().unwrap().written.is_none(), "premise: no record");
+    let back = xmp_to_recipe(&doc);
+    assert_eq!(back.masks[0].color_gains, Some(OLDER_GAINS), "the untouched gains survive");
+    assert_eq!(back.masks, carried_over(&p).masks, "with the mask's own Temp and Tint, carried over");
+    let off = worst(&developed(&back), &developed_then(&p));
+    assert!(off < 1e-4, "it draws what that build drew: {off:e}");
+}
+
+/// The gains' three numbers moved in Lightroom: the gains go, and the
+/// document's three stand as they are — with or without the record.
+#[test]
+fn an_older_sidecars_gains_edited_in_lightroom_go_and_the_documents_three_stand() {
+    let (p, wrote) = older_gains_develop();
+    let mut edited = wrote.clone();
+    edited.masks[0].temperature += 9.0;
+    let rewritten = lightroom_like(&p, &edited);
+    for doc in [with_written_record(&rewritten, &bare_document(&wrote, None)), rewritten] {
+        let back = xmp_to_recipe(&doc);
+        let (m, e) = (&back.masks[0], &edited.masks[0]);
+        assert_eq!(m.color_gains, None, "the document's colour already carries them");
+        assert!(near(m.temperature, e.temperature) && near(m.tint, e.tint) && near(m.exposure_ev, e.exposure_ev), "{m:?} against {e:?}");
+    }
+}
+
+/// A muted mask is never written into the `crs:` settings: the payload is its
+/// only record, and its Temp and Tint are carried over from there.
+#[test]
+fn an_older_sidecars_muted_mask_is_carried_over_from_the_payload() {
+    let mut p = older_recipe(vec![older_mask("sky", 48.0, -20.0, None), older_mask("muted", 30.0, 12.0, None)]);
+    p.masks[1].enabled = false;
+    let back = xmp_to_recipe(&lightroom_like(&p, &p));
+    assert_eq!(back.masks, carried_over(&p).masks);
+    assert!(!back.masks[1].enabled && near(mask_wb(&back, 1).0, 16.0) && near(mask_wb(&back, 1).1, 6.0), "{:?}", mask_wb(&back, 1));
+}
+
+/// What is NOT an older sidecar is read as it always was: a payload of THIS
+/// build states its scale and comes back number for number, and the `crs:`
+/// settings alone — Lightroom's own file, or a rewrite that lost the payload —
+/// are the slider's numbers as they stand.
+#[test]
+fn beside_an_older_sidecar_this_builds_payload_and_a_bare_document_read_as_they_stand() {
+    use crate::recipe::MASK_WB_ERA;
+    let now = EditRecipe {
+        mask_wb_era: MASK_WB_ERA,
+        ..older_recipe(vec![older_mask("sky", 48.0, -20.0, None), older_mask("warm", 12.0, -6.0, Some(OLDER_GAINS))])
+    };
+    for doc in [recipe_to_xmp(&now), lightroom_like(&now, &now)] {
+        assert_eq!(xmp_to_recipe(&doc).masks, now.masks);
+    }
+    let p = older_recipe(vec![older_mask("sky", 48.0, -20.0, None)]);
+    let crs_only = xmp_to_recipe(&strip_attrs(&lightroom_like(&p, &p), |a| a == "xmlns:asr" || a.starts_with("asr:")));
+    assert!(near(mask_wb(&crs_only, 0).0, 48.0) && near(mask_wb(&crs_only, 0).1, -20.0), "{:?}", mask_wb(&crs_only, 0));
     assert_eq!(crs_only.mask_wb_era, MASK_WB_ERA);
-    // Saved as a recipe file and read back, the import is still what was imported.
-    let mut reread: EditRecipe = serde_json::from_str(&serde_json::to_string(&imported).unwrap()).unwrap();
-    assert!(!reread.convert_legacy_mask_wb(), "an import is not an older build's save");
-    assert_eq!(reread, imported);
+}
+
+// The .xmp an older build kept in the STORE is that build's save, and it is
+// carried over exactly once whatever it holds (`carry_over_store_xmp`, the
+// step every reader of the store's .xmp takes after the read).
+
+/// What the store's reader ends with for `doc`: the mask's Temp and Tint and
+/// the stamp, and whether the store's own step was the one that moved them.
+fn store_xmp_read(doc: &str) -> ((f32, f32), u32, bool) {
+    let mut r = xmp_to_recipe(doc);
+    let moved_by_the_store_step = carry_over_store_xmp(&mut r, doc);
+    (mask_wb(&r, 0), r.mask_wb_era, moved_by_the_store_step)
+}
+
+/// Where the store's .xmp carries the develop itself — every one since
+/// v1.3.1 — the reader has carried it over, and the store's step leaves it
+/// alone.
+///
+/// MUTATION THIS CATCHES: the store's step run on top of the reader's
+/// carry-over (25.6 comes back 13.65, −10 comes back −5).
+#[test]
+fn an_older_builds_store_xmp_with_its_develop_is_carried_over_by_the_reader_alone() {
+    let p = older_recipe(vec![older_mask("sky", 48.0, -20.0, None)]);
+    let doc = recipe_to_xmp(&p);
+    assert!(payload::find(&doc).is_some_and(|found| found.is_ok()), "premise: the develop is in the file");
+    let ((temperature, tint), era, moved_by_the_store_step) = store_xmp_read(&doc);
+    assert!(near(temperature, 25.6) && near(tint, -10.0), "({temperature}, {tint})");
+    assert!(!moved_by_the_store_step && era == crate::recipe::MASK_WB_ERA);
+}
+
+/// Where it holds only `crs:` settings — a save older than the payload, or a
+/// payload that does not verify — the reader took the numbers as they stand,
+/// as it does for a sidecar Lightroom wrote, and the store's step carries
+/// them over.
+///
+/// MUTATION THIS CATCHES: the store's step left out for a document with no
+/// develop in it (48 stands, about twice as strong).
+#[test]
+fn an_older_builds_store_xmp_with_settings_only_is_carried_over_by_the_store_step() {
+    let p = older_recipe(vec![older_mask("sky", 48.0, -20.0, None)]);
+    let with_develop = recipe_to_xmp(&p);
+    let settings_only = bare_document(&p, None);
+    let crc = payload::simple_property(&with_develop, "asr", "RecipeCrc32").unwrap();
+    let unverified = with_develop.replacen(&format!("asr:RecipeCrc32=\"{crc}\""), "asr:RecipeCrc32=\"00000000\"", 1);
+    assert!(payload::find(&settings_only).is_none(), "premise: settings only");
+    assert!(payload::find(&unverified).is_some_and(|found| found.is_err()), "premise: a payload that does not verify");
+    for (what, doc) in [("settings only", &settings_only), ("unverified", &unverified)] {
+        let as_read = mask_wb(&xmp_to_recipe(doc), 0);
+        assert!(near(as_read.0, 48.0) && near(as_read.1, -20.0), "{what}: premise: the reader takes them as they stand: {as_read:?}");
+        let ((temperature, tint), era, moved_by_the_store_step) = store_xmp_read(doc);
+        assert!(near(temperature, 25.6) && near(tint, -10.0), "{what}: ({temperature}, {tint})");
+        assert!(moved_by_the_store_step && era == crate::recipe::MASK_WB_ERA, "{what}");
+    }
 }

@@ -314,9 +314,10 @@ fn snapshot_xmp_text(src: &Path, text: String) -> std::io::Result<Option<u32>> {
     // The document is an older build's save (nothing has written the store's
     // .xmp since 2026-11-18), so its mask Temp and Tint are that build's
     // numbers: the derived recipe states them on this build's scale, as every
-    // reader of that .xmp does (`EditRecipe::convert_mask_wb_saved_as_xmp`),
-    // and a version loaded from it renders what the save rendered.
-    derived.convert_mask_wb_saved_as_xmp();
+    // reader of that .xmp does (`xmp::carry_over_store_xmp` — the reader has
+    // done it already where the document carries the develop itself), and a
+    // version loaded from it renders what the save rendered.
+    crate::xmp::carry_over_store_xmp(&mut derived, &text);
     // A6 disclosure: numbers the import cannot read become silent neutrals
     // in this derived snapshot. Background path — the trace goes to stderr;
     // the interactive surfaces disclose the same fact at restore time.

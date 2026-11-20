@@ -228,9 +228,11 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         let (mut r, imported_clamp) =
             autoshade::xmp::xmp_to_recipe_clamped_with_diag(&text, &diag);
         // The .xmp an older build kept in the store is that build's SAVE, not
-        // a sidecar handed over: its mask Temp and Tint are converted like a
-        // recipe.json's (`EditRecipe::convert_mask_wb_saved_as_xmp`).
-        r.convert_mask_wb_saved_as_xmp();
+        // a sidecar handed over: its mask Temp and Tint are carried over like
+        // a recipe.json's — by the reader where the document carries that
+        // build's develop, here where it carries only `crs:` settings
+        // (`xmp::carry_over_store_xmp`).
+        autoshade::xmp::carry_over_store_xmp(&mut r, &text);
         // Accumulated regardless of noop-ness — see the accumulator's
         // contract above.
         for k in autoshade::xmp::unparsable_crs_numbers(&text) {

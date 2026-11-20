@@ -93,10 +93,23 @@ pub struct EditRecipe {
     ///
     /// NOT converted inside `Deserialize`: the advisor's reply
     /// (`advisor::openai`), a request body (`serve`) and a sidecar's payload
-    /// (`xmp::payload`) are parsed as recipes too, and none of them is
-    /// carried over — the first two are this build's own numbers, and a
-    /// sidecar's are the slider's, taken as they stand whichever build wrote
-    /// the file. Those readers stamp the current era instead.
+    /// (`xmp::payload`) are parsed as recipes too. The first two are this
+    /// build's own numbers and are stamped current as they stand. A payload
+    /// is the develop a build exported, and one of v1.18.3 or earlier IS on
+    /// that build's scale — but its reader mixes it, leaf by leaf, with the
+    /// numbers Lightroom left in the document, which stand as they are; so
+    /// the payload's own leaves are carried over there
+    /// (`xmp::payload::restore`, 2026-11-20) and the result is stamped once.
+    ///
+    /// The develop reads the stamp too (`render::mask_wb_gains`,
+    /// 2026-11-20): a recipe that states no scale is drawn by the older
+    /// build's own law, so it is the same picture before and after its
+    /// numbers are carried over, and a reader that missed the carry-over
+    /// shows stale numbers rather than a mask about twice too strong. One
+    /// recipe is developed unconverted on purpose — an older sidecar's
+    /// payload, whose mask gains the sidecar reader projects again
+    /// (`render::gains_as_white`) to tell the document that build wrote from
+    /// one edited in Lightroom.
     ///
     /// **Serialisation: the current stamp is always written, the legacy one
     /// never.** Always, for the reason `quarter_turns` states for the eras: an
@@ -3701,10 +3714,14 @@ impl EditRecipe {
     /// the JSON is parsed: the store's `recipe.json` and its legacy `./out`
     /// twin, a version snapshot, a card in `variants.json`, a recipe file
     /// named on the command line. A reader of anything else — the advisor's
-    /// reply, a request body that states no scale, a sidecar's numbers (the
-    /// `crs:` keys and the payload's copy of them alike) — stamps the current
-    /// era instead and never comes here (see
-    /// [`mask_wb_era`](Self::mask_wb_era)).
+    /// reply, a request body that states no scale, a sidecar's `crs:`
+    /// numbers — stamps the current era instead and never comes here (see
+    /// [`mask_wb_era`](Self::mask_wb_era)). A sidecar's PAYLOAD is the one
+    /// saved develop that is not converted whole: an older build's is
+    /// reconciled against the document first, on that build's scale, and
+    /// `xmp::payload::restore` then carries over the leaves it took from the
+    /// payload with the same `render::local_wb_from_legacy` this uses,
+    /// leaving the ones set in Lightroom as they stand (2026-11-20).
     ///
     /// Gated on the stamp, and the stamp moves with the numbers, so a second
     /// call — the same recipe handed on to another reader, a file saved after
@@ -3730,12 +3747,17 @@ impl EditRecipe {
     /// the XMP reader built from a develop AN OLDER BUILD KEPT IN THE STORE
     /// as an .xmp (`store::xmp_target`, `store::legacy_xmp` — the save of a
     /// photo that has no `recipe.json`; nothing has written one since
-    /// 2026-11-18, and the next save retires it). The reader stamps what it
-    /// builds current, which is right for a sidecar the photographer hands
-    /// over — its numbers are the sliders' — and wrong for this one: its mask
-    /// Temp and Tint are the numbers that build saved and rendered, so they
-    /// are carried over like a `recipe.json`'s.
-    pub fn convert_mask_wb_saved_as_xmp(&mut self) -> bool {
+    /// 2026-11-18, and the next save retires it), WHERE THAT DOCUMENT CARRIES
+    /// NO DEVELOP OF ITS OWN. The reader stamps what it builds current. For a
+    /// document that carries the develop in its payload that is the truth —
+    /// the reader carried an older one over leaf by leaf — and this must not
+    /// run (`xmp::carry_over_store_xmp`, the one caller, sees to it). For
+    /// `crs:` settings alone it is the reader's assumption, right for a
+    /// sidecar the photographer hands over, whose numbers are the sliders',
+    /// and wrong for this one file, which no build of this scale ever wrote:
+    /// its mask Temp and Tint are the numbers that older build saved and
+    /// rendered, so they are carried over like a `recipe.json`'s.
+    pub(crate) fn convert_mask_wb_saved_as_xmp(&mut self) -> bool {
         self.mask_wb_era = mask_wb_era_legacy();
         self.convert_legacy_mask_wb()
     }

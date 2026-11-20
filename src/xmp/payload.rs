@@ -648,6 +648,15 @@ fn decode_raster(name: &str, crc: &str, data: &str) -> Result<Raster, String> {
 /// * a mask's INVERSION is one bit in two homes, and only their net reaches
 ///   the `crs:` spelling — the pair is reconciled as a unit by that net, see
 ///   [`reconcile_mask`].
+/// * a mask's TEMP and TINT in a payload that names no `mask_wb_era` — one
+///   v1.18.3 or an earlier build wrote — are that build's numbers, on its
+///   weaker scale, and so are the `crs:LocalTemperature` / `crs:LocalTint`
+///   it wrote beside them (the slider's own for a plain mask, its projection
+///   of the gains for a recolour carrier). P, W and C are compared as they
+///   stand, all three on that scale; then a leaf the rule took from P is
+///   carried onto this build's scale and a leaf it took from C — a number
+///   set in Lightroom — stands as it is ([`carry_over_mask_wb`]). The
+///   sidecar imports to the picture it was exported with.
 ///
 /// Masks are matched, not zipped: the payload's masks that the projection
 /// never wrote (a muted mask, a bitmap-based one) are restored as they were;
@@ -683,11 +692,22 @@ pub(crate) fn restore(
     for note in &payload.notes {
         warn(note.clone());
     }
+    // A payload that names no `mask_wb_era` is an older build's (v1.18.3 or
+    // earlier; an explicit 0 is the same statement, though no build writes
+    // one): its masks' Temp and Tint, and the `crs:` ones that build wrote
+    // beside them, are on that build's scale. Read here, off the recipe as
+    // the payload spelled it, before anything stamps it. The written
+    // document below is then that build's as well — the recorded one is, and
+    // the bare projection of a mask's gains (`render::gains_as_white`) is
+    // searched with a develop that reads the recipe on the scale it states
+    // (`render::mask_wb_gains`), so it ends on the three numbers that build
+    // wrote and the gains are recognised as untouched.
+    let older_mask_wb = payload.recipe.mask_wb_era < crate::recipe::MASK_WB_ERA;
     let written = strip_mask_intent(&written_document(&payload, frame));
     // The raw reading: a photo-less outer read disables raster names only
     // once it is finished, so W keeps the bare names P and C are compared in.
     let written_then = super::read_document(&written, photo, None).0;
-    let mut r = match reconcile_recipes(&payload.recipe, &written_then, &crs) {
+    let mut r = match reconcile_recipes(&payload.recipe, &written_then, &crs, older_mask_wb) {
         Ok(r) => r,
         Err(why) => {
             warn(format!(
@@ -720,14 +740,14 @@ pub(crate) fn restore(
             r = back;
         }
     }
-    // A sidecar's mask Temp and Tint are the slider's own numbers, taken as
-    // they stand whichever build wrote them (2026-11-19) — the rule for the
-    // `crs:` keys, and so for the payload's copy of the same two numbers. A
-    // payload from v1.18.3 or earlier names no `mask_wb_era`, and the leaf
-    // rule above would hand that silence on: the recipe would render at this
-    // build's strength now and be carried over as an older build's save the
-    // next time its file was read (`EditRecipe::convert_legacy_mask_wb`) —
-    // one import, two pictures. Stamped here instead, never converted.
+    // Every mask Temp and Tint of `r` is on this build's scale by now: a
+    // current payload's and the document's own as they stood, an older
+    // payload's carried over leaf by leaf where the rule took them
+    // (`carry_over_mask_wb`, 2026-11-20). The stamp says so, once, for the
+    // whole recipe. The leaf rule alone would hand an older payload's silence
+    // on, and the recipe would be carried over a second time as an older
+    // build's save the next time its file was read
+    // (`EditRecipe::convert_legacy_mask_wb`) — one import, two pictures.
     r.mask_wb_era = crate::recipe::MASK_WB_ERA;
     if let Some(dir) = develop_dir {
         if materialize {
@@ -776,17 +796,22 @@ fn reconcile_recipes(
     p: &EditRecipe,
     w: &EditRecipe,
     c: &EditRecipe,
+    older_mask_wb: bool,
 ) -> Result<EditRecipe, String> {
     let to = |r: &EditRecipe| serde_json::to_value(r).map_err(|e| e.to_string());
     let (p, w, c) = (to(p)?, to(w)?, to(c)?);
-    serde_json::from_value(reconcile(&p, &w, &c, None)).map_err(|e| e.to_string())
+    serde_json::from_value(reconcile(&p, &w, &c, None, older_mask_wb)).map_err(|e| e.to_string())
 }
 
+/// `older_mask_wb`: P is an older build's payload, whose masks' Temp and Tint
+/// are on that build's scale — it travels down to [`reconcile_masks`], the
+/// one place that knows which recipe each of those leaves came from.
 fn reconcile(
     p: &serde_json::Value,
     w: &serde_json::Value,
     c: &serde_json::Value,
     key: Option<&str>,
+    older_mask_wb: bool,
 ) -> serde_json::Value {
     use serde_json::Value;
     // Intent and provenance with no `crs:` spelling — see the `role` paragraph
@@ -811,7 +836,7 @@ fn reconcile(
             let mut out = serde_json::Map::new();
             for k in keys {
                 let get = |o: &'_ serde_json::Map<String, Value>| o.get(k).cloned().unwrap_or(Value::Null);
-                let v = reconcile(&get(po), &get(wo), &get(co), Some(k));
+                let v = reconcile(&get(po), &get(wo), &get(co), Some(k), older_mask_wb);
                 // `Null` is "absent" for a `skip_serializing_if` field, which
                 // is how a payload written without it stays without it.
                 if !v.is_null() {
@@ -822,14 +847,14 @@ fn reconcile(
         }
         (Value::Array(pa), Value::Array(wa), Value::Array(ca)) => {
             if key == Some("masks") {
-                return reconcile_masks(pa, wa, ca);
+                return reconcile_masks(pa, wa, ca, older_mask_wb);
             }
             if pa.len() == wa.len() && wa.len() == ca.len() {
                 Value::Array(
                     pa.iter()
                         .zip(wa)
                         .zip(ca)
-                        .map(|((x, y), z)| reconcile(x, y, z, key))
+                        .map(|((x, y), z)| reconcile(x, y, z, key, older_mask_wb))
                         .collect(),
                 )
             } else {
@@ -896,10 +921,19 @@ fn approx_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
 }
 
 /// The mask half of [`restore`]'s rule.
+///
+/// With an older build's payload (`older_mask_wb`) this is also where each
+/// mask's Temp and Tint are brought onto this build's scale, by where the
+/// rule took them from ([`carry_over_mask_wb`]): a mask the projection never
+/// wrote is the payload's alone, both leaves; a paired mask's leaf is the
+/// payload's where the document handed it back as written
+/// ([`mask_wb_from_payload`]); a correction added in Lightroom is the
+/// document's and stands.
 fn reconcile_masks(
     p: &[serde_json::Value],
     w: &[serde_json::Value],
     c: &[serde_json::Value],
+    older_mask_wb: bool,
 ) -> serde_json::Value {
     let name_of = |m: &serde_json::Value| -> String {
         m.get("name").and_then(serde_json::Value::as_str).unwrap_or("").to_string()
@@ -948,16 +982,20 @@ fn reconcile_masks(
     }
     let mut out = Vec::new();
     for (i, pm) in p.iter().enumerate() {
-        match p_to_w[i] {
+        let (mut mask, from_payload) = match p_to_w[i] {
             // Never written (muted, bitmap-based, or beyond a cap the
             // projection applied): the payload is the only record.
-            None => out.push(pm.clone()),
+            None => (pm.clone(), [true; 2]),
             Some(j) => match w_to_c[j] {
                 // Written, then removed in Lightroom.
-                None => {}
-                Some(k) => out.push(reconcile_mask(pm, &w[j], &c[k])),
+                None => continue,
+                Some(k) => (reconcile_mask(pm, &w[j], &c[k]), mask_wb_from_payload(pm, &w[j], &c[k])),
             },
+        };
+        if older_mask_wb {
+            carry_over_mask_wb(&mut mask, from_payload);
         }
+        out.push(mask);
     }
     for (k, cm) in c.iter().enumerate() {
         if !c_used[k] {
@@ -983,7 +1021,8 @@ fn reconcile_masks(
 /// untouched rewrite moved the home for nothing.
 fn reconcile_mask(p: &serde_json::Value, w: &serde_json::Value, c: &serde_json::Value) -> serde_json::Value {
     use serde_json::Value;
-    let mut out = recolour_carrier(reconcile(p, w, c, None), p, w, c);
+    // No mask holds masks: the older-payload carry-over is `reconcile_masks`'s.
+    let mut out = recolour_carrier(reconcile(p, w, c, None, false), p, w, c);
     fn kind(m: &Value) -> Option<&str> {
         m.get("mask").and_then(|g| g.get("kind")).and_then(Value::as_str)
     }
@@ -1023,20 +1062,74 @@ fn recolour_carrier(
     c: &serde_json::Value,
 ) -> serde_json::Value {
     use serde_json::Value;
-    let gains = p.get("color_gains").and_then(Value::as_array);
-    let neutral = gains.is_none_or(|g| g.iter().all(|v| v.as_f64() == Some(1.0)));
-    const CARRIER: [&str; 3] = ["temperature", "tint", "exposure_ev"];
-    let field = |m: &Value, k: &str| m.get(k).cloned().unwrap_or(Value::Null);
-    if neutral || CARRIER.iter().all(|k| approx_eq(&field(w, k), &field(c, k))) {
+    if !carrier_moved(p, w, c) {
         return out;
     }
     if let Value::Object(o) = &mut out {
         for k in CARRIER {
-            o.insert(k.to_string(), field(c, k));
+            o.insert(k.to_string(), mask_leaf(c, k));
         }
         o.remove("color_gains");
     }
     out
+}
+
+/// The three leaves a mask's colour gains are written as ([`recolour_carrier`]).
+const CARRIER: [&str; 3] = ["temperature", "tint", "exposure_ev"];
+
+fn mask_leaf(m: &serde_json::Value, k: &str) -> serde_json::Value {
+    m.get(k).cloned().unwrap_or(serde_json::Value::Null)
+}
+
+/// Did the document's Temp, Tint and Exposure of a mask whose payload carries
+/// colour gains come back different from what was written — the one question
+/// [`recolour_carrier`] and [`mask_wb_from_payload`] both turn on.
+fn carrier_moved(p: &serde_json::Value, w: &serde_json::Value, c: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    let gains = p.get("color_gains").and_then(Value::as_array);
+    let neutral = gains.is_none_or(|g| g.iter().all(|v| v.as_f64() == Some(1.0)));
+    !neutral && !CARRIER.iter().all(|k| approx_eq(&mask_leaf(w, k), &mask_leaf(c, k)))
+}
+
+/// Which of a paired mask's Temp and Tint the rule took from the PAYLOAD
+/// (`[temperature, tint]`): a leaf the document handed back as written is the
+/// payload's ([`choose`]), unless the mask is a recolour carrier that moved —
+/// then both are the document's, with its Exposure
+/// ([`recolour_carrier`]).
+fn mask_wb_from_payload(p: &serde_json::Value, w: &serde_json::Value, c: &serde_json::Value) -> [bool; 2] {
+    if carrier_moved(p, w, c) {
+        return [false; 2];
+    }
+    ["temperature", "tint"].map(|k| approx_eq(&mask_leaf(w, k), &mask_leaf(c, k)))
+}
+
+/// Carry the leaves of `mask` that came from an older build's payload onto
+/// this build's scale (2026-11-20).
+///
+/// A sidecar AutoShade wrote must import to the picture it was exported
+/// with, whichever build wrote it: the sidecar is the copy of a develop that
+/// travels with the photo. Up to v1.18.3 a mask's Temp and Tint rendered on a
+/// weaker scale, and a payload of that build states them on it; carried over
+/// by the same exact rule as a saved recipe's
+/// (`render::local_wb_from_legacy`), the mask renders what that build
+/// rendered. A leaf that came from the DOCUMENT is not touched: a number set
+/// in Lightroom is read as it stands, the rule for every sidecar Lightroom
+/// wrote. The two scalings are independent and linear, so the leaves are
+/// carried one by one.
+fn carry_over_mask_wb(mask: &mut serde_json::Value, from_payload: [bool; 2]) {
+    let Some(o) = mask.as_object_mut() else { return };
+    let stated = |o: &serde_json::Map<String, serde_json::Value>, k: &str| {
+        o.get(k).and_then(serde_json::Value::as_f64).map(|v| v as f32)
+    };
+    let (temperature, tint) = (stated(o, "temperature"), stated(o, "tint"));
+    let carried = crate::render::local_wb_from_legacy(temperature.unwrap_or(0.0), tint.unwrap_or(0.0));
+    for (k, had, now, take) in
+        [("temperature", temperature, carried.0, from_payload[0]), ("tint", tint, carried.1, from_payload[1])]
+    {
+        if take && had.is_some() {
+            o.insert(k.to_string(), serde_json::Value::from(now));
+        }
+    }
 }
 
 /// What this reader answers as the NAME of a written payload mask: the

@@ -4347,8 +4347,9 @@ pub fn saved_develop_for_xmp_export(raw: &Path) -> Result<EditRecipe> {
     } else if let Some((text, _)) = &snap.store_xmp {
         let mut r = xmp::xmp_to_recipe_for_photo(text, raw);
         // The store's own .xmp is an older build's save, not a sidecar
-        // handed over (`EditRecipe::convert_mask_wb_saved_as_xmp`).
-        r.convert_mask_wb_saved_as_xmp();
+        // handed over: carried over once, by the reader or here
+        // (`xmp::carry_over_store_xmp`).
+        xmp::carry_over_store_xmp(&mut r, text);
         r
     } else {
         anyhow::bail!("{nothing}");
@@ -7575,14 +7576,15 @@ mod tests {
     /// module's doors with its mask Temp and Tint carried onto this build's
     /// scale — the calibration snapshot, the load funnel the web serves
     /// through, and the export door — and none of them rewrites the file it
-    /// read. The other side of the rule rides along: a sidecar the user
-    /// imports is the slider's own numbers and is NOT carried over, whether
-    /// Lightroom wrote it or an older AutoShade did.
+    /// read. The import door rides along, both sides of its rule: a sidecar
+    /// Lightroom wrote is the slider's own numbers and is NOT carried over;
+    /// one an older AutoShade exported carries that build's develop and is.
     ///
     /// MUTATION THIS CATCHES: the carry-over dropped from any one of the
     /// three doors (that door hands Temp 48 on, about twice as strong as
     /// saved), the export door writing the older build's number for a develop
-    /// whose slider now reads 25.6, or the import door converting a sidecar.
+    /// whose slider now reads 25.6, the import door converting Lightroom's
+    /// sidecar, or handing an older AutoShade's on as it stands.
     #[test]
     fn an_older_builds_saved_recipe_leaves_every_door_on_this_builds_mask_scale() {
         use crate::recipe::{is_v1_18_3_mask_wb_carried_over, MASK_WB_ERA, V1_18_3_MASK_WB};
@@ -7627,23 +7629,30 @@ mod tests {
         assert!(is_v1_18_3_mask_wb_carried_over(&reread), "a saved recipe is not carried over twice");
         assert!(is_v1_18_3_mask_wb_carried_over(&saved_develop_for_xmp_export(&raw).unwrap()));
 
-        // A SIDECAR the user imports is not a saved recipe: its Temp and Tint
-        // are taken as they stand. Lightroom's own document (no payload)…
-        let wb = |r: &EditRecipe| (r.masks[0].temperature.round(), r.masks[0].tint.round(), r.mask_wb_era);
+        // A SIDECAR Lightroom wrote (no payload) is not a saved recipe: its
+        // Temp and Tint are the slider's numbers and are taken as they stand…
+        let wb = |r: &EditRecipe| (r.masks[0].temperature, r.masks[0].tint, r.mask_wb_era);
         let slider = EditRecipe {
             masks: vec![crate::recipe::LocalAdjustment { temperature: 48.0, tint: -20.0, ..Default::default() }],
             ..Default::default()
         };
         let lightrooms = crate::xmp::bare_document(&slider, None);
         assert!(!lightrooms.contains("asr:Recipe="), "premise: no AutoShade payload");
-        assert_eq!(wb(&import_xmp(&raw, &lightrooms, crate::diag::silent()).recipe), (48.0, -20.0, MASK_WB_ERA));
-        // …and one an older AutoShade exported, whose payload names no scale
-        // (`xmp::payload`'s own test pins that the payload is read as such).
+        let (temperature, tint, era) = wb(&import_xmp(&raw, &lightrooms, crate::diag::silent()).recipe);
+        assert!((temperature - 48.0).abs() < 1e-3 && (tint + 20.0).abs() < 1e-3 && era == MASK_WB_ERA, "{temperature} {tint}");
+        // …while one an older AutoShade exported carries that build's develop
+        // (a payload that names no scale), and imports as that develop's own
+        // recipe.json reads: carried over, once (2026-11-20; `xmp::payload`'s
+        // own test pins the leaf-by-leaf rule and the picture).
         let mut older = slider.clone();
         older.mask_wb_era = 0;
         let older_export = crate::xmp::recipe_to_xmp(&older);
         assert!(older_export.contains("asr:Recipe="), "premise: the document carries the develop itself");
-        assert_eq!(wb(&import_xmp(&raw, &older_export, crate::diag::silent()).recipe), (48.0, -20.0, MASK_WB_ERA));
+        let imported = import_xmp(&raw, &older_export, crate::diag::silent()).recipe;
+        let mut saved = older.clone();
+        assert!(saved.convert_legacy_mask_wb(), "premise: the saved develop's numbers move");
+        assert_eq!(wb(&imported), wb(&saved), "the sidecar reads as the develop it was exported from");
+        assert!((imported.masks[0].temperature - 25.6).abs() < 1e-3 && (imported.masks[0].tint + 10.0).abs() < 1e-3);
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);

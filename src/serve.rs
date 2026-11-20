@@ -1124,9 +1124,10 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
             let diag = crate::diag::photo(raw);
             let mut r = crate::xmp::xmp_to_recipe_with_diag(&text, &diag);
             // The store's own .xmp is an older build's SAVE, not a sidecar
-            // handed over: its mask Temp and Tint are that build's numbers
-            // (`EditRecipe::convert_mask_wb_saved_as_xmp`, the GUI's rule).
-            r.convert_mask_wb_saved_as_xmp();
+            // handed over: its mask Temp and Tint are that build's numbers,
+            // carried over once — by the reader, or here for a document with
+            // no develop in it (`xmp::carry_over_store_xmp`, the GUI's rule).
+            crate::xmp::carry_over_store_xmp(&mut r, &text);
             // First consulted file wins the disclosure slot (GUI accumulates
             // the same way) — set regardless of noop-ness.
             if xmp_warn.is_none() {

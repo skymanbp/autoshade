@@ -90,8 +90,10 @@ fn xmp_arm(
     let diag = autoshade::diag::photo(p);
     let (mut r, imported_clamp) = autoshade::xmp::xmp_to_recipe_clamped_with_diag(text, &diag);
     // The store's own .xmp is an older build's SAVE (the open path's rule):
-    // its mask Temp and Tint are that build's numbers, carried over.
-    r.convert_mask_wb_saved_as_xmp();
+    // its mask Temp and Tint are that build's numbers, carried over once —
+    // by the reader, or here for a document with no develop in it
+    // (`xmp::carry_over_store_xmp`).
+    autoshade::xmp::carry_over_store_xmp(&mut r, text);
     // Collected for EVERY consulted file — a no-op import included (the
     // persist.rs rule, Codex 32-#1 + review R12-11): a sidecar whose ONLY
     // edit is corrupt restores nothing, and the next save overwrites it in

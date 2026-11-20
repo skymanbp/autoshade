@@ -157,6 +157,31 @@ pub fn xmp_to_recipe_for_photo(xmp: &str, photo: &std::path::Path) -> EditRecipe
     xmp_to_recipe_clamped_impl(xmp, Some(photo), None).0
 }
 
+/// Bring the mask Temp and Tint of a develop AN OLDER BUILD KEPT IN THE STORE
+/// as an .xmp onto this build's scale, where the reader has not already.
+/// `r` is what one of the readers above built from `document`; `true` when a
+/// number moved. Every reader of `store::xmp_target` / `store::legacy_xmp`
+/// calls it once — the save of a photo that has no `recipe.json`; no build
+/// has written one since 2026-11-18, so the file is always an older build's.
+///
+/// Two cases, and only the second has work left (2026-11-20):
+/// - The document carries that build's develop in its payload (every such
+///   file since v1.3.1). The reader has carried it over leaf by leaf
+///   (`payload::restore`) and stamped the result; carrying it over again
+///   would shrink the numbers twice.
+/// - It carries no payload this build can read — a save older than the
+///   payload, or a payload that does not verify. The reader's answer is then
+///   the `crs:` settings as they stand, which is right for a sidecar
+///   Lightroom wrote and wrong for this file: the numbers are the ones that
+///   build saved and rendered, so they are carried over like a
+///   `recipe.json`'s (`EditRecipe::convert_mask_wb_saved_as_xmp`).
+pub fn carry_over_store_xmp(r: &mut EditRecipe, document: &str) -> bool {
+    if matches!(payload::find(document), Some(Ok(_))) {
+        return false;
+    }
+    r.convert_mask_wb_saved_as_xmp()
+}
+
 /// [`xmp_to_recipe`] plus WHAT THE CLAMP COST — the door for every surface
 /// that DISCLOSES import loss.
 ///
@@ -632,7 +657,8 @@ pub(super) fn read_document(
     // …and the turn that makes the render DELIVER the frame those coordinates
     // are now in. Zero for every document whose declaration agrees with the
     // capture, which is what keeps an un-rotated recipe's JSON byte-identical
-    // (`quarter_turns` is the one `skip_serializing_if` field).
+    // (`quarter_turns` is written `skip_serializing_if` zero, like every
+    // recipe field whose absent key means its neutral value).
     r.quarter_turns = turn.quarter_turns;
     // Independent scalar controls saturate at the recipe contract and are
     // named by `unparsable_crs_numbers` when that changes a foreign value.

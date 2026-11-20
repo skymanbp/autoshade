@@ -81,8 +81,8 @@ use merge::{unspoken_attr_keys};
 #[cfg(test)]
 use merge::{era_attr_keys};
 pub use read::{
-    xmp_to_recipe, xmp_to_recipe_clamped, xmp_to_recipe_clamped_with_diag, xmp_to_recipe_for_photo,
-    xmp_to_recipe_with_diag,
+    carry_over_store_xmp, xmp_to_recipe, xmp_to_recipe_clamped, xmp_to_recipe_clamped_with_diag,
+    xmp_to_recipe_for_photo, xmp_to_recipe_with_diag,
 };
 use read::{is_autoshade_sidecar, read_document, upgrade_era_marker};
 #[cfg(test)]
