@@ -625,6 +625,8 @@ pub(crate) struct AutoShadeApp {
     /// The prefs changed in a way worth writing now (a mode was chosen);
     /// `update` flushes them through eframe's storage and clears this.
     pub(crate) prefs_save_due: bool,
+    /// The update check's state and its persisted half (`update_check.rs`).
+    pub(crate) update: crate::update_check::UpdateState,
     /// Test seam: the mode page's cards as laid this frame.
     #[cfg(test)]
     pub(crate) mode_card_rects: Vec<(Mode, egui::Rect)>,
@@ -2099,6 +2101,7 @@ impl Default for AutoShadeApp {
             mode: Mode::Landscape,
             mode_chosen_this_launch: false,
             prefs_save_due: false,
+            update: Default::default(),
             #[cfg(test)]
             mode_card_rects: Vec::new(),
             normal: Default::default(),
@@ -2134,6 +2137,7 @@ impl AutoShadeApp {
             }
         }
         self.poll_workers(ctx);
+        self.update_check_frame();
         // What quitting would cost, published for the one caller that cannot
         // reach `self`: macOS's `applicationShouldTerminate:`, which AppKit
         // invokes from outside this loop for ⌘Q, the App menu's Quit, the
@@ -2471,6 +2475,7 @@ impl eframe::App for AutoShadeApp {
                 theme: self.theme,
                 accent: self.accent,
                 mode: self.mode,
+                update_check: self.update.prefs.clone(),
             },
         );
     }

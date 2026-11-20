@@ -117,6 +117,7 @@ impl AutoShadeApp {
         app.accent = prefs.accent;
         // Only the highlighted card: the mode page still opens first.
         app.mode = prefs.mode;
+        app.update.restore(prefs.update_check.clone());
         install_look(&app.egui_ctx, app.theme, app.accent);
         // The greeting was set by default() BEFORE the language was known —
         // re-issue it, or a Chinese install opens with one English line.

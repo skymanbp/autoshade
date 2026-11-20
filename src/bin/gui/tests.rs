@@ -33,3 +33,4 @@
     include!("tests/card_kinds.rs");
     include!("tests/xmp_question.rs");
     include!("tests/draft_frames.rs");
+    include!("tests/update_check.rs");

@@ -21,6 +21,8 @@ use crate::*;
 
 use super::SettingsTab;
 
+mod update_row;
+
 /// The label cell of every form row — ONE width, so every control of a page
 /// starts at the same x, and a long label wraps inside its cell instead of
 /// pushing its control to the right.
@@ -782,7 +784,7 @@ impl AutoShadeApp {
         });
     }
 
-    /// The name, the version, and the icon's fine print.
+    /// The name, the version, the icon's fine print, and the update check.
     fn settings_about(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         // Bound first: `scripts/audit_i18n.py` reads a literal inside a label
@@ -800,6 +802,7 @@ impl AutoShadeApp {
                     ),
                 );
             });
+            self.settings_update_row(ui);
         });
     }
 }

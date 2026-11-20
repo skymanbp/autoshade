@@ -59,6 +59,7 @@ mod masks;
 mod mode;
 mod panels;
 mod side_panel;
+mod update_check;
 mod window_chrome;
 mod workers;
 use model::*;

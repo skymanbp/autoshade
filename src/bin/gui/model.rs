@@ -313,6 +313,9 @@ pub(crate) struct Prefs {
     /// older prefs file decodes to `Landscape` through the struct's
     /// `#[serde(default)]`, the workspace every user had before.
     pub(crate) mode: Mode,
+    /// The update check's switch, last automatic check, skipped and last
+    /// found version (`update_check.rs`); an older file loads its defaults.
+    pub(crate) update_check: crate::update_check::UpdatePrefs,
 }
 
 impl Default for Prefs {
@@ -373,6 +376,7 @@ impl Default for Prefs {
             theme: ThemePref::Dark, // the historical look
             accent: AccentPref::Gold,
             mode: Mode::Landscape,
+            update_check: crate::update_check::UpdatePrefs::default(),
         }
     }
 }
