@@ -3440,6 +3440,18 @@ a lookup or a put and never for a build or a develop; a develop takes its
 frame's entry out and puts its own back, and one that finds it taken runs as
 a first sight.
 
+A raster is the same to the chain while the loader hands out the same
+decoded object, and the loader's cache (`mask_raster::load_mask_bitmap`) is
+emptied whole when a file is added to seventeen already held or its byte
+budget is passed. The develop after such a reset decodes its rasters anew
+and is a first sight for the chain from its first raster-backed mask on —
+correct, only slower. A card whose masks read eighteen or more raster
+files empties the cache within every develop: it decodes its rasters anew
+on every develop, as it did before the chain existed, and the chain serves
+it nothing past the masks before its first raster. Under test the loader's
+cache is one per test thread, as the chain's own memory is, so a test that
+develops twice does not depend on the rasters its neighbours load.
+
 **The mask Color tint** (v1.17.0; `toning_amount` / `toning_hue`, Lightroom's
 mask 「颜色」 swatch, `crs:LocalToningSaturation` / `LocalToningHue`) is the last
 step of that fused pass and sits outside its blend (`render::tint_px`): once

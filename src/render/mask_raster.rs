@@ -646,7 +646,7 @@ pub(super) fn load_mask_bitmap(
     g: &MaskGeometry,
     diag: &crate::diag::Diag<'_>,
 ) -> Option<std::sync::Arc<MaskBitmap>> {
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::Arc;
     // Keyed by Option<(mtime, size)>: mtime alone misses a same-length-of-
     // time overwrite on coarse-timestamp filesystems (the thumb cache already
     // carries size for the same reason). `None` payload = FAILED to decode —
@@ -660,22 +660,35 @@ pub(super) fn load_mask_bitmap(
     // made a formerly missing mask that appears mtime-less keep hitting the
     // cached negative forever).
     type Key = Option<(Option<std::time::SystemTime>, u64)>;
-    type Cache = Mutex<std::collections::HashMap<String, (Key, Option<Arc<MaskBitmap>>)>>;
-    static CACHE: OnceLock<Cache> = OnceLock::new();
+    type Map = std::collections::HashMap<String, (Key, Option<Arc<MaskBitmap>>)>;
+    /// The process's one cache, locked for the length of `with`. No user
+    /// code runs under the lock, so poisoning is not reachable — recover
+    /// anyway rather than turning a past panic into a new one.
+    #[cfg(not(test))]
+    fn cache<T>(with: impl FnOnce(&mut Map) -> T) -> T {
+        static CACHE: std::sync::OnceLock<std::sync::Mutex<Map>> = std::sync::OnceLock::new();
+        with(&mut CACHE.get_or_init(Default::default).lock().unwrap_or_else(|p| p.into_inner()))
+    }
+    /// Under test each thread keeps its own, as the mask pass's memory does
+    /// (`mask_memo::memory`). The hard reset below empties the whole cache,
+    /// and a test that develops twice and expects the same decoded object
+    /// back (the mask pass tells a raster by it) was handed a new one
+    /// whenever the tests running beside it had loaded enough files in
+    /// between (2026-11-20: two of the memo's tests, red in a wide run and
+    /// green alone).
+    #[cfg(test)]
+    fn cache<T>(with: impl FnOnce(&mut Map) -> T) -> T {
+        thread_local! {
+            static CACHE: std::cell::RefCell<Map> = std::cell::RefCell::new(Map::new());
+        }
+        CACHE.with(|map| with(&mut map.borrow_mut()))
+    }
     let path = geometry_raster_path(g)?;
-    let cache = CACHE.get_or_init(Default::default);
     let ident: Key = std::fs::metadata(path)
         .ok()
         .map(|m| (m.modified().ok(), m.len()));
-    {
-        // No user code runs under the lock, so poisoning is not reachable —
-        // recover anyway rather than turning a past panic into a new one.
-        let map = cache.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some((cached_t, img)) = map.get(path)
-            && *cached_t == ident
-        {
-            return img.clone();
-        }
+    if let Some(img) = cache(|map| map.get(path).filter(|(cached_t, _)| *cached_t == ident).map(|(_, img)| img.clone())) {
+        return img;
     }
     // Header-only dimension precheck BEFORE the decode (L02): the snapshot
     // loader guards its own calls, but every OTHER path through here (the
@@ -705,8 +718,7 @@ pub(super) fn load_mask_bitmap(
             }
         }
     };
-    {
-        let mut map = cache.lock().unwrap_or_else(|p| p.into_inner());
+    cache(|map| {
         // A recipe holds a handful of masks — a rare hard reset beats
         // LRU bookkeeping on this hot path. Budgeted in BYTES as well
         // as entries: sixteen full-res 61 MP rasters would otherwise
@@ -724,7 +736,7 @@ pub(super) fn load_mask_bitmap(
         } else {
             map.clear();
         }
-    }
+    });
     decoded
 }
 

@@ -123,6 +123,16 @@ fn memory<T>(with: impl FnOnce(&mut Memory) -> T) -> T {
 /// (`load_mask_bitmap`, by the file's time and size) and is another object.
 /// The raster's pixels are not kept alive by it: the raster cache's budget
 /// stays the only thing that holds them.
+///
+/// The loader hands out the same object while its cache holds it, and that
+/// cache is emptied whole when a file is added to seventeen already held or
+/// its byte budget is passed (`load_mask_bitmap`). After such a reset every
+/// raster is decoded anew, so the next develop is a first sight from its
+/// first raster-backed mask on — correct, only slower. A card whose masks
+/// read eighteen or more raster files empties the cache within every
+/// develop: it decodes its rasters anew on every develop, as it did before
+/// this memory existed, and is served nothing past the masks before its
+/// first raster.
 #[derive(Clone)]
 struct MaskKey {
     text: String,
