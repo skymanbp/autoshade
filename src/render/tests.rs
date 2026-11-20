@@ -35,3 +35,4 @@ include!("tests/mask_band.rs");
 include!("tests/mask_band_frame.rs");
 include!("tests/mask_memo.rs");
 include!("tests/colour_field_rows.rs");
+include!("tests/mask_band_memo.rs");

@@ -48,7 +48,7 @@ const CHAIN_SLOTS: usize = 16;
 /// decimal that reads back as itself, `-0.0` with its sign, and a derived
 /// `Debug` prints every field — except two NaNs, so a value holding one has
 /// no text and is never taken for another.
-fn exact_text(value: &impl std::fmt::Debug) -> Option<String> {
+pub(super) fn exact_text(value: &impl std::fmt::Debug) -> Option<String> {
     let text = format!("{value:?}");
     (!text.contains("NaN")).then_some(text)
 }
@@ -58,6 +58,14 @@ thread_local! {
     static UNWARP_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CHAIN_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static CHAIN_TRACE: std::cell::Cell<ChainTrace> = const { std::cell::Cell::new(ChainTrace::NONE) };
+}
+
+/// Whether this thread runs the mask pass from nothing ([`without_chain`]):
+/// the band read's kept planes are then not looked up or kept either
+/// (`mask_band_memo`).
+#[cfg(test)]
+pub(super) fn chain_off() -> bool {
+    CHAIN_OFF.with(std::cell::Cell::get)
 }
 
 /// How many lens maps this thread has built ([`unwarp_of`]).
@@ -133,10 +141,11 @@ fn memory<T>(with: impl FnOnce(&mut Memory) -> T) -> T {
 /// Every kept frame is given back. The editor calls it when the photo, the
 /// card or the resolution on its canvas changes: the frames kept of the one
 /// before can be a quarter of a gigabyte and more, and would otherwise stay
-/// until later frames pushed them out. The lens maps stay (eight of them are
-/// 256 KiB).
+/// until later frames pushed them out. The band read's kept planes go with
+/// them (`mask_band_memo`). The lens maps stay (eight of them are 256 KiB).
 pub fn forget_kept_frames() {
     memory(|m| m.frames.0.clear());
+    super::mask_band_memo::forget();
 }
 
 /// The bytes this thread's kept frames hold, and how many frames are

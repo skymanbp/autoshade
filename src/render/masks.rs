@@ -458,6 +458,11 @@ pub(super) struct Cover<'a> {
     pub(super) m: &'a crate::recipe::LocalAdjustment,
     pub(super) bmp: Option<Bmp<'a>>,
     pub(super) comp_bmps: Vec<Option<Bmp<'a>>>,
+    /// Which decoded raster of the snapshot each layer reads — the base,
+    /// then each component — where the snapshot holds it
+    /// (`MaskRasterSnapshot::held`): how the band read's kept planes know a
+    /// raster (`mask_band_memo::LayerShape`).
+    pub(super) held: Vec<Option<&'a std::sync::Arc<super::mask_raster::MaskBitmap>>>,
     pub(super) unwarp: Option<&'a MaskUnwarp>,
     pub(super) w: usize,
     pub(super) h: usize,
@@ -496,7 +501,8 @@ impl<'a> Cover<'a> {
         {
             return None;
         }
-        Some(Cover { m, bmp, comp_bmps, unwarp, w, h, amount: m.amount.clamp(0.0, 1.0) })
+        let held = std::iter::once(&m.mask).chain(m.components.iter().map(|c| &c.geometry)).map(|g| rasters.held(g)).collect();
+        Some(Cover { m, bmp, comp_bmps, held, unwarp, w, h, amount: m.amount.clamp(0.0, 1.0) })
     }
 
     /// The combined mask coverage × master amount at pixel `(x, y)`, with
@@ -1003,6 +1009,24 @@ impl MaskUnwarp {
         let [_, green, _] = super::channel_luts(profile, 0.0, dims);
         u.pre = Some(std::sync::Arc::new(green));
         Some(u)
+    }
+
+    /// The bytes of its tables: both, where it holds the corrected frame's.
+    pub(super) fn table_bytes(&self) -> usize {
+        std::mem::size_of::<f32>() * (self.lut.len() + self.pre.as_ref().map_or(0, |pre| pre.len()))
+    }
+
+    /// Are the two maps one map: every number either reads — both tables,
+    /// the corrected frame's table or its absence, the radius and the
+    /// frame's sides — the same bits?
+    pub(super) fn same_map(&self, other: &Self) -> bool {
+        let same = |a: &[f32], b: &[f32]| a.len() == b.len() && a.iter().zip(b).all(|(p, q)| p.to_bits() == q.to_bits());
+        let pre = match (&self.pre, &other.pre) {
+            (Some(a), Some(b)) => same(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        pre && same(&self.lut, &other.lut) && [self.rr, self.w, self.h].map(f32::to_bits) == [other.rr, other.w, other.h].map(f32::to_bits)
     }
 
     /// The ORIGINAL-frame point the pixel at `(nx, ny)` shows: itself, or, for

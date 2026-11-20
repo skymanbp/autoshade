@@ -1,6 +1,7 @@
 //! A raster mask's band on a content edge: the weight each pixel there is OWED — each of its two contents' coverage, for the share of its light that is that content's — the layer fold that carries it and the list that holds it. The read that finds it is `mask_band`.
 
 use super::mask_band::layer_band;
+use super::mask_band_memo::LayerShape;
 use super::mask_weight::mask_weight_in;
 use super::masks::Cover;
 use super::*;
@@ -327,7 +328,8 @@ impl BandShares {
                     let (nx, ny) = cover.centre(x, y);
                     layers.one(layer, nx, ny)
                 };
-                let rows = layer_band(data, (w, h), block_edge(raster.img, w, h), budget, &coverage);
+                let shape = LayerShape::of(cover, layer);
+                let rows = layer_band(data, (w, h), block_edge(raster.img, w, h), budget, &coverage, shape.as_ref());
                 budget = budget.saturating_sub(rows.iter().map(Vec::len).sum());
                 rows
             })

@@ -1,5 +1,6 @@
 //! The READ of a raster mask's band on a content edge (J149, v1.18.0): the frame in blocks of the raster's own pixels, the two sides a band block lies between (a walk of the raster's slope to each plateau), the third beside them, the window a noisy frame is read through, and what each band pixel is owed between them. The law, and what is done with the answer, are `mask_owed`'s (`BandShares`).
 
+use super::mask_band_memo::{self, LayerShape, Planes};
 use super::mask_owed::{between, light_fraction, linear_luminance, BandRow, Owed, MASK_BAND_REACH, MASK_BAND_STEP_FLOOR};
 use super::*;
 
@@ -107,12 +108,19 @@ fn mean_of_nine(plane: &[f32], (rows, gw): (usize, usize), row: usize, bx: usize
 /// planes fit [`BAND_STRIP_BYTES`]; a strip reads one block row more than a
 /// band block can (its walk's end, and that end's own window) past each of
 /// its ends, so a pixel's answer does not depend on where the strips fall.
+///
+/// A strip's block coverage, its 3 x 3 mean and the mean's slope read
+/// `coverage` and the strip's place and nothing of `data`: where `shape`
+/// knows the layer they are kept between develops and handed back as
+/// computed (`mask_band_memo`); with no `shape` they are computed here, as
+/// they always were.
 pub(super) fn layer_band(
     data: &[[f32; 3]],
     (w, h): (usize, usize),
     block: usize,
     budget: usize,
     coverage: &(dyn Fn(usize, usize) -> f32 + Sync),
+    shape: Option<&LayerShape>,
 ) -> Vec<BandRow> {
     let (gw, gh) = (w.div_ceil(block), h.div_ceil(block));
     // The furthest block a band block reads: the end of a walk, and the window round it.
@@ -129,18 +137,22 @@ pub(super) fn layer_band(
         // The block rows this strip reads.
         let (lo, hi) = (first.saturating_sub(halo), (last + halo).min(gh));
         let grid = (hi - lo, gw);
-        let mut cover = vec![0.0f32; (hi - lo) * gw];
-        cover.par_chunks_mut(gw).enumerate().for_each(|(i, row)| {
-            let ys = span(lo + i, h);
-            for (bx, mean) in row.iter_mut().enumerate() {
-                let xs = span(bx, w);
-                let sum: f32 = ys.clone().map(|y| xs.clone().map(|x| coverage(x, y)).sum::<f32>()).sum();
-                *mean = sum / (ys.len() * xs.len()) as f32;
-            }
+        let planes = mask_band_memo::planes(shape, [w, h, block, first], || {
+            let mut cover = vec![0.0f32; (hi - lo) * gw];
+            cover.par_chunks_mut(gw).enumerate().for_each(|(i, row)| {
+                let ys = span(lo + i, h);
+                for (bx, mean) in row.iter_mut().enumerate() {
+                    let xs = span(bx, w);
+                    let sum: f32 = ys.clone().map(|y| xs.clone().map(|x| coverage(x, y)).sum::<f32>()).sum();
+                    *mean = sum / (ys.len() * xs.len()) as f32;
+                }
+            });
+            let smooth: Vec<f32> = (0..cover.len()).into_par_iter().map(|i| mean_of_nine(&cover, grid, i / gw, i % gw)).collect();
+            // How steeply the mean steps at each block: over `BAND_FLAT_STEP` the block is on the band.
+            let slope: Vec<f32> = (0..cover.len()).into_par_iter().map(|i| largest_step(&smooth, grid, i / gw, i % gw)).collect();
+            Planes { cover, smooth, slope }
         });
-        let smooth: Vec<f32> = (0..cover.len()).into_par_iter().map(|i| mean_of_nine(&cover, grid, i / gw, i % gw)).collect();
-        // How steeply the mean steps at each block: over `BAND_FLAT_STEP` the block is on the band.
-        let slope: Vec<f32> = (0..cover.len()).into_par_iter().map(|i| largest_step(&smooth, grid, i / gw, i % gw)).collect();
+        let (cover, smooth, slope) = (planes.cover.as_slice(), planes.smooth.as_slice(), planes.slope.as_slice());
         // This strip's own blocks, as the strip's planes number them.
         let own = (first - lo) * gw..(last - lo) * gw;
         if slope[own.clone()].iter().all(|s| *s <= BAND_FLAT_STEP) {
@@ -171,7 +183,7 @@ pub(super) fn layer_band(
                 }
             }
         });
-        let blocks = Blocks { lo, gw, gh, block, frame: (w, h), cover: &cover, smooth: &smooth, slope: &slope, levels: &levels };
+        let blocks = Blocks { lo, gw, gh, block, frame: (w, h), cover, smooth, slope, levels: &levels };
         let found: Vec<Vec<BandRow>> = (first..last)
             .into_par_iter()
             .map(|gy| {

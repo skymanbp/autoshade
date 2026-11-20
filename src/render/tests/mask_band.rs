@@ -37,7 +37,7 @@ fn band_weights(
     budget: usize,
     coverage: &(dyn Fn(usize, usize) -> f32 + Sync),
 ) -> Vec<Vec<(u32, [f32; 4])>> {
-    let rows = mask_band::layer_band(data, dims, block, budget, coverage);
+    let rows = mask_band::layer_band(data, dims, block, budget, coverage, None);
     rows.into_iter().map(|row| row.into_iter().map(|(x, owed)| (x, owed.weights())).collect()).collect()
 }
 

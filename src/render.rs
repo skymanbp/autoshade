@@ -59,6 +59,7 @@ mod layers;
 mod lens_blur;
 mod luma;
 mod mask_band;
+mod mask_band_memo;
 mod mask_falloff;
 mod mask_memo;
 mod mask_raster;
