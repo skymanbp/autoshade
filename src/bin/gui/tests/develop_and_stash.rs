@@ -39,10 +39,12 @@
         // No gesture is running when it lands (five seconds after the last
         // edit): DURING one, such a frame is shown on its way to the live
         // recipe's own (`draft.rs`, tests/draft_frames.rs). It carries a real
-        // dispatch tag, so the gesture rule is what drops it.
+        // dispatch tag and is a frame of a recipe the canvas does not show,
+        // so the gesture rule alone is what drops it.
+        app.recipe.masks[0].exposure_ev = 1.2; // an edit, its develop in flight…
         let stale = build_preview(base, app.recipe.clone(), false, None, autoshade::render::SourceFrame::Baked(None, None))
             .tagged(app.frame_tag());
-        app.recipe.masks[0].exposure_ev = 1.9; // the recipe moved on
+        app.recipe.masks[0].exposure_ev = 1.9; // …and the recipe moved on
         app.dirty = false;
         app.finish_redevelop_at(&ctx, Ok(stale), Instant::now() + Duration::from_secs(5));
         assert_eq!(app.develop_count, 1, "stale frame (recipe moved) discarded");

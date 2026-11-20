@@ -40,7 +40,7 @@
 
     /// The next worker result, waited for (one develop of the fixture).
     fn next_develop(app: &AutoShadeApp) -> Msg {
-        app.rx.as_ref().unwrap().recv_timeout(Duration::from_secs(300)).expect("a develop was dispatched and lands")
+        app.rx.as_ref().unwrap().recv_timeout(Duration::from_secs(120)).expect("a develop was dispatched and lands")
     }
 
     /// The draft the scheduler dispatched, as it lands.
