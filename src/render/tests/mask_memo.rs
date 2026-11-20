@@ -148,7 +148,7 @@ fn a_pass_resumed_from_a_kept_frame_is_the_pass_from_nothing_bit_for_bit() {
     let other_geom = geometry_profile(&other_lens).into_owned();
     let dims = (96usize, 64usize);
     let (count, last) = (base.masks.len(), base.masks.len() - 1);
-    let none = mask_memo::ChainTrace { kept_start: false, resumed: 0, kept_at: None };
+    let none = mask_memo::ChainTrace::NONE;
     let lenses = [MaskFrame::AsRendered, MaskFrame::Corrected { profile: &geom }, MaskFrame::WarpedDownstream { profile: &geom, amount: 0.0 }];
     for (nth, lens) in lenses.into_iter().enumerate() {
         // Each lens frame its own picture: its first sight is a first sight.
@@ -164,7 +164,7 @@ fn a_pass_resumed_from_a_kept_frame_is_the_pass_from_nothing_bit_for_bit() {
         // Seen again: kept. A third time: every mask served.
         let (again, trace) = kept(&base);
         assert!(again == plain, "{lens:?}: the second develop");
-        assert_eq!(trace, mask_memo::ChainTrace { kept_start: true, resumed: 0, kept_at: Some(count) }, "{lens:?}: the second sight keeps the frame");
+        assert_eq!(trace, mask_memo::ChainTrace { kept_start: true, kept_at: Some(count), ..none }, "{lens:?}: the second sight keeps the frame");
         let (served, trace) = kept(&base);
         assert!(served == plain && trace.resumed == count, "{lens:?}: the third develop is served whole: {trace:?}");
 
@@ -223,18 +223,23 @@ fn a_pass_resumed_from_a_kept_frame_is_the_pass_from_nothing_bit_for_bit() {
         assert_eq!(trace, none, "{lens:?}: another size is another frame, seen for the first time");
         assert_eq!(memo_pass(&frame, turned, &base, lens).1.resumed, 0, "{lens:?}: and nothing of the other size is served to it");
 
-        // Another picture of the same size under the same masks.
-        memo_settle(&frame, dims, &base, lens);
-        let mut other = frame.clone();
-        other[dims.0 * dims.1 / 2 + 7][1] += 0.25;
-        let (out, _) = memo_pass(&other, dims, &base, lens);
-        assert!(out == memo_fresh(&other, dims, &base, lens) && out != plain, "{lens:?}: another picture");
-
         // Two sizes side by side — a draft and its canvas — each keep their own.
         memo_settle(&frame, dims, &base, lens);
         let (large, wide) = (memo_frame(2 * dims.0, 2 * dims.1, 0.01 * nth as f32), (2 * dims.0, 2 * dims.1));
         memo_settle(&large, wide, &base, lens);
         assert_eq!(kept(&base).1.resumed, count, "{lens:?}: the small frame is still served after the large one");
+
+        // Another picture of the same size under the same masks, and one the
+        // hint cannot tell from the kept one: the large frame is hinted by
+        // every sixth pixel, and this one differs at a pixel between two.
+        let mut other = large.clone();
+        let odd = wide.0 * wide.1 / 2 + 7;
+        assert!(wide.0 * wide.1 / 4096 == 6 && !odd.is_multiple_of(6), "premise: the changed pixel is not one the hint reads");
+        other[odd][1] += 0.25;
+        let (out, trace) = memo_pass(&other, wide, &base, lens);
+        assert!(out == memo_fresh(&other, wide, &base, lens), "{lens:?}: another picture is the pass from nothing");
+        assert!(out != memo_fresh(&large, wide, &base, lens), "premise: the other picture shows");
+        assert!(trace.kept_start && trace.resumed == 0, "{lens:?}: found by its hint, told apart by its pixels: {trace:?}");
     }
 
     // Another lens fact: the same frame, masks and recipe read through another profile.
@@ -327,4 +332,92 @@ fn a_preview_developed_again_is_the_preview_developed_once() {
         assert!(develop_preview(&base, &moved).to_rgb8().into_raw() == fresh, "moved, sight {sight}");
     }
     assert_eq!(mask_memo::chain_trace().resumed, 9, "the second move starts at the mask in hand");
+}
+
+/// The colour field's band is read once for a frame and handed out again
+/// while the frame the masks find and its zone mask are the same — a slider
+/// in hand on another mask — and read again when the zone's raster is
+/// repainted, when the zone's own slider moves, for another picture, and
+/// every time for a zone whose raster the develop's snapshot does not hold.
+///
+/// MUTATIONS THIS KILLS (each run, 2026-11-19): `MaskChain::field_band`
+/// serving without comparing the zone mask — the zone's own slider and the
+/// repainted raster are handed the kept band; `MaskChain::open` carrying the
+/// band over whatever the pixels — the other picture is.
+#[test]
+fn the_colour_fields_band_is_kept_with_the_frame_and_its_zone_mask() {
+    use crate::recipe::{ColourField, MaskRole};
+    let dir = crate::test_dir("mask-memo-field");
+    let (w, h, edge) = (120u32, 72u32, 60u32);
+    let path = dir.join("sky.png");
+    let step = |from: f32| image::GrayImage::from_fn(w, h, |x, _| image::Luma([255 - (((x as f32 - from) / 5.0).clamp(0.0, 1.0) * 255.0).round() as u8]));
+    save_mask_raster(&step(57.5), &path, None).unwrap();
+    let base = band_scene(w, h, edge, 150, 20);
+    let (fx, fy, fb) = (3usize, 2usize, 2usize);
+    let lifted = |v: usize| (v / fb).is_multiple_of(fx);
+    let grid: Vec<[f32; 5]> = (0..fx * fy * fb).map(|v| if lifted(v) { [0.5, 0.0, 0.0, 0.0, 0.0] } else { [0.0; 5] }).collect();
+    let owners = (0..fx * fy * fb).map(|v| if lifted(v) { ColourField::OWNER_SKY } else { ColourField::OWNER_LAND }).collect();
+    let field = ColourField { x: fx, y: fy, b: fb, grid, owners, amount: 1.0, enabled: true };
+    let zone = |exposure_ev: f32| LocalAdjustment {
+        mask: MaskGeometry::Bitmap { path: path.to_string_lossy().into_owned() },
+        role: MaskRole::ZoneSky,
+        exposure_ev,
+        ..Default::default()
+    };
+    let hand = |exposure_ev: f32| LocalAdjustment {
+        mask: MaskGeometry::Linear { zero_x: 0.9, zero_y: 0.5, full_x: 0.1, full_y: 0.5 },
+        exposure_ev,
+        ..Default::default()
+    };
+    let recipe = |zone_ev: f32, hand_ev: f32| EditRecipe { masks: vec![zone(zone_ev), hand(hand_ev)], colour_field: Some(field.clone()), ..Default::default() };
+    let fresh = |r: &EditRecipe| mask_memo::without_chain(|| develop_preview(&base, r).to_rgb8().into_raw());
+    let kept = |r: &EditRecipe| (develop_preview(&base, r).to_rgb8().into_raw(), mask_memo::chain_trace());
+
+    let r = recipe(0.2, 0.3);
+    let plain = fresh(&r);
+    assert!(plain != fresh(&EditRecipe { colour_field: None, ..r.clone() }), "premise: the field shows");
+    for (sight, served) in [false, false, true].into_iter().enumerate() {
+        let (out, trace) = kept(&r);
+        assert!(out == plain, "sight {sight}");
+        assert_eq!(trace.field_served, served, "sight {sight}: read on the first two, handed out from the third");
+    }
+    // A slider in hand on the other mask: the band is the kept one, move after move.
+    for hand_ev in [0.5f32, 0.7] {
+        let moved = recipe(0.2, hand_ev);
+        let (out, trace) = kept(&moved);
+        assert!(out == fresh(&moved) && out != plain, "the other mask moved to {hand_ev}");
+        assert!(trace.field_served, "the zone and the frame the masks find are the same: {trace:?}");
+    }
+    // The zone's own slider: the band does not read it, and is read again all the same.
+    let own = recipe(0.4, 0.7);
+    let (out, trace) = kept(&own);
+    assert!(out == fresh(&own) && !trace.field_served, "the zone's own slider: {trace:?}");
+    // Another picture the hint cannot tell from this one: the frame is hinted
+    // by every second pixel, and the column right of the edge is an odd one.
+    assert!((w * h) as usize / 4096 == 2 && (edge + 1) % 2 == 1 && w % 2 == 0, "premise: the changed pixels are not ones the hint reads");
+    let mut lit = base.to_rgb8();
+    for y in 0..h {
+        lit.put_pixel(edge + 1, y, image::Rgb([150; 3]));
+    }
+    let lit = DynamicImage::ImageRgb8(lit);
+    let other = mask_memo::without_chain(|| develop_preview(&lit, &own).to_rgb8().into_raw());
+    let out = develop_preview(&lit, &own).to_rgb8().into_raw();
+    let trace = mask_memo::chain_trace();
+    assert!(out == other, "another picture reads its own band");
+    assert!(trace.kept_start && !trace.field_served && trace.resumed == 0, "found by its hint, told apart by its pixels: {trace:?}");
+    assert!(!kept(&own).1.field_served && kept(&own).1.field_served, "back on the first picture: read once, then handed out");
+    // The zone's raster repainted under its path, its step six pixels along.
+    assert!(kept(&own).1.field_served, "premise: settled on the old raster");
+    let before = fresh(&own);
+    save_mask_raster(&step(63.5), &path, None).unwrap();
+    let (out, trace) = kept(&own);
+    assert!(out == fresh(&own) && out != before, "the repainted zone is read");
+    assert!(!trace.field_served, "a repainted zone's band is read again: {trace:?}");
+    // A zone with no controls of its own: its raster is loaded apart, and nothing read from it is kept.
+    let idle = recipe(0.0, 0.7);
+    let plain = fresh(&idle);
+    for sight in 0..3 {
+        let (out, trace) = kept(&idle);
+        assert!(out == plain && !trace.field_served, "sight {sight}: an idle zone's band is read every time: {trace:?}");
+    }
 }

@@ -75,6 +75,13 @@ use super::*;
 /// The colour field's own band ([`field_sky_band`]) is read before this pass
 /// and taken after it, so that one list does ride through the spatial passes:
 /// the row after it.
+///
+/// **`chain`** is the pass's memory of this frame, opened and closed by the
+/// caller ([`MaskChain`], which owns the rule and why a kept frame cannot be
+/// stale): the masks an earlier develop of this very frame already applied
+/// are not applied again, and the pass starts at the first one that
+/// differs, on the frame that one found.
+#[allow(clippy::too_many_arguments)] // the frame's pixels, size, recipe, rasters, lens frame and film scale, and the pass's memory of it
 pub(super) fn apply_masks(
     data: &mut [[f32; 3]],
     w: usize,
@@ -83,6 +90,7 @@ pub(super) fn apply_masks(
     rasters: &MaskRasterSnapshot,
     frame: MaskFrame<'_>,
     film: FilmScale,
+    chain: &mut MaskChain,
 ) {
     if w == 0 || h == 0 {
         return; // both passes below chunk by w; rayon asserts chunk_size != 0
@@ -105,12 +113,8 @@ pub(super) fn apply_masks(
         .iter()
         .any(|m| m.enabled && m.amount.clamp(0.0, 1.0) != 0.0 && m.dehaze != 0.0)
         .then(|| dehaze_airlight(data, w));
-    // The masks an earlier develop of this very frame already applied are not
-    // applied again: the pass starts at the first one that differs, on the
-    // frame that one found ([`super::mask_memo::MaskChain`], which owns the
-    // rule and why a kept frame cannot be stale). The airlight above is read
-    // first, on the frame the masks found.
-    let mut chain = super::mask_memo::MaskChain::open(data, (w, h), r, rasters, frame, film);
+    // The airlight above is read first, on the frame the masks found; from
+    // here `data` is the frame the first mask to run finds.
     let first = chain.resume(data);
     for (index, stored_mask) in r.masks.iter().enumerate() {
         chain.reached(index, data);
@@ -421,7 +425,6 @@ pub(super) fn apply_masks(
             detail::luma_nr(data, w, h, &p, film, spatial_weight);
         }
     }
-    chain.close(r.masks.len(), data);
 }
 
 /// The brush rasters one adjustment stamps at a frame size (a BRUSH group
@@ -586,6 +589,26 @@ pub(super) fn field_sky_band(
     band.unwrap_or_default()
 }
 
+/// Which mask the colour field's partition is read from, and whether it is
+/// the LAND zone's: the first sky zone mask, or with none the first land
+/// zone mask.
+fn field_zone(r: &EditRecipe) -> Option<(usize, bool)> {
+    use crate::recipe::MaskRole;
+    let first = |role: MaskRole| r.masks.iter().position(|m| m.role == role);
+    first(MaskRole::ZoneSky).map(|index| (index, false)).or_else(|| first(MaskRole::ZoneLand).map(|index| (index, true)))
+}
+
+/// [`field_zone`]'s mask where a develop may keep what is read from it
+/// ([`MaskChain::field_band`]): the zone's raster, if it reads one, is the
+/// develop's own snapshot's. A zone with no controls of its own has its
+/// raster loaded apart ([`with_field_zone`]), where the pass's memory does
+/// not see which object it is — so nothing read from it is kept.
+pub(super) fn field_zone_kept(r: &EditRecipe, rasters: &MaskRasterSnapshot) -> Option<usize> {
+    let (index, _) = field_zone(r)?;
+    let zone = &r.masks[index].mask;
+    (!is_raster_backed(zone) || rasters.held(zone).is_some()).then_some(index)
+}
+
 /// The zone mask the colour field's partition is read from
 /// ([`field_sky_coverage`]) as the [`Cover`] of its base geometry on a
 /// `w × h` frame in `frame`, handed to `read` with whether it is the LAND
@@ -599,13 +622,8 @@ fn with_field_zone<T>(
     h: usize,
     read: impl FnOnce(&Cover<'_>, bool) -> T,
 ) -> Option<T> {
-    use crate::recipe::MaskRole;
-    let (stored, land) = r
-        .masks
-        .iter()
-        .find(|m| m.role == MaskRole::ZoneSky)
-        .map(|m| (m, false))
-        .or_else(|| r.masks.iter().find(|m| m.role == MaskRole::ZoneLand).map(|m| (m, true)))?;
+    let (index, land) = field_zone(r)?;
+    let stored = &r.masks[index];
     if w == 0 || h == 0 {
         return None;
     }

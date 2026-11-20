@@ -40,7 +40,7 @@ fn exact_text(value: &impl std::fmt::Debug) -> Option<String> {
 thread_local! {
     static UNWARP_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CHAIN_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static CHAIN_TRACE: std::cell::Cell<ChainTrace> = const { std::cell::Cell::new(ChainTrace { kept_start: false, resumed: 0, kept_at: None }) };
+    static CHAIN_TRACE: std::cell::Cell<ChainTrace> = const { std::cell::Cell::new(ChainTrace::NONE) };
 }
 
 /// How many lens maps this thread has built ([`unwarp_of`]).
@@ -117,6 +117,7 @@ fn memory<T>(with: impl FnOnce(&mut Memory) -> T) -> T {
 /// itself, held, so the same one is the same bytes and its address is no one
 /// else's. A file repainted under its path is decoded anew by the loader
 /// (`load_mask_bitmap`, by the file's time and size) and is another object.
+#[derive(Clone)]
 struct MaskKey {
     text: String,
     rasters: Vec<Option<Arc<MaskBitmap>>>,
@@ -158,12 +159,19 @@ struct Slot {
     start: Option<Vec<[f32; 3]>>,
     /// The frame as mask `.0` found it — every mask before it applied.
     resume: Option<(usize, Vec<[f32; 3]>)>,
+    /// The colour field's band on the frame the masks found
+    /// (`masks::field_sky_band`), with the zone mask it was read from:
+    /// which mask, and the mask.
+    field: Option<FieldBand>,
 }
+
+type FieldBand = (usize, MaskKey, Vec<(u32, f32)>);
 
 impl Slot {
     fn bytes(&self) -> usize {
         let pixels = self.start.as_ref().map_or(0, Vec::len) + self.resume.as_ref().map_or(0, |(_, frame)| frame.len());
-        pixels * std::mem::size_of::<[f32; 3]>() + self.context.len() + self.masks.iter().map(MaskKey::bytes).sum::<usize>()
+        let band = self.field.as_ref().map_or(0, |(_, _, band)| std::mem::size_of_val(band.as_slice()));
+        pixels * std::mem::size_of::<[f32; 3]>() + band + self.context.len() + self.masks.iter().map(MaskKey::bytes).sum::<usize>()
     }
 }
 
@@ -222,6 +230,14 @@ pub(super) struct ChainTrace {
     pub(super) resumed: usize,
     /// The mask whose frame is kept after this pass, if one is.
     pub(super) kept_at: Option<usize>,
+    /// Whether the colour field's band was handed out as kept.
+    pub(super) field_served: bool,
+}
+
+#[cfg(test)]
+impl ChainTrace {
+    /// A pass that kept nothing and was served nothing.
+    pub(super) const NONE: Self = Self { kept_start: false, resumed: 0, kept_at: None, field_served: false };
 }
 
 #[cfg(test)]
@@ -250,7 +266,9 @@ pub(super) fn without_chain<T>(run: impl FnOnce() -> T) -> T {
 ///
 /// **What is kept.** The frame as the first mask that differs from the last
 /// develop's finds it. A later develop of the same frame whose masks before
-/// that one are the same takes it and starts there.
+/// that one are the same takes it and starts there. And the colour field's
+/// band, which is read on the frame the masks find before any of them runs
+/// ([`MaskChain::field_band`]): 29 ms of each develop on that card.
 ///
 /// **Why a kept frame cannot be stale.** The frame mask `k` finds is computed
 /// from the frame the masks found, the frame's size, the masks before `k`,
@@ -275,6 +293,9 @@ pub(super) struct MaskChain(Option<Run>);
 
 struct Run {
     slot: Slot,
+    /// The last develop's band of the colour field, where the pixels and
+    /// the context are that develop's.
+    field_before: Option<FieldBand>,
     /// The mask whose frame is to be kept this time; `None` keeps what is held.
     keep_at: Option<usize>,
 }
@@ -289,12 +310,12 @@ impl MaskChain {
         film: FilmScale,
     ) -> Self {
         #[cfg(test)]
-        CHAIN_TRACE.with(|t| t.set(ChainTrace { kept_start: false, resumed: 0, kept_at: None }));
+        CHAIN_TRACE.with(|t| t.set(ChainTrace::NONE));
         #[cfg(test)]
         if CHAIN_OFF.with(std::cell::Cell::get) {
             return Self(None);
         }
-        if r.masks.is_empty() || data.len() != w * h || !kept_under(data.len(), CHAIN_BYTES) {
+        if r.masks.is_empty() || data.is_empty() || data.len() != w * h || !kept_under(data.len(), CHAIN_BYTES) {
             return Self(None);
         }
         let rest = EditRecipe { masks: Vec::new(), ..r.clone() };
@@ -305,7 +326,7 @@ impl MaskChain {
         let at = (w, h, hint(data));
         let before = memory(|m| m.frames.take(at));
         let Some(before) = before else {
-            return Self(Some(Run { slot: Slot { at, context, masks, start: None, resume: None }, keep_at: None }));
+            return Self(Some(Run { slot: Slot { at, context, masks, start: None, resume: None, field: None }, field_before: None, keep_at: None }));
         };
         // Seen before: kept from here on. What was kept of it holds where the
         // pixels and the context are the same.
@@ -316,7 +337,38 @@ impl MaskChain {
         let shared = if before.context == context { before.masks.iter().zip(&masks).take_while(|(a, b)| a == b).count() } else { 0 };
         let resume = before.resume.filter(|(index, _)| same && *index <= shared);
         let keep_at = (shared > 0 && resume.as_ref().map(|(index, _)| *index) != Some(shared)).then_some(shared);
-        Self(Some(Run { slot: Slot { at, context, masks, start: Some(start), resume }, keep_at }))
+        let field_before = before.field.filter(|_| same);
+        Self(Some(Run { slot: Slot { at, context, masks, start: Some(start), resume, field: None }, field_before, keep_at }))
+    }
+
+    /// The colour field's band on the frame the masks find: `read`'s
+    /// answer, or the last develop's where it is the same answer. `zone` is
+    /// the mask the band is read from (`masks::field_zone_kept`).
+    ///
+    /// The band is computed from the frame the masks find, the zone mask's
+    /// base geometry and raster, the lens frame and the frame's size
+    /// (`masks::field_sky_band`). It is served when the pixels and the
+    /// context are the last develop's ([`MaskChain`]), the zone is the same
+    /// mask of the list, and that mask is the last develop's in every
+    /// field and raster ([`MaskKey`]) — its sliders too, which the band
+    /// does not read: a zone whose own slider is in hand reads its band
+    /// every time. With no `zone` it is read every time.
+    pub(super) fn field_band(&mut self, zone: Option<usize>, read: impl FnOnce() -> Vec<(u32, f32)>) -> Vec<(u32, f32)> {
+        let (Some(run), Some(zone)) = (&mut self.0, zone) else { return read() };
+        let Some(key) = run.slot.masks.get(zone) else { return read() };
+        let band = match run.field_before.take() {
+            Some((index, mask, band)) if index == zone && mask == *key => {
+                #[cfg(test)]
+                CHAIN_TRACE.with(|t| t.set(ChainTrace { field_served: true, ..t.get() }));
+                band
+            }
+            _ => read(),
+        };
+        // Kept with the frame it was read on: from the frame's second sight.
+        if run.slot.start.is_some() {
+            run.slot.field = Some((zone, key.clone(), band.clone()));
+        }
+        band
     }
 
     /// The first mask to run: `data` is made the frame that mask finds.
@@ -361,7 +413,7 @@ mod tests {
     use super::*;
 
     fn slot(at: u64, pixels: usize) -> Slot {
-        Slot { at: (4, 4, at), context: String::new(), masks: Vec::new(), start: Some(vec![[0.0; 3]; pixels]), resume: None }
+        Slot { at: (4, 4, at), context: String::new(), masks: Vec::new(), start: Some(vec![[0.0; 3]; pixels]), resume: None, field: None }
     }
 
     /// The list holds its bytes: the oldest frames go first, and a frame put

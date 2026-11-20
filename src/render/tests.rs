@@ -1,6 +1,14 @@
 use super::*;
 use crate::recipe::{EditRecipe, LocalAdjustment};
 
+/// The mask pass with a memory of the frame of its own, opened and closed
+/// round it as the develop does round its own (`develop_from_masks`).
+fn apply_masks(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe, rasters: &MaskRasterSnapshot, frame: MaskFrame<'_>, film: FilmScale) {
+    let mut chain = MaskChain::open(data, (w, h), r, rasters, frame, film);
+    super::apply_masks(data, w, h, r, rasters, frame, film, &mut chain);
+    chain.close(r.masks.len(), data);
+}
+
 // The tests themselves, in parts under tests/: each file is spliced in here
 // by include!, so its items are items of this module and every test keeps
 // its name and its path. The order is the order the old file had.

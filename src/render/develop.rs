@@ -566,11 +566,20 @@ fn develop_from_masks(
     //    below may leave them at one level (`masks::field_sky_band`). A sparse
     //    list, so it rides beside the frame through the mask pass.
     let owned = r.colour_field.as_ref().is_some_and(|f| f.renderable() && !f.owners.is_empty());
-    let field_band = if owned { masks::field_sky_band(r, rasters, frame, w, h, data) } else { Vec::new() };
+    //    What an earlier develop of this very frame read and applied is kept
+    //    and not done again (`MaskChain`): the band, read on the frame the
+    //    masks find, and the masks before the first one that changed.
+    let mut chain = MaskChain::open(data, (w, h), r, rasters, frame, film);
+    let field_band = if owned {
+        chain.field_band(masks::field_zone_kept(r, rasters), || masks::field_sky_band(r, rasters, frame, w, h, data))
+    } else {
+        Vec::new()
+    };
     // 6) local masked adjustments (linear/radial gradients).
     if !r.masks.is_empty() {
-        apply_masks(data, w, h, r, rasters, frame, film);
+        apply_masks(data, w, h, r, rasters, frame, film, &mut chain);
     }
+    chain.close(r.masks.len(), data);
     // 7) the colour field, after the masks on purpose: it is the residual the
     //    mask-shaped controls above could not reach, so it must read the
     //    frame they produced. Its guide is the render's own smoothed luma at
