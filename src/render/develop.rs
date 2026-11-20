@@ -846,48 +846,54 @@ fn apply_colour_field_in<S: std::ops::Deref<Target = [f32]>>(
     let sky = sky.as_deref().filter(|s| s.len() == data.len());
     let axes = FieldAxes::new(w, h, field.x, field.y, corrected);
     let amount = field.amount.clamp(0.0, 1.0);
-    for (i, c) in data.iter_mut().enumerate() {
-        let (gx, gy) = axes.at(i);
-        let coords = [gx, gy, guide[i].clamp(0.0, 1.0) * (field.b - 1) as f32];
-        let limits = [field.x, field.y, field.b];
-        let (mut low, mut high, mut frac) = ([0usize; 3], [0usize; 3], [0.0f32; 3]);
-        for (axis, &limit) in limits.iter().enumerate() {
-            let floor = (coords[axis].floor() as i64).clamp(0, limit as i64 - 1) as usize;
-            (low[axis], high[axis]) = (floor, (floor + 1).min(limit - 1));
-            frac[axis] = coords[axis] - floor as f32;
-        }
-        let (mut ids, mut weights) = ([0usize; 8], [0.0f32; 8]);
-        for slot in 0..8 {
-            let up = [slot >> 2 & 1, slot >> 1 & 1, slot & 1];
-            let at = |a: usize| if up[a] == 1 { high[a] } else { low[a] };
-            let mass = |a: usize| if up[a] == 1 { frac[a] } else { 1.0 - frac[a] };
-            ids[slot] = (at(1) * field.x + at(0)) * field.b + at(2);
-            weights[slot] = mass(0) * mass(1) * mass(2);
-        }
-        if let Some(sky) = sky {
-            field_owned_weights(&mut weights, &ids.map(|id| field.owners[id]), sky[i]);
-        }
-        let mut p = [0.0f64; 5];
-        for (&id, &weight) in ids.iter().zip(&weights) {
-            let vertex = &field.grid[id];
-            for (q, slot) in p.iter_mut().enumerate() {
-                *slot += weight as f64 * vertex[q] as f64;
+    // Each pixel reads its own place, its own guide and partition values and
+    // the grid, and writes itself alone: the rows are read side by side, every
+    // pixel by the same expressions in the same order as one after another.
+    data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for (x, c) in row.iter_mut().enumerate() {
+            let i = y * w + x;
+            let (gx, gy) = axes.at(i);
+            let coords = [gx, gy, guide[i].clamp(0.0, 1.0) * (field.b - 1) as f32];
+            let limits = [field.x, field.y, field.b];
+            let (mut low, mut high, mut frac) = ([0usize; 3], [0usize; 3], [0.0f32; 3]);
+            for (axis, &limit) in limits.iter().enumerate() {
+                let floor = (coords[axis].floor() as i64).clamp(0, limit as i64 - 1) as usize;
+                (low[axis], high[axis]) = (floor, (floor + 1).min(limit - 1));
+                frac[axis] = coords[axis] - floor as f32;
             }
+            let (mut ids, mut weights) = ([0usize; 8], [0.0f32; 8]);
+            for slot in 0..8 {
+                let up = [slot >> 2 & 1, slot >> 1 & 1, slot & 1];
+                let at = |a: usize| if up[a] == 1 { high[a] } else { low[a] };
+                let mass = |a: usize| if up[a] == 1 { frac[a] } else { 1.0 - frac[a] };
+                ids[slot] = (at(1) * field.x + at(0)) * field.b + at(2);
+                weights[slot] = mass(0) * mass(1) * mass(2);
+            }
+            if let Some(sky) = sky {
+                field_owned_weights(&mut weights, &ids.map(|id| field.owners[id]), sky[i]);
+            }
+            let mut p = [0.0f64; 5];
+            for (&id, &weight) in ids.iter().zip(&weights) {
+                let vertex = &field.grid[id];
+                for (q, slot) in p.iter_mut().enumerate() {
+                    *slot += weight as f64 * vertex[q] as f64;
+                }
+            }
+            let g = guide[i];
+            let before = *c;
+            for ch in 0..3 {
+                let d = std::f64::consts::LN_2 * c[ch] as f64 * p[0]
+                    + c[ch] as f64 * p[1 + ch]
+                    + (c[ch] - g) as f64 * p[4];
+                c[ch] = (c[ch] + amount * d as f32).clamp(0.0, 1.0);
+            }
+            // A pixel blown in every channel takes its brightness from the field
+            // and no hue (`keep_blown_white`); for that reason the solve asks
+            // nothing of such a pixel's channels one by one
+            // (`fit_field::testifying`, on the same predicate, `blown_white`).
+            *c = keep_blown_white(&before, *c);
         }
-        let g = guide[i];
-        let before = *c;
-        for ch in 0..3 {
-            let d = std::f64::consts::LN_2 * c[ch] as f64 * p[0]
-                + c[ch] as f64 * p[1 + ch]
-                + (c[ch] - g) as f64 * p[4];
-            c[ch] = (c[ch] + amount * d as f32).clamp(0.0, 1.0);
-        }
-        // A pixel blown in every channel takes its brightness from the field
-        // and no hue (`keep_blown_white`); for that reason the solve asks
-        // nothing of such a pixel's channels one by one
-        // (`fit_field::testifying`, on the same predicate, `blown_white`).
-        *c = keep_blown_white(&before, *c);
-    }
+    });
 }
 
 /// The colour field's guide: `grid_experiment.smooth_3tap` on `luma601`,
@@ -900,20 +906,23 @@ fn apply_colour_field_in<S: std::ops::Deref<Target = [f32]>>(
 /// that what the solver measured is what the engine ships, and a guide that
 /// padded one way here and another way there would move every border pixel's
 /// luma BIN.
+///
+/// Each of its three planes is read side by side: every value of one is a sum
+/// of the plane before it, the same three terms in the same order.
 pub(crate) fn field_guide_luma(px: &[[f32; 3]], width: usize, height: usize) -> Vec<f32> {
-    let luma: Vec<f32> = px.iter().map(luma601).collect();
+    let luma: Vec<f32> = px.par_iter().map(luma601).collect();
     let mut horizontal = vec![0.0f32; luma.len()];
-    for (i, slot) in horizontal.iter_mut().enumerate() {
+    horizontal.par_iter_mut().enumerate().for_each(|(i, slot)| {
         let (row, x) = (i - i % width, i % width);
         let (left, right) = (row + x.saturating_sub(1), row + (x + 1).min(width - 1));
         *slot = (luma[left] + luma[i] + luma[right]) / 3.0;
-    }
+    });
     let mut out = vec![0.0f32; luma.len()];
-    for (i, slot) in out.iter_mut().enumerate() {
+    out.par_iter_mut().enumerate().for_each(|(i, slot)| {
         let (y, x) = (i / width, i % width);
         let (up, down) = (y.saturating_sub(1) * width + x, (y + 1).min(height - 1) * width + x);
         *slot = (horizontal[up] + horizontal[i] + horizontal[down]) / 3.0;
-    }
+    });
     out
 }
 
