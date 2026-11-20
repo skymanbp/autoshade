@@ -123,6 +123,156 @@
         }
     }
 
+    /// One slider on its own in a 320 px column, driven by `events`: whether
+    /// it reported a change, and the frame it drew.
+    fn lone_slider_frame(ctx: &egui::Context, value: &mut f32, min: f32, max: f32, events: Vec<egui::Event>) -> (bool, egui::FullOutput) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 200.0))),
+            events,
+            ..Default::default()
+        };
+        let mut changed = false;
+        let out = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                changed = AutoShadeApp::slider_hinted(ui, crate::i18n::Lang::En, "Warmth", value, min, max, 0.0, "");
+            });
+        });
+        (changed, out)
+    }
+
+    /// Where the slider's knob was drawn (the disc `paint_slider_knob` lays
+    /// over egui's own, the last circle of the frame).
+    fn knob_centre(out: &egui::FullOutput) -> egui::Pos2 {
+        fn walk(s: &egui::Shape, at: &mut Option<egui::Pos2>) {
+            match s {
+                egui::Shape::Circle(c) => *at = Some(c.center),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, at)),
+                _ => {}
+            }
+        }
+        let mut at = None;
+        out.shapes.iter().for_each(|c| walk(&c.shape, &mut at));
+        at.expect("a knob was drawn")
+    }
+
+    /// 2026-11-20: a slider SHOWS the number it holds and changes it only
+    /// when the user moves it. A mask Temp an older build saved is restated
+    /// on today's scale when the photo opens (48 → 25.6, a Tint 21 → 10.5),
+    /// and the guarded skin warmth ends at ±10.67: none of them is on the
+    /// slider's whole-number grid, and each must come through a frame exactly
+    /// as it went in, printed as the number it is. What the user's own drag
+    /// or nudge hands back is the whole numbers inside the track and the
+    /// track's two ends exactly — never a step past a limit, never one short
+    /// of it.
+    ///
+    /// MUTATION THIS CATCHES: the rail left on egui's default clamping (egui
+    /// steps and rounds the number it is merely shown: 25.6 comes back 26 and
+    /// the frame reports a change); the off-grid track given to egui as its
+    /// rail (the far end of a drag hands back 10, one short of the limit).
+    #[test]
+    fn a_slider_shows_the_number_it_holds_and_changes_it_only_when_moved() {
+        // A track that ends off the whole numbers, as the guarded skin
+        // warmth's does (`face::SKIN_TEMPERATURE_MAX`, 20 × 80/150).
+        let limit = 32.0f32 / 3.0;
+        assert!((limit - 10.666_667).abs() < 1e-5 && limit.fract() != 0.0, "premise: {limit}");
+        // ① Shown, not touched: three frames, the number bit for bit.
+        for (held, min, max, reads) in [
+            (25.6f32, -100.0f32, 100.0f32, "25.6"),
+            (-10.5, -100.0, 100.0, "-10.5"),
+            (limit, -limit, limit, "10.67"),
+            (-limit, -limit, limit, "-10.67"),
+            (13.0, -100.0, 100.0, "13"),
+        ] {
+            let ctx = egui::Context::default();
+            crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+            let mut value = held;
+            for frame in 0..3 {
+                let (changed, out) = lone_slider_frame(&ctx, &mut value, min, max, vec![]);
+                assert!(!changed, "{held}: frame {frame} reported a change nobody made");
+                assert_eq!(value.to_bits(), held.to_bits(), "{held}: drawing it rewrote it to {value}");
+                let texts = drawn_texts(&out.shapes);
+                assert!(texts.iter().any(|t| t == reads), "{held}: the box reads {reads:?}: {texts:?}");
+                assert!(!texts.iter().any(|t| t == "11" || t == "-11" || t == "26"), "{held}: a rounded number is on screen: {texts:?}");
+            }
+        }
+        // ② Dragged along a track that ends off the grid: whole numbers
+        // inside, and the far end is the limit itself.
+        let ctx = egui::Context::default();
+        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+        let mut value = 0.0f32;
+        let (_, out) = lone_slider_frame(&ctx, &mut value, -limit, limit, vec![]);
+        let knob = knob_centre(&out);
+        let button = |pressed: bool| egui::Event::PointerButton {
+            pos: knob,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let _ = lone_slider_frame(&ctx, &mut value, -limit, limit, vec![egui::Event::PointerMoved(knob), button(true)]);
+        let part_way = egui::pos2(knob.x + 60.0, knob.y);
+        let (changed, _) = lone_slider_frame(&ctx, &mut value, -limit, limit, vec![egui::Event::PointerMoved(part_way)]);
+        assert!(changed && value > 0.0 && value < limit && value.fract() == 0.0, "inside the track a drag lands on whole numbers: {value}");
+        let far = egui::pos2(319.0, knob.y);
+        let (changed, _) = lone_slider_frame(&ctx, &mut value, -limit, limit, vec![egui::Event::PointerMoved(far)]);
+        assert!(changed, "the drag reached the end");
+        assert_eq!(value.to_bits(), limit.to_bits(), "the far end of the track is the limit itself, not {value}");
+        // Held against the end: the same number, no change to report, and the
+        // box (drawn before the rail each frame) reads the limit.
+        let (changed, out) = lone_slider_frame(&ctx, &mut value, -limit, limit, vec![egui::Event::PointerMoved(egui::pos2(319.5, knob.y))]);
+        assert!(!changed && value.to_bits() == limit.to_bits(), "held at the end: {value}");
+        let texts = drawn_texts(&out.shapes);
+        assert!(texts.iter().any(|t| t == "10.67") && !texts.iter().any(|t| t == "11"), "{texts:?}");
+        let near = egui::pos2(0.0, knob.y);
+        let _ = lone_slider_frame(&ctx, &mut value, -limit, limit, vec![egui::Event::PointerMoved(near)]);
+        assert_eq!(value.to_bits(), (-limit).to_bits(), "and the near end is the other limit");
+        let _ = lone_slider_frame(&ctx, &mut value, -limit, limit, vec![button(false)]);
+        // ③ Nudged (hover + ↑/↓): one whole step, held to the same ends.
+        let key = |key: egui::Key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        let ctx = egui::Context::default();
+        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+        let mut value = 10.0f32;
+        let (_, out) = lone_slider_frame(&ctx, &mut value, -limit, limit, vec![]);
+        let knob = knob_centre(&out);
+        let _ = lone_slider_frame(&ctx, &mut value, -limit, limit, vec![egui::Event::PointerMoved(knob)]);
+        let (changed, _) = lone_slider_frame(&ctx, &mut value, -limit, limit, vec![key(egui::Key::ArrowUp)]);
+        assert!(changed, "premise: the hovered slider takes the arrow");
+        assert_eq!(value.to_bits(), limit.to_bits(), "a step past the limit stops on it: {value}");
+        let (changed, _) = lone_slider_frame(&ctx, &mut value, -limit, limit, vec![key(egui::Key::ArrowUp)]);
+        assert!(!changed && value.to_bits() == limit.to_bits(), "and stays there: {value}");
+        let _ = lone_slider_frame(&ctx, &mut value, -limit, limit, vec![key(egui::Key::ArrowDown)]);
+        assert_eq!(value, 10.0, "one step back from the limit is the whole number below it");
+    }
+
+    /// The same on the real panel: a mask whose Temp and Tint an older build
+    /// saved (48 and −21, carried over to 25.6 and −10.5) is selected and its
+    /// sliders drawn — the develop is what it was, the photo is not marked
+    /// edited, and the two boxes read the numbers the mask holds.
+    ///
+    /// MUTATION THIS CATCHES: the rail left on egui's default clamping — the
+    /// first frame turns 25.6 into 26 and −10.5 into −10 or −11 and sets the
+    /// photo dirty.
+    #[test]
+    fn selecting_a_mask_an_older_build_saved_does_not_edit_it() {
+        let saved = EditRecipe {
+            masks: vec![autoshade::recipe::LocalAdjustment { name: "sky".into(), temperature: 48.0, tint: -21.0, ..Default::default() }],
+            mask_wb_era: 0,
+            ..Default::default()
+        };
+        let mut app = AutoShadeApp { recipe: saved, sel_mask: Some(0), ..Default::default() };
+        assert!(app.recipe.convert_legacy_mask_wb(), "premise: the open carries the saved numbers over");
+        let opened = app.recipe.clone();
+        let (temperature, tint) = (opened.masks[0].temperature, opened.masks[0].tint);
+        assert!((temperature - 25.6).abs() < 1e-4 && tint == -10.5 && !app.dirty, "premise: {temperature}, {tint}");
+        for frame in 0..2 {
+            let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+            assert_eq!(app.recipe, opened, "frame {frame}: drawing the mask's sliders changed the develop");
+            assert!(!app.dirty, "frame {frame}: the photo was marked edited by being looked at");
+            for reads in ["25.6", "-10.5"] {
+                assert!(seen.iter().any(|t| t == reads), "frame {frame}: no box reads {reads:?}: {seen:?}");
+            }
+        }
+    }
+
     /// R25 P6: the selected mask gets the SAME curve editor the global Curves
     /// section has, pointed at its own four curves — a fourth group under
     /// Lightroom's Tone / Detail / Color.

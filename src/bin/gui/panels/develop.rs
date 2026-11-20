@@ -239,18 +239,46 @@ impl AutoShadeApp {
         } else {
             format!("{hint}\n{grammar}")
         };
+        // A slider SHOWS the number it was handed and changes it only when
+        // the user moves it (2026-11-20). Not every number sits on the feel's
+        // grid: a mask Temp an older build saved is restated on today's
+        // scale (48 → 25.6, `EditRecipe::convert_legacy_mask_wb`), and the
+        // guarded skin warmth ends at ±10.67. So the box prints such a number
+        // with the decimals it needs (up to two — `25.6`, `10.67`, never a
+        // rounded `26` or an `11` past the limit), and what a drag, a typed
+        // number or a nudge hands back is the feel's grid inside the track
+        // plus the track's two ends exactly. (A number OUTSIDE the track is
+        // still brought to its nearer end by the box, as it always was.)
+        let shown = *value;
+        let text = move |v: f64| egui::emath::format_with_decimals_in_range(v, decimals..=decimals.max(2));
+        let held = |v: f32| {
+            let f = 10f32.powi(decimals as i32);
+            ((v * f).round() / f).clamp(min, max)
+        };
+        // The rail itself runs between grid points: egui counts a rail's
+        // steps from its START, so one that began at −10.67 would hand back
+        // −9.67, −8.67 … and never reach its far end. A track that ends off
+        // the grid gets the next grid point outward as its rail end, and
+        // `held` brings the last step back to the track's own end. A track
+        // that ends on the grid — every other one — is its own rail.
+        let rail_end = |end: f32, outward: fn(f32) -> f32| {
+            let step = snap as f32;
+            let steps = end / step;
+            if (steps - steps.round()).abs() < 1e-3 { end } else { outward(steps) * step }
+        };
+        let (rail_min, rail_max) = (rail_end(min, f32::floor), rail_end(max, f32::ceil));
         // The value box is egui's DragValue: a button that GROWS with its
         // text, so its width is budgeted at the widest text the track can
-        // show (both ends, at the shown decimals) plus the button's padding —
-        // the label then truncates into what is left, and a row that fits at
-        // its default still fits at either end of a drag (the 2026-09-15
-        // 「100」 that ran the panel 4 px wide every frame).
+        // show (both ends, and the number it holds now) plus the button's
+        // padding — the label then truncates into what is left, and a row
+        // that fits at its default still fits at either end of a drag (the
+        // 2026-09-15 「100」 that ran the panel 4 px wide every frame).
         let value_w = {
             let style = ui.style().drag_value_text_style.resolve(ui.style());
             let widest = ui.fonts(|f| {
-                [min, max]
+                [min, max, shown]
                     .into_iter()
-                    .map(|v| f.layout_no_wrap(format!("{v:.decimals$}"), style.clone(), egui::Color32::WHITE).size().x)
+                    .map(|v| f.layout_no_wrap(text(f64::from(v)), style.clone(), egui::Color32::WHITE).size().x)
                     .fold(0.0f32, f32::max)
             });
             (widest + 2.0 * ui.spacing().button_padding.x).max(ui.spacing().interact_size.x)
@@ -302,21 +330,32 @@ impl AutoShadeApp {
                         egui::DragValue::new(value)
                             .range(min..=max)
                             .speed(f64::from(speed).max(snap * 0.5))
-                            .fixed_decimals(decimals),
+                            .fixed_decimals(decimals)
+                            .custom_formatter(move |v, _| text(v)),
                     )
                 });
                 (name, number.inner)
             });
             let (name, number) = head.inner;
             ui.spacing_mut().slider_width = full;
+            // `SliderClamping::Edits`: egui's default (`Always`) puts the
+            // number it is SHOWN through its own step and rounding on every
+            // frame and writes the result back, so merely drawing a mask's
+            // sliders turned a carried-over 25.6 into 26 and reported the
+            // photo as edited. With `Edits` only what the user moves is
+            // stepped and rounded.
             let rail = ui.add(
-                egui::Slider::new(value, min..=max)
+                egui::Slider::new(value, rail_min..=rail_max)
                     .logarithmic(matches!(feel, SliderFeel::LogK))
+                    .clamping(egui::SliderClamping::Edits)
                     .step_by(snap)
                     .fixed_decimals(decimals)
                     .show_value(false),
             );
-            paint_slider_knob(ui, &rail, *value, min, max, matches!(feel, SliderFeel::LogK));
+            if *value != shown {
+                *value = held(*value);
+            }
+            paint_slider_knob(ui, &rail, *value, rail_min, rail_max, matches!(feel, SliderFeel::LogK));
             (name, number, rail)
         });
         let (name, number, rail) = scope.inner;
@@ -328,7 +367,9 @@ impl AutoShadeApp {
             *value = default;
             return true;
         }
-        let mut changed = rail.changed() || number.changed();
+        // Changed is "the number is another one": a drag held against the
+        // track's end hands back the end it already stood on.
+        let mut changed = *value != shown;
         // The nudge is gated on "no widget owns the keyboard", so arrows typed
         // into a text field can never double-apply here.
         if (name.hovered() || rail.hovered() || number.hovered()) && ui.memory(|m| m.focused().is_none()) {
