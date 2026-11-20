@@ -176,6 +176,38 @@ pub(crate) const fn local_wb_from_legacy(temperature: f32, tint: f32) -> (f32, f
     )
 }
 
+/// The gains a mask's Temp and Tint render, read on the scale the recipe
+/// states them on (`EditRecipe::mask_wb_era`) — the mask stage's one reading
+/// of the two numbers (2026-11-20).
+///
+/// A recipe that states today's scale: [`local_temp_to_kelvin`] and
+/// [`local_tint_to_engine`]. A recipe that states none is of v1.18.3 or
+/// earlier, and its numbers are read by THAT build's law, written out here as
+/// that build computed it — ∓80 mired, the Tint into the model as it stood —
+/// and not through [`local_wb_from_legacy`] and today's law. The two routes
+/// agree in exact arithmetic and not in the last bit (Temp would go × 80/150
+/// and then × 150/100 where it went × 80/100), and one reader cannot afford
+/// the last bit: the sidecar reader projects an older payload's mask gains
+/// again to learn what that build wrote (`gains_as_white`), and has to
+/// retrace that build's search step for step. Measured over 240 masks with
+/// the carry-over route, 35 searches met a mired one bit off and 27 of them
+/// ended somewhere else, up to 0.16 of a slider unit away
+/// (`an_older_builds_projection_is_found_again_measured_over_many_masks`).
+///
+/// So a recipe draws the same picture before and after
+/// `EditRecipe::convert_legacy_mask_wb`: what the carry-over changes is the
+/// number the slider shows and how far the slider reaches from then on, never
+/// the picture — and a reader that forgot the carry-over shows stale numbers
+/// instead of a mask about twice too strong.
+pub(super) fn mask_wb_gains(mask_wb_era: u32, temperature: f32, tint: f32) -> [f32; 3] {
+    const ANCHOR_K: f32 = 5500.0;
+    if mask_wb_era >= crate::recipe::MASK_WB_ERA {
+        return wb_gains(ANCHOR_K, local_temp_to_kelvin(temperature), local_tint_to_engine(tint));
+    }
+    let mired = 1e6 / ANCHOR_K - (temperature.clamp(-100.0, 100.0) / 100.0) * LOCAL_TEMP_MIRED_LEGACY;
+    wb_gains(ANCHOR_K, 1e6 / mired, tint)
+}
+
 /// Build one LUT per channel for a linear-light RGB gain. The exact transform
 /// is `linear_to_srgb(srgb_to_linear(x) * gain)`, but evaluating both transfer
 /// curves (`powf`) for every pixel/channel dominated v0.8 zoned preview time:

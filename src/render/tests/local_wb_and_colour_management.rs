@@ -364,15 +364,19 @@ fn a_legacy_mask_white_balance_renders_the_same_gains_once_converted() {
 }
 
 /// The same promise at the PICTURE: a recipe file from v1.18.3 or earlier
-/// (no `mask_wb_era`), carried over by the recipe's own function and rendered
-/// by today's develop, lands where the old law put it. The old law's picture
-/// is the global white-balance stage at the old law's Kelvin and Tint — the
-/// identity `full_frame_local_wb_matches_the_global_wb_stage` pinned for that
-/// law, at the tolerance it pinned it at.
+/// (no `mask_wb_era`) lands where the old law put it — as it is read, before
+/// its numbers are carried over, because the develop reads a mask's Temp and
+/// Tint on the scale the recipe states (`mask_wb_gains`, 2026-11-20), and
+/// again once the recipe's own function has carried them over. The old law's
+/// picture is the global white-balance stage at the old law's Kelvin and
+/// Tint — the identity `full_frame_local_wb_matches_the_global_wb_stage`
+/// pinned for that law, at the tolerance it pinned it at.
 ///
-/// MUTATION THIS CATCHES: the render reading the saved number on the new
-/// scale without the carry-over (Temp 48 rendered as 48, not 25.6), or the
-/// carry-over applied to a recipe that already states the current scale.
+/// MUTATION THIS CATCHES: the mask stage reading an older recipe's numbers on
+/// today's scale (Temp 48 drawn as 48: the unconverted picture is about twice
+/// too strong), the carry-over moving the numbers without the stamp or the
+/// stamp without the numbers, or applied to a recipe that already states the
+/// current scale.
 #[test]
 fn a_legacy_recipes_mask_white_balance_renders_as_it_did() {
     let src = [[0.7_f32, 0.55, 0.35], [0.2, 0.35, 0.6], [0.5, 0.5, 0.5]];
@@ -393,6 +397,9 @@ fn a_legacy_recipes_mask_white_balance_renders_as_it_did() {
         let mut saved: EditRecipe = serde_json::from_str(&json).expect("a v1.18.3 recipe parses");
         assert_eq!(saved.mask_wb_era, 0, "premise: no key is the legacy scale");
         let unconverted = render(&saved);
+        // The same numbers under a stamp that says they are today's: what a
+        // carry-over that moved the stamp alone would leave behind.
+        let mislabelled = render(&EditRecipe { mask_wb_era: crate::recipe::MASK_WB_ERA, ..saved.clone() });
         assert!(saved.convert_legacy_mask_wb(), "the numbers move");
         let now = render(&saved);
 
@@ -408,11 +415,17 @@ fn a_legacy_recipes_mask_white_balance_renders_as_it_did() {
             worst(&now, &then) < 3e-3,
             "Temp {temperature} Tint {tint}: carried over it renders {now:?}, v1.18.3 rendered {then:?}"
         );
-        // The test has teeth: the same file read WITHOUT the carry-over is
+        // Read as it was saved, before any carry-over, it is the same picture:
+        // the develop reads the numbers on the scale the recipe states.
+        assert!(
+            worst(&unconverted, &then) < 3e-3 && worst(&unconverted, &now) < 1e-4,
+            "Temp {temperature} Tint {tint}: as saved it renders {unconverted:?}, carried over {now:?}, v1.18.3 rendered {then:?}"
+        );
+        // The test has teeth: the same numbers read on TODAY'S scale are
         // visibly another picture, well outside that tolerance.
         assert!(
-            worst(&unconverted, &then) > 1e-2,
-            "premise: the stronger scale moves the picture ({unconverted:?} vs {then:?})"
+            worst(&mislabelled, &then) > 1e-2,
+            "premise: the stronger scale moves the picture ({mislabelled:?} vs {then:?})"
         );
         // Carried over once: a second pass finds the stamp and moves nothing.
         let once = saved.clone();

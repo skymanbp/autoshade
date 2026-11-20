@@ -7,7 +7,8 @@ use super::*;
 /// normalised so this works at any resolution.
 ///
 /// Per mask, in pass order: local **dehaze** → the fused local **WB**
-/// (temperature/tint — the same [`wb_gains`] model as the global stage, see
+/// (temperature/tint — the global stage's white-balance model, the two
+/// numbers read on the scale the recipe states: [`mask_wb_gains`], see
 /// [`local_temp_to_kelvin`]) + **tone** (exposure/contrast/highlights/shadows/
 /// whites/blacks) + **saturation** + **hue** pass, then the **Color tint** on
 /// its result → local **clarity** → local **texture** → local **sharpness** →
@@ -176,11 +177,10 @@ pub(super) fn apply_masks(
         // then compile the exact linear-light formula into channel LUTs.
         // None when neutral, so tone-only masks pay no colour-stage cost.
         let local_wb = m.temperature != 0.0 || m.tint != 0.0;
-        let local_wb_gains = if local_wb {
-            wb_gains(5500.0, local_temp_to_kelvin(m.temperature), local_tint_to_engine(m.tint))
-        } else {
-            [1.0; 3]
-        };
+        // Read on the scale the recipe states (`mask_wb_gains`): a recipe of
+        // v1.18.3 or earlier that reaches here before its numbers were
+        // carried over draws what that build drew.
+        let local_wb_gains = if local_wb { mask_wb_gains(r.mask_wb_era, m.temperature, m.tint) } else { [1.0; 3] };
         let colour_luts =
             (local_wb || m.color_gains.is_some()).then(|| {
                 let g = local_wb_gains;

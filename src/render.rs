@@ -245,14 +245,21 @@ pub(crate) use tone::{
 };
 use tone::{apply_rgb_curves, engine_channel_curves, hermite_eval};
 pub(crate) use mask_gains::gains_as_white;
+// What v1.18.3 rendered and wrote for a mask's white balance, for the tests
+// of the two places that read an older build's numbers (2026-11-20).
+#[cfg(test)]
+pub(crate) use mask_gains::v1_18_3;
 #[cfg(test)]
 pub(crate) use tone::{limit_tone_sliders, parametric_lut};
 pub use wb::{local_temp_to_kelvin, local_tint_to_engine, solve_wb_for, solve_wb_from_neutral};
-pub(crate) use wb::{
-    WHITE_CLIP, WbLaw, blown_white, linear_to_srgb, local_wb_from_legacy, srgb_to_linear, wb_gains,
-};
+pub(crate) use wb::{WHITE_CLIP, WbLaw, blown_white, linear_to_srgb, local_wb_from_legacy, srgb_to_linear};
+// The shared gains model: the mask stage reaches it through `mask_wb_gains`
+// since 2026-11-20, so outside `wb` only the tests name it.
+#[cfg(test)]
+pub(crate) use wb::wb_gains;
 use wb::{
-    apply_recipe_wb, colour_gain_luts, decode_wide, encode_wide, keep_blown_white, ramp, smoothstep, transfer_luts,
+    apply_recipe_wb, colour_gain_luts, decode_wide, encode_wide, keep_blown_white, mask_wb_gains, ramp, smoothstep,
+    transfer_luts,
 };
 #[cfg(test)]
 use wb::{kelvin_to_rgb};
