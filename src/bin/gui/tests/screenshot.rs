@@ -925,6 +925,50 @@
                         assert!(d.fits, "{tag}: {:?} does not fit its {:.1} px cell", d.label, d.rect.width());
                     }
 
+                    // ⑥ The edited mark stands right of its photo's name, on the
+                    // name's line, and is drawn whole: a long name is cut
+                    // before it (user, 2026-11-19: 「放到名字右边吧，不要放在
+                    // 下面」).
+                    if scene != LibraryScene::NoFolder {
+                        // The mark is one galley of two inks; the gap between
+                        // its dot and its word is air, not a character.
+                        let mark_text = tr(lang, "● edited").replace(' ', "");
+                        let texts = |want: &str| -> Vec<egui::Rect> {
+                            items.iter().filter(|(kind, text, _)| kind == "text" && text == want).map(|(_, _, r)| *r).collect()
+                        };
+                        let marks = texts(&mark_text);
+                        let whole_mark = marks.iter().map(|r| r.width()).fold(0.0, f32::max);
+                        let mut seen = 0;
+                        for i in 0..app.gallery.len() {
+                            let stem = autoshade::pipeline::stem(&app.gallery[i]).to_string();
+                            let Some(name) = texts(&stem).first().copied() else { continue };
+                            let mark = marks.iter().find(|m| (m.center().y - name.center().y).abs() <= 2.0).copied();
+                            // The fixture's every third photo has a saved edit.
+                            if i % 3 != 0 {
+                                assert!(mark.is_none(), "{tag}: {stem:?} has no saved edit and wears the mark");
+                                continue;
+                            }
+                            let mark = mark.unwrap_or_else(|| panic!("{tag}: {stem:?}'s edited mark is not on the name's line"));
+                            let gap = mark.left() - name.right();
+                            assert!(
+                                (0.0..=crate::theme::SPACE_MD + 0.5).contains(&gap),
+                                "{tag}: {stem:?}'s mark stands {gap:.1} px from the name's end, not right after it"
+                            );
+                            assert!(
+                                mark.width() >= whole_mark - 0.5 && mark.right() <= right + 0.5,
+                                "{tag}: {stem:?}'s mark is cut, or past the column's edge {right:.1}: {mark:?}"
+                            );
+                            seen += 1;
+                        }
+                        assert!(seen >= 2, "{tag}: the edited rows were laid ({seen})");
+                        // …and the long name is one that IS cut.
+                        let long = autoshade::pipeline::stem(&app.gallery[3]).to_string();
+                        let shown = texts(&long).first().map(|r| r.width()).unwrap_or_else(|| panic!("{tag}: the long-named photo is drawn"));
+                        let font = egui::TextStyle::Body.resolve(&ctx.style());
+                        let uncut = ctx.fonts(|f| f.layout_no_wrap(long.clone(), font, egui::Color32::WHITE).size().x);
+                        assert!(shown < uncut - 0.5, "{tag}: the long name was to be cut — {shown:.1} of its {uncut:.1} px are drawn");
+                    }
+
                     let open = drawn.iter().find(|d| d.label == tr(lang, "🗂 Open folder…")).unwrap_or_else(|| panic!("{tag}: open-folder is drawn"));
                     assert!(
                         (open.rect.right() - right).abs() <= 0.5,

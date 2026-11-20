@@ -340,14 +340,21 @@ impl AutoShadeApp {
                                 {
                                     say(&ext.to_uppercase(), SPACE_MD, weak);
                                 }
-                                if edited {
-                                    // The dot in the accent, the word quiet.
+                                let has_meta = !meta.sections.is_empty();
+                                // The edited mark stands RIGHT OF THE NAME, on
+                                // the name's line (user, 2026-11-19: 「放到名字
+                                // 右边吧，不要放在下面」) — it was the last word
+                                // of the line under it. The dot in the accent,
+                                // the word quiet, laid out here so the name
+                                // can be cut to what the mark leaves.
+                                let mark = edited.then(|| {
                                     let label = tr(lang, "● edited");
                                     let (dot, word) = label.split_once(' ').unwrap_or((label, ""));
-                                    say(dot, SPACE_MD, colors.accent_text);
-                                    say(word, SPACE_SM, weak);
-                                }
-                                let has_meta = !meta.sections.is_empty();
+                                    let mut job = egui::text::LayoutJob::default();
+                                    job.append(dot, 0.0, egui::TextFormat::simple(meta_font.clone(), colors.accent_text));
+                                    job.append(word, SPACE_SM, egui::TextFormat::simple(meta_font.clone(), weak));
+                                    ui.fonts(|f| f.layout_job(job))
+                                });
                                 ui.vertical(|ui| {
                                     ui.spacing_mut().item_spacing.y = SPACE_XS;
                                     // The lines are centred on the picture.
@@ -357,19 +364,32 @@ impl AutoShadeApp {
                                     if is_sel {
                                         name = name.strong().color(colors.accent_text);
                                     }
-                                    // Truncate, never wrap: show_rows assumes
-                                    // every row is exactly GALLERY_ROW_H, and a
-                                    // wrapped long filename would misalign the
-                                    // whole virtualized scroll.
-                                    ui.add(egui::Label::new(name).truncate());
-                                    if has_meta {
-                                        let r = ui.add(egui::Label::new(meta).truncate());
-                                        if edited {
-                                            r.on_hover_text(tr(
-                                                lang,
-                                                "This photo has adjustments saved in AutoShade",
-                                            ));
+                                    // The name's line, exactly the name's
+                                    // height: a `horizontal` stands a full
+                                    // control row tall, which would hang the
+                                    // line low and push the block past the
+                                    // picture.
+                                    let line = egui::vec2(ui.available_width(), name_h);
+                                    ui.allocate_ui_with_layout(line, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                        ui.spacing_mut().item_spacing.x = SPACE_MD;
+                                        let mark_w = mark.as_ref().map_or(0.0, |m| m.size().x + SPACE_MD);
+                                        // Truncate, never wrap: show_rows
+                                        // assumes every row is exactly
+                                        // GALLERY_ROW_H, and a wrapped long
+                                        // filename would misalign the whole
+                                        // virtualized scroll. A long name is
+                                        // cut BEFORE the mark, which stays.
+                                        ui.scope(|ui| {
+                                            ui.set_max_width((ui.available_width() - mark_w).max(0.0));
+                                            ui.add(egui::Label::new(name).truncate());
+                                        });
+                                        if let Some(mark) = mark {
+                                            ui.label(mark)
+                                                .on_hover_text(tr(lang, "This photo has adjustments saved in AutoShade"));
                                         }
+                                    });
+                                    if has_meta {
+                                        ui.add(egui::Label::new(meta).truncate());
                                     }
                                 });
                             });
