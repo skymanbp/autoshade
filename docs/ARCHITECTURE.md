@@ -1,6 +1,9 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.18.3 — an .xmp is an external source: read only on an import
+> Status: **implemented** (v1.18.4 — a mask's Temp and Tint reach about twice as far and a
+> develop saved before draws as it was saved; a slow photo follows a slider in drafts and a
+> change to one mask draws from that mask on; an older build's .xmp is read on that build's scale;
+> v1.18.3 — an .xmp is an external source: read only on an import
 > the user asks for and written only on an export the user asks for, on every surface;
 > a save writes the develop alone; a variant keeps the kind it was saved with;
 > v1.18.2 — the desktop window: Settings in five pages, a language
@@ -2189,8 +2192,8 @@ v1.5.0's parametric curve; 2 = before its colour keys — the Calibration panel,
 the B&W treatment and the point colours) — for the same
 class of reason: see 「the merge treats ignorance as ignorance」 in §4.5.
 
-A third stamp follows the same precedent for the MASK WHITE BALANCE (the
-version after v1.18.3): `mask_wb_era` says which scale the masks'
+A third stamp follows the same precedent for the MASK WHITE BALANCE
+(v1.18.4): `mask_wb_era` says which scale the masks'
 `temperature` and `tint` are stated in. The mask Temp and Tint sliders were
 too weak to see — measured on a photograph, Temp +48 moved the mask centre's
 blue from 76 to 73 of 255 — so their reach grew: `render::local_temp_to_kelvin`
@@ -4275,7 +4278,7 @@ document's three are taken and the gains go, so the recolour is never applied
 twice (how the three are then read in a sidecar v1.18.3 or an earlier build
 wrote, and the writers older than v1.17.0 whose three were never the gains'
 spelling, are §4.1's three rules). The projection reads the mask white balance the develop renders, so
-it followed that law when the law's reach grew (the version after v1.18.3,
+it followed that law when the law's reach grew (v1.18.4,
 `mask_wb_era` in §4.1): the same gains are carried by a Temp and Tint of
 about half the size, and gains further from neutral fit inside the range
 before the `Recolour` loss is named. The payload of a sidecar v1.18.3 or an

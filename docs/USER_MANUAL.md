@@ -633,7 +633,7 @@ A selected mask's sliders come in Lightroom's groups — **Tone**, **Detail**,
 **Temp shift** and **Tint shift** warm or cool, and move toward magenta or
 green, inside the mask only: relative moves around a fixed point, not
 Kelvin (the tooltip says what the Temp on the slider is worth in Kelvin).
-From the version after v1.18.3 they reach about twice as far as they did. A
+From v1.18.4 they reach about twice as far as they did. A
 photo saved before that looks exactly as it was saved: when it is opened its
 numbers are restated on the stronger scale, so its sliders read smaller —
 Temp a little over half the old number, Tint half — and an .xmp exported
