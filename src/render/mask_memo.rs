@@ -2,19 +2,20 @@
 
 use super::mask_raster::MaskBitmap;
 use super::*;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 /// How many lens maps are kept: one is two tables of [`LUT_N`] numbers
 /// (32 KiB), and a session asks for its canvas's and its draft's.
 const UNWARP_KEPT: usize = 8;
 
-/// The bytes the kept frames of [`MaskChain`] may hold together, the rasters
-/// their keys keep alive counted in. A frame is kept in two copies (the frame
-/// the masks found, the frame the changed mask found), so one whose two
-/// copies would not fit is never kept at all: at 12 bytes a pixel that is a
-/// frame of 4.19 MP, which takes every draft the editor draws while a slow
-/// photo is edited (1024 to 2304 px on the long edge of a 3:2 frame) and no
-/// export. The 4096 px canvas would take 268 MB and is left out.
+/// The bytes the kept frames of [`MaskChain`] may hold together, their keys
+/// and the colour field's band counted in. A frame is kept in two copies (the
+/// frame the masks found, the frame the changed mask found), so one whose
+/// two copies would not fit is never kept at all ([`Slot::at_most`]): at 12
+/// bytes a pixel that is a frame of 4.19 MP, which takes every draft the
+/// editor draws while a slow photo is edited (1024 to 2304 px on the long
+/// edge of a 3:2 frame) and no export. The 4096 px canvas would take 268 MB
+/// and is left out.
 ///
 /// Fixed, like the brush cache and the raster cache beside it
 /// (`brush::BRUSH_RASTER_CACHE_BYTES`, `MASK_RASTER_BUDGET_BYTES`): it does
@@ -54,10 +55,11 @@ pub(super) fn unwarp_built() -> usize {
 ///
 /// Kept, because building one is a 256-step scan and 40 bisection steps at
 /// each of [`LUT_N`] nodes — 11 ms on the machine this was measured on
-/// (2026-11-19), whatever the frame's size — and one develop asked for it
-/// once for the pass, once for every mask (its LINEAR handles) and four times
-/// for the colour field's partition: 17 builds, 187 ms, on a card of eleven
-/// masks, at 1024 px as at 4096.
+/// (2026-11-19), whatever the frame's size — and one develop of a
+/// lens-corrected source asked for it once for its own position passes
+/// (`corrected_map`), once for the mask pass, once for every mask (its
+/// LINEAR handles) and four times for the colour field's partition: 17
+/// builds, 187 ms, on a card of eleven masks, at 1024 px as at 4096.
 ///
 /// The key is everything the two builders read: the profile (its exact
 /// text), the amount and the frame's size as bits, and which builder. A
@@ -113,24 +115,28 @@ fn memory<T>(with: impl FnOnce(&mut Memory) -> T) -> T {
 }
 
 /// One local adjustment as the mask pass reads it: every field of it (its
-/// exact text), and the decoded raster each of its layers reads — the object
-/// itself, held, so the same one is the same bytes and its address is no one
-/// else's. A file repainted under its path is decoded anew by the loader
+/// exact text), and WHICH decoded raster each of its layers reads — the
+/// object's allocation, held weakly. While the handle lives no other object
+/// is given that allocation, so the same allocation is the same object, and
+/// nothing writes through an `Arc<MaskBitmap>`, so the same object is the
+/// same bytes. A file repainted under its path is decoded anew by the loader
 /// (`load_mask_bitmap`, by the file's time and size) and is another object.
+/// The raster's pixels are not kept alive by it: the raster cache's budget
+/// stays the only thing that holds them.
 #[derive(Clone)]
 struct MaskKey {
     text: String,
-    rasters: Vec<Option<Arc<MaskBitmap>>>,
+    rasters: Vec<Option<Weak<MaskBitmap>>>,
 }
 
 impl MaskKey {
     fn of(m: &crate::recipe::LocalAdjustment, rasters: &MaskRasterSnapshot) -> Option<Self> {
         let layers = std::iter::once(&m.mask).chain(m.components.iter().map(|c| &c.geometry));
-        Some(Self { text: exact_text(m)?, rasters: layers.map(|g| rasters.held(g).cloned()).collect() })
+        Some(Self { text: exact_text(m)?, rasters: layers.map(|g| rasters.held(g).map(Arc::downgrade)).collect() })
     }
 
     fn bytes(&self) -> usize {
-        self.text.len() + self.rasters.iter().flatten().map(|r| r.gray.as_raw().len()).sum::<usize>()
+        self.text.len() + std::mem::size_of_val(self.rasters.as_slice())
     }
 }
 
@@ -139,7 +145,7 @@ impl PartialEq for MaskKey {
         self.text == other.text
             && self.rasters.len() == other.rasters.len()
             && self.rasters.iter().zip(&other.rasters).all(|pair| match pair {
-                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (Some(a), Some(b)) => Weak::ptr_eq(a, b),
                 (None, None) => true,
                 _ => false,
             })
@@ -168,10 +174,23 @@ struct Slot {
 type FieldBand = (usize, MaskKey, Vec<(u32, f32)>);
 
 impl Slot {
+    /// What it holds besides the frames: the keys, and the band.
+    fn besides(&self) -> usize {
+        let band = self.field.as_ref().map_or(0, |(_, _, band)| std::mem::size_of_val(band.as_slice()));
+        band + self.context.len() + self.masks.iter().map(MaskKey::bytes).sum::<usize>()
+    }
+
     fn bytes(&self) -> usize {
         let pixels = self.start.as_ref().map_or(0, Vec::len) + self.resume.as_ref().map_or(0, |(_, frame)| frame.len());
-        let band = self.field.as_ref().map_or(0, |(_, _, band)| std::mem::size_of_val(band.as_slice()));
-        pixels * std::mem::size_of::<[f32; 3]>() + band + self.context.len() + self.masks.iter().map(MaskKey::bytes).sum::<usize>()
+        pixels * std::mem::size_of::<[f32; 3]>() + self.besides()
+    }
+
+    /// The most it comes to hold: both copies of its frame. A frame is
+    /// remembered only where this is under the bound ([`MaskChain::open`]),
+    /// so a slot is never dropped by its own put — a frame too large to keep
+    /// is not copied and thrown away on every develop.
+    fn at_most(&self) -> usize {
+        (self.at.0 * self.at.1).saturating_mul(2 * std::mem::size_of::<[f32; 3]>()).saturating_add(self.besides())
     }
 }
 
@@ -324,10 +343,15 @@ impl MaskChain {
             return Self(None);
         };
         let at = (w, h, hint(data));
+        let first = Slot { at, context, masks, start: None, resume: None, field: None };
+        if first.at_most() > CHAIN_BYTES {
+            return Self(None);
+        }
         let before = memory(|m| m.frames.take(at));
         let Some(before) = before else {
-            return Self(Some(Run { slot: Slot { at, context, masks, start: None, resume: None, field: None }, field_before: None, keep_at: None }));
+            return Self(Some(Run { slot: first, field_before: None, keep_at: None }));
         };
+        let Slot { context, masks, .. } = first;
         // Seen before: kept from here on. What was kept of it holds where the
         // pixels and the context are the same.
         let (start, same) = match before.start {
@@ -364,9 +388,13 @@ impl MaskChain {
             }
             _ => read(),
         };
-        // Kept with the frame it was read on: from the frame's second sight.
+        // Kept with the frame it was read on: from the frame's second sight,
+        // and where the slot has the room.
         if run.slot.start.is_some() {
             run.slot.field = Some((zone, key.clone(), band.clone()));
+            if run.slot.at_most() > CHAIN_BYTES {
+                run.slot.field = None;
+            }
         }
         band
     }
@@ -414,6 +442,21 @@ mod tests {
 
     fn slot(at: u64, pixels: usize) -> Slot {
         Slot { at: (4, 4, at), context: String::new(), masks: Vec::new(), start: Some(vec![[0.0; 3]; pixels]), resume: None, field: None }
+    }
+
+    /// A slot holding all it can hold — both copies of its frame, its keys,
+    /// its band — holds what it was admitted for, and not a byte more.
+    #[test]
+    fn a_slot_holds_no_more_than_it_was_admitted_for() {
+        let key = MaskKey { text: "mask".into(), rasters: vec![None, None] };
+        let mut full = Slot { at: (5, 4, 0), context: "context".into(), masks: vec![key.clone()], start: None, resume: None, field: None };
+        let keys = 7 + 4 + 2 * std::mem::size_of::<Option<Weak<MaskBitmap>>>();
+        assert_eq!((full.bytes(), full.at_most()), (keys, 2 * 20 * 12 + keys), "seen once: the keys alone, and room asked for two copies");
+        full.start = Some(vec![[0.0; 3]; 20]);
+        full.resume = Some((1, vec![[0.0; 3]; 20]));
+        full.field = Some((0, key, vec![(0, 0.0); 3]));
+        assert_eq!(full.bytes(), 2 * 20 * 12 + keys + 3 * 8);
+        assert_eq!(full.bytes(), full.at_most());
     }
 
     /// The list holds its bytes: the oldest frames go first, and a frame put
