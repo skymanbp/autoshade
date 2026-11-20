@@ -2031,9 +2031,12 @@ exhaustively over all 9 × 4 pairs. `quarter_turns` is a separate field from
 `coord_era` on the same argument `coord_era` is separate from `version`, one
 step further: `coord_era` is which frame the stored numbers are IN (a storage
 epoch, migrated once), `quarter_turns` is what the photographer ASKED FOR (a
-live edit, undone as easily as a slider). It is the only recipe field written
-`skip_serializing_if` — an absent era stamp means something different from a
-present zero, whereas an absent turn means exactly zero, so skipping is
+live edit, undone as easily as a slider). It is written `skip_serializing_if`
+zero — the rule every recipe field follows whose absent key means its neutral
+value (some fifty do), and the one the era stamps `version`, `coord_era` and
+`schema_era` cannot follow: an absent era stamp means something different from
+the value a fresh recipe stamps, so those three are always written, whereas an
+absent turn means exactly zero, so skipping is
 lossless AND keeps an un-rotated recipe byte-identical to what v0.32 wrote (R21's
 structure fingerprint therefore needs no re-archive pass, unlike v0.31.0's).
 `pipeline::rotate_recipe` is the one mover: geometry through
@@ -2198,15 +2201,72 @@ its version loader, the variant strip's reader, the pipeline's calibration
 snapshot, load funnel and export door, the CLI's `apply`, and the web's
 `/api/recipe` before the page gets a copy — and none of them rewrites the
 file by reading it; the file states the new scale once a save writes it. The
-store's own .xmp, where an older build saved only that, is carried over the
-same way (`convert_mask_wb_saved_as_xmp`). What is NOT a saved recipe is
+store's own .xmp, where an older build saved only that, is carried over
+once as well (`xmp::carry_over_store_xmp`, the step each of its five readers
+takes after the read): by the sidecar reader where the document carries
+that build's develop in its payload, as the next paragraph describes, and by
+that step where it holds `crs:` settings alone. What is NOT a saved recipe is
 stamped and left alone: the model's reply, a request body that states no
-scale, and a sidecar the user imports. `crs:LocalTemperature` and
-`crs:LocalTint` carry the slider's number as it stands in both directions,
-and so does the payload's copy of the two. Two consequences follow and are
-accepted: a develop saved before the change and exported after it writes the
-smaller, converted numbers, and a sidecar from Lightroom — or one an older
-build exported — renders its mask Temp and Tint at this build's strength.
+scale, and the `crs:` settings of a sidecar the user imports —
+`crs:LocalTemperature` and `crs:LocalTint` carry the slider's number as it
+stands in both directions.
+
+**A sidecar's payload is a saved develop too, and an older build's is carried
+over leaf by leaf (2026-11-20).** The payload is the develop a build exported;
+one that names no `mask_wb_era` was written by v1.18.3 or earlier, and both
+its masks' Temp and Tint and the `crs:` numbers that build wrote beside them
+are on the weaker scale. It cannot be converted whole, because its reader
+mixes it with the numbers Lightroom left in the document, and those are the
+slider's. So `payload::restore` keeps that build's scale all the way through
+the reconcile — the payload, the document as written and the document as
+found are compared in the numbers that build wrote — and restates each mask
+Temp and Tint afterwards by where it came from: a leaf taken from the payload
+(Lightroom left it alone, or the mask was never written — muted, a bitmap,
+past a cap) is carried over with the same `render::local_wb_from_legacy` a
+`recipe.json` goes through, and a leaf taken from the document stands. The
+result is stamped once. An .xmp AutoShade wrote therefore imports to the
+picture it was exported with, whichever version since v1.3.1 wrote it
+(`an_older_sidecars_plain_mask_imports_to_the_picture_it_had` and its
+siblings, each built from that build's law kept in the test rather than from
+today's writer), and a mask Temp or Tint SET IN LIGHTROOM is read at the
+number it states and reaches about twice as far. A sidecar written before
+v1.3.1 carries no payload: the reader takes its `crs:` numbers as they stand,
+as it does a Lightroom document's, so that sidecar's mask Temp and Tint reach
+about twice as far as the build that wrote it drew them. The reader has no
+rule that carries those over.
+
+**The develop reads the stamp as well (2026-11-20).** The mask stage takes a
+mask's Temp and Tint through `render::mask_wb_gains`, which reads them on the
+scale the recipe states: today's law for a stamped recipe, and for a recipe
+that states none the law of v1.18.3 written out as that build computed it
+(∓80 mired, the Tint into the model as it stood). A recipe is therefore the
+same picture before and after its numbers are carried over — pinned by
+`a_legacy_recipes_mask_white_balance_renders_as_it_did` — and what the doors'
+carry-over changes is the number a slider shows and how far it reaches from
+then on. A reader that missed the carry-over shows stale numbers; it cannot
+draw a mask about twice too strong.
+
+It is written out, and not derived from the carry-over, for one reader that
+needs the older law to the bit. A sidecar with no record of the document as
+written (a fresh export has none) is re-projected from its payload to learn
+what that document said (`render::gains_as_white`), and the three numbers
+have to be the ones THAT build wrote, within the reader's 2e-4 of a slider
+unit. The projection's search does not converge to that: it stops within half
+its probe of the optimum, so its answer belongs to its path, and anything
+that moves one candidate by one bit can send it elsewhere. Measured over 240
+masks (`an_older_builds_projection_is_found_again_measured_over_many_masks`):
+today's search restated on the old scale missed for 48 of the 70 whose gains
+fit that build's range (by up to 0.36 of a slider unit) and for 169 of the
+170 at the end of it (by up to 80 — that build's Temp stopped at its ±100,
+today's runs on); that build's numbers carried over candidate by candidate
+and rendered by today's law, the same law a last bit apart now and then,
+missed for 27 (by up to 0.16); that build's own arithmetic misses none. A
+miss reads as an edit made in Lightroom: the gains go and the document's
+three numbers stand. Two consequences follow and are accepted: a develop
+saved before the change and exported after it writes the smaller, converted
+numbers; and when the three numbers that carry a mask's gains were edited in
+Lightroom, the document's three stand as they are and the gains go, as for
+any sidecar.
 Like `coord_era`, the stamp is a forward break: builds up to v1.18.3 refuse a
 recipe that carries the key (`deny_unknown_fields`), and read a sidecar this
 build wrote from its `crs:` settings alone.
@@ -4152,7 +4212,10 @@ twice. The projection reads the mask white balance the develop renders, so
 it followed that law when the law's reach grew (the version after v1.18.3,
 `mask_wb_era` in §4.1): the same gains are carried by a Temp and Tint of
 about half the size, and gains further from neutral fit inside the range
-before the `Recolour` loss is named. The verdicts are
+before the `Recolour` loss is named. The payload of a sidecar v1.18.3 or an
+earlier build wrote is projected on THAT build's scale, so its untouched
+file still reads as handed back as written and keeps its gains (§4.1,
+"a sidecar's payload is a saved develop too"). The verdicts are
 the writer's own, produced by the ONE loop that emits the mask block (so the claim
 cannot drift from the file) and handed back with the document itself —
 `xmp::recipe_to_xmp_with_losses` / `MergeOutcome::losses`, one pass per save;
@@ -8840,7 +8903,23 @@ clamps a saved edit, and it says how many values it moved. While it is on,
 once per frame, after the workers landed and the panels drew and before the
 fork, the develop and the undo commit — the one place a slider, a paste and
 an AI landing all pass — and the six limits of `face::keep_skin_natural` hold
-the skin and face masks. A write that reaches disk in the same step meets
+the skin and face masks. The warmth limit is a fact about the picture, ∓16
+mired, and its slider number follows from the mask white-balance law: ±20
+until v1.18.3, and `local_wb_from_legacy(20, 0)` = 10.67 since the slider's
+reach grew (owner's ruling 2026-11-20: the guard allows the warmth it always
+allowed). `face::SKIN_TEMPERATURE_MAX` is that one expression, so a portrait
+an older build saved at its limit opens exactly on this one and the guard
+moves nothing (`a_portrait_saved_at_the_older_limit_opens_exactly_on_this_one`);
+the model is told the whole number inside it (`advisor::presets::SKIN_GUARDRAIL`,
+"-10..+10", as the hue limit 26.67 is told as 26). The panel's sliders
+(`slider_impl`) show a number that is not on their whole-number grid as it is
+— this limit, a mask Temp carried over from an older build — and change it
+only when the user moves them: the rail is egui's with `SliderClamping::Edits`
+(the default steps and rounds the number it is merely shown, every frame),
+the box prints the decimals the number needs, up to two, and a drag, a typed
+number or a nudge lands on the grid inside the track or on the track's own
+end (`a_slider_shows_the_number_it_holds_and_changes_it_only_when_moved`).
+A write that reaches disk in the same step meets
 them where it is written, not a frame later: an analysis landing in
 Portraits clamps the recipe `on_analyzed` saves (`skin_held`), the AI
 portrait look's masks and blur are put back on the landed recipe before that

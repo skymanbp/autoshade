@@ -141,7 +141,9 @@ with their sliders at zero, and so does the background blur.
 makes it cooler or warmer, and **Skin colour intensity** paler or richer —
 each on the skin only. **Keep skin natural** is on by default. While it is on,
 skin colour can be made only a little richer (up to +15), warmer or cooler
-(up to 20 either way) or shifted in tone (up to 8°); softening stops before
+(up to 10.67 either way — the same warmth that 20 was up to v1.18.3, before
+the slider came to reach about twice as far; with the switch off it runs to
+100) or shifted in tone (up to 8°); softening stops before
 skin looks fake (fine texture no lower than −60, local contrast no lower than
 −40); and skin is never sharpened. The limits hold for your own changes —
 here and in the mask list — and for the AI's alike, on the face and skin
@@ -635,9 +637,15 @@ From the version after v1.18.3 they reach about twice as far as they did. A
 photo saved before that looks exactly as it was saved: when it is opened its
 numbers are restated on the stronger scale, so its sliders read smaller —
 Temp a little over half the old number, Tint half — and an .xmp exported
-for it carries those smaller numbers. An .xmp is read at the numbers it
-states, so a mask Temp or Tint set in Lightroom reaches about twice as far
-here as it did in earlier versions.
+for it carries those smaller numbers. A restated number is shown as it is
+(48 reads 25.6) and stays so until you move the slider, which then lands on
+whole numbers as before. An .xmp that AutoShade wrote — v1.3.1 or later,
+every one that carries the whole develop — imports to the picture it was
+exported with: the numbers an older version wrote are restated the same way.
+A mask Temp or Tint set in Lightroom is read at the number it states, so it
+reaches about twice as far here as it did in earlier versions; so is one in
+an .xmp written before v1.3.1, which carries Lightroom's settings and nothing
+else.
 The **Color** group holds
 **Saturation**, **Hue shift**, **Temp shift**, **Tint shift** and, since
 v1.17.0, **Color tint** with its **Color tint hue** (Lightroom's mask
