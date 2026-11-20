@@ -1158,6 +1158,7 @@ impl AutoShadeApp {
         self.overlay_ref = None;
         self.overlay_stale = true;
         self.last_rgb = None; // the retained frame belongs to the OLD variant
+        autoshade::render::forget_kept_frames(); // and the engine's kept frames of it (the mask pass's memory)
         // …and so does the After texture (L11-2): its only writers are the
         // develop/retouch landings, so until the new variant's first frame
         // lands the canvas showed the OLD variant's pixels under the NEW
@@ -1195,6 +1196,8 @@ impl AutoShadeApp {
         // apply: commit first, then load_active's M15 clear drops the
         // buffer. Clearing without committing silently lost the rename.
         self.commit_pending_names();
+        // The card on the canvas changes: the engine gives back the frames it kept of the one before.
+        autoshade::render::forget_kept_frames();
         // Read BEFORE the &mut borrow below. `dirty` = an edit awaiting
         // dispatch; `develop_inflight` = a frame the switch is about to make
         // the acceptance gate reject. Either way no completed frame depicts

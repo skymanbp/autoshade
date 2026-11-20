@@ -516,3 +516,34 @@
             }
         }
     }
+
+    /// Where the photo, the card or the resolution on the canvas changes,
+    /// the engine is told to give back the frames it kept of the one before
+    /// (`render::forget_kept_frames`, the mask pass's memory): a quarter of a
+    /// gigabyte for a 4096 px canvas, which would otherwise stay until later
+    /// frames pushed it out. And the canvas is never longer than the side
+    /// the engine remembers frames up to (`render/mask_memo.rs`,
+    /// `CANVAS_EDGE`).
+    ///
+    /// MUTATION THIS KILLS (run 2026-11-20): `switch_variant` without the call.
+    #[test]
+    fn a_changed_canvas_gives_back_the_engines_kept_frames() {
+        let actions = include_str!("../actions.rs");
+        let workers = include_str!("../workers.rs");
+        let follows = |src: &str, marker: &str| -> bool {
+            let at = src.find(marker).unwrap_or_else(|| panic!("the marker is gone: {marker}"));
+            src[at..].lines().take(6).any(|line| line.contains("autoshade::render::forget_kept_frames();"))
+        };
+        for (what, src, marker) in [
+            ("a card switched on the strip", actions, "silently lost the rename."),
+            ("a variant that left the canvas", actions, "the retained frame belongs to the OLD variant"),
+            ("another preview resolution", workers, "resolution changed under the frame"),
+            ("another photo", workers, "retained frame was the old photo's"),
+        ] {
+            assert!(follows(src, marker), "{what}: the engine's kept frames are not given back");
+        }
+        assert!(
+            actions.contains("[1280, 2560, 4096].contains(&prefs.preview_edge)"),
+            "the canvas's sizes changed: the engine remembers frames up to 4096 px a side"
+        );
+    }

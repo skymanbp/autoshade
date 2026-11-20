@@ -8,21 +8,37 @@ use std::sync::{Arc, Weak};
 /// (32 KiB), and a session asks for its canvas's and its draft's.
 const UNWARP_KEPT: usize = 8;
 
+/// The longest side of a frame the mask pass remembers: the editor's canvas
+/// at its largest (the GUI's `preview_edge` is 1280, 2560 or 4096). A frame
+/// with a longer side is no canvas — it is an export of a larger photo — and
+/// [`MaskChain::open`] turns it away before anything is made of it.
+pub(super) const CANVAS_EDGE: usize = 4096;
+
+/// The longest side of the smallest draft the editor draws while a slider is
+/// held (the GUI's `draft::DRAFT_EDGE_FLOOR`).
+const DRAFT_EDGE: usize = 1024;
+
+/// Room for the keys and the colour field's bands of the two frames below.
+const KEYS_BYTES: usize = 8 * 1024 * 1024;
+
 /// The bytes the kept frames of [`MaskChain`] may hold together, their keys
-/// and the colour field's band counted in. A frame is kept in two copies (the
-/// frame the masks found, the frame the changed mask found), so one whose
-/// two copies would not fit is never kept at all ([`Slot::at_most`]): at 12
-/// bytes a pixel that is a frame of 4.19 MP, which takes every draft the
-/// editor draws while a slow photo is edited (1024 to 2304 px on the long
-/// edge of a 3:2 frame) and no export. The 4096 px canvas would take 268 MB
-/// and is left out.
+/// and the colour field's band counted in: what ONE canvas and ONE draft of
+/// it need, each at its largest (a square photo) and each in the two copies
+/// a frame is kept in (the frame the masks found, the frame the changed mask
+/// found) at 12 bytes a pixel, and the room for their keys —
+/// 2 × 12 × (4096² + 1024²) + 8 MiB = 384 MiB + 24 MiB + 8 MiB = 416 MiB.
+/// A 3:2 photo's canvas and draft (4096×2731, 1024×683) take 272 MiB of it.
+/// The canvas is in it (2026-11-20) so that the sharp frame drawn when a
+/// slider is let go starts at the mask that moved, as the drafts before it
+/// did; before, the bound was 96 MiB and held drafts alone.
 ///
 /// Fixed, like the brush cache and the raster cache beside it
 /// (`brush::BRUSH_RASTER_CACHE_BYTES`, `MASK_RASTER_BUDGET_BYTES`): it does
 /// not grow with the photo, so it is no row of
 /// `decode::PIPELINE_BYTES_PER_PIXEL` and does not move
-/// `jobs::PER_PHOTO_PEAK_COMMIT_MB`.
-const CHAIN_BYTES: usize = 96 * 1024 * 1024;
+/// `jobs::PER_PHOTO_PEAK_COMMIT_MB`. The editor gives it back when its
+/// canvas changes ([`forget_kept_frames`]).
+const CHAIN_BYTES: usize = 2 * std::mem::size_of::<[f32; 3]>() * (CANVAS_EDGE * CANVAS_EDGE + DRAFT_EDGE * DRAFT_EDGE) + KEYS_BYTES;
 
 /// How many frames are remembered at all, kept or only seen.
 const CHAIN_SLOTS: usize = 16;
@@ -112,6 +128,22 @@ fn memory<T>(with: impl FnOnce(&mut Memory) -> T) -> T {
         static MEMORY: std::cell::RefCell<Memory> = const { std::cell::RefCell::new(Memory { maps: Vec::new(), frames: Kept(Vec::new()) }) };
     }
     MEMORY.with(|m| with(&mut m.borrow_mut()))
+}
+
+/// Every kept frame is given back. The editor calls it when the photo, the
+/// card or the resolution on its canvas changes: the frames kept of the one
+/// before can be a quarter of a gigabyte and more, and would otherwise stay
+/// until later frames pushed them out. The lens maps stay (eight of them are
+/// 256 KiB).
+pub fn forget_kept_frames() {
+    memory(|m| m.frames.0.clear());
+}
+
+/// The bytes this thread's kept frames hold, and how many frames are
+/// remembered.
+#[cfg(test)]
+pub(super) fn kept() -> (usize, usize) {
+    memory(|m| (m.frames.0.iter().map(Slot::bytes).sum(), m.frames.0.len()))
 }
 
 /// One local adjustment as the mask pass reads it: every field of it (its
@@ -244,11 +276,6 @@ fn same_bits(a: &[[f32; 3]], b: &[[f32; 3]]) -> bool {
         && a.par_chunks(ROW).zip(b.par_chunks(ROW)).all(|(a, b)| a.iter().zip(b).all(|(p, q)| p.map(f32::to_bits) == q.map(f32::to_bits)))
 }
 
-/// Would a frame of `pixels` be kept under `bytes`? Its two copies must fit.
-fn kept_under(pixels: usize, bytes: usize) -> bool {
-    pixels.saturating_mul(2 * std::mem::size_of::<[f32; 3]>()) <= bytes
-}
-
 /// What [`MaskChain`] did on this thread's last mask pass.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -312,8 +339,15 @@ pub(super) fn without_chain<T>(run: impl FnOnce() -> T) -> T {
 ///
 /// **What a develop that never comes again pays.** A sampled hint of its
 /// pixels and the text of its masks, and no pixel is copied: a frame is kept
-/// from its SECOND sight ([`hint`]). An export, a batch and a frame over
-/// [`CHAIN_BYTES`] pay that or nothing.
+/// from its SECOND sight ([`hint`]) — a canvas-sized preview rendered once
+/// copies nothing. A frame with a side over [`CANVAS_EDGE`], which is an
+/// export of a photo larger than the canvas, pays nothing at all: it is
+/// turned away before any text is made.
+///
+/// **What is given back.** The editor drops the kept frames when the photo,
+/// the card or the resolution on its canvas changes
+/// ([`forget_kept_frames`]); otherwise the least recently developed go
+/// first under [`CHAIN_BYTES`].
 ///
 /// **Two develops at once.** A develop takes its frame's slot out of the list
 /// and puts its own back when it is done; one that finds the slot gone runs
@@ -344,7 +378,7 @@ impl MaskChain {
         if CHAIN_OFF.with(std::cell::Cell::get) {
             return Self(None);
         }
-        if r.masks.is_empty() || data.is_empty() || data.len() != w * h || !kept_under(data.len(), CHAIN_BYTES) {
+        if r.masks.is_empty() || data.is_empty() || data.len() != w * h || w.max(h) > CANVAS_EDGE {
             return Self(None);
         }
         let rest = EditRecipe { masks: Vec::new(), ..r.clone() };
@@ -492,12 +526,17 @@ mod tests {
         assert_eq!(kept.0.len(), CHAIN_SLOTS, "and the list itself is bounded");
     }
 
-    /// A frame is kept only where its two copies fit, and the canvas does not.
+    /// The bound is what one canvas and one draft of it need at their
+    /// largest, each in its two copies: 384 MiB and 24 MiB, and 8 MiB for
+    /// their keys. A 3:2 photo's canvas and draft take 272 MiB of it.
     #[test]
-    fn a_frame_is_kept_only_where_two_copies_of_it_fit() {
-        assert!(kept_under(1024 * 683, CHAIN_BYTES) && kept_under(2304 * 1536, CHAIN_BYTES));
-        assert!(!kept_under(4096 * 2731, CHAIN_BYTES), "the canvas's two copies are 268 MB");
-        assert!(kept_under(100, 2400) && !kept_under(101, 2400));
+    fn the_bound_is_one_canvas_and_one_draft_at_their_largest() {
+        let frame = |w: usize, h: usize| Slot { at: (w, h, 0), context: String::new(), masks: Vec::new(), start: None, resume: None, field: None }.at_most();
+        assert_eq!((frame(4096, 4096), frame(1024, 1024)), (384 << 20, 24 << 20));
+        assert_eq!(CHAIN_BYTES, frame(CANVAS_EDGE, CANVAS_EDGE) + frame(DRAFT_EDGE, DRAFT_EDGE) + KEYS_BYTES);
+        assert_eq!(CHAIN_BYTES, 416 << 20);
+        let three_two = frame(4096, 2731) + frame(1024, 683);
+        assert!(three_two > (272 << 20) && three_two < (273 << 20), "{three_two}");
     }
 
     /// The exact text tells apart what `==` does not, and refuses a NaN.

@@ -421,3 +421,56 @@ fn the_colour_fields_band_is_kept_with_the_frame_and_its_zone_mask() {
         assert!(out == plain && !trace.field_served, "sight {sight}: an idle zone's band is read every time: {trace:?}");
     }
 }
+
+/// A frame with a side past the editor's canvas is not remembered at all —
+/// nothing is made of it and no pixel copied, however often it is developed
+/// — and one of exactly the canvas's side is, from its second sight.
+///
+/// MUTATION THIS KILLS (run 2026-11-20): `MaskChain::open` without the
+/// ceiling — the frame one pixel past the canvas is remembered.
+#[test]
+fn a_frame_one_pixel_past_the_canvas_is_never_remembered() {
+    let mask = MaskGeometry::Linear { zero_x: 0.2, zero_y: 0.5, full_x: 0.8, full_y: 0.5 };
+    let r = EditRecipe { masks: vec![LocalAdjustment { mask, exposure_ev: 0.5, ..Default::default() }], ..Default::default() };
+    let (lens, none) = (MaskFrame::AsRendered, mask_memo::ChainTrace::NONE);
+    for (w, remembered) in [(mask_memo::CANVAS_EDGE + 1, false), (mask_memo::CANVAS_EDGE, true)] {
+        mask_memo::forget_kept_frames();
+        let (dims, frame) = ((w, 2usize), memo_frame(w, 2, 0.02));
+        let fresh = memo_fresh(&frame, dims, &r, lens);
+        assert!(fresh != frame.iter().flatten().map(|v| v.to_bits()).collect::<Vec<_>>(), "premise: the mask moves the frame");
+        for sight in 0..3 {
+            let (out, trace) = memo_pass(&frame, dims, &r, lens);
+            let (bytes, frames) = mask_memo::kept();
+            assert!(out == fresh, "{w} px, sight {sight}");
+            if remembered {
+                assert_eq!((frames, trace.kept_start), (1, sight > 0), "{w} px, sight {sight}: remembered, and kept from its second sight");
+                assert!(sight == 0 || bytes >= 12 * w * 2, "{w} px, sight {sight}: {bytes} bytes");
+            } else {
+                assert_eq!((trace, bytes, frames), (none, 0, 0), "{w} px, sight {sight}: nothing is made or kept of it");
+            }
+        }
+    }
+}
+
+/// The kept frames are given back when asked — the editor asks when the
+/// photo, the card or the resolution on its canvas changes — and the next
+/// develop of the same frame is a first sight, computed whole.
+///
+/// MUTATION THIS KILLS (run 2026-11-20): `forget_kept_frames` dropping
+/// nothing — the bytes are still held.
+#[test]
+fn the_kept_frames_are_given_back_when_the_canvas_changes() {
+    let dir = crate::test_dir("mask-memo-forget");
+    let r = memo_recipe(&dir);
+    let (dims, lens) = ((96usize, 64usize), MaskFrame::AsRendered);
+    let frame = memo_frame(dims.0, dims.1, 0.07);
+    mask_memo::forget_kept_frames();
+    assert_eq!(mask_memo::kept(), (0, 0));
+    memo_settle(&frame, dims, &r, lens);
+    let (bytes, frames) = mask_memo::kept();
+    assert!(frames == 1 && bytes >= 2 * 12 * dims.0 * dims.1, "both copies of the frame are held: {bytes} bytes in {frames} frame(s)");
+    mask_memo::forget_kept_frames();
+    assert_eq!(mask_memo::kept(), (0, 0), "given back");
+    let (out, trace) = memo_pass(&frame, dims, &r, lens);
+    assert!(out == memo_fresh(&frame, dims, &r, lens) && trace == mask_memo::ChainTrace::NONE, "and the next develop is a first sight: {trace:?}");
+}

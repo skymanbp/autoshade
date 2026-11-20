@@ -1213,6 +1213,7 @@ impl AutoShadeApp {
                                     self.base_preview = Some(bimg.clone());
                                 }
                                 self.last_rgb = None; // resolution changed under the frame
+                                autoshade::render::forget_kept_frames(); // and the engine's kept frames of it (the mask pass's memory)
                                 self.dirty = true;
                                 self.status = trf(
                                     lang,
@@ -1823,6 +1824,7 @@ impl AutoShadeApp {
                             // a value.
                             self.decide_keep_skin_for_photo();
                             self.last_rgb = None; // retained frame was the old photo's
+                            autoshade::render::forget_kept_frames(); // and the engine's kept frames of it (the mask pass's memory)
                             self.reset_history(); // a new photo starts a fresh undo history
                             self.region = None; // and a fresh local-edit selection
                             self.region_drag = None;

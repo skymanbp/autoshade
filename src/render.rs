@@ -208,6 +208,7 @@ pub use masks::{MaskFrame, corrected_raster_to_sensor, engine_active, sensor_ras
 pub(crate) use masks::{linear_to_oklab, preview_field_sky_coverage, tint_from_push, tint_luma, tint_push, tint_window};
 #[cfg(test)]
 pub(crate) use masks::{TINT_WINDOW_CENTRE, oklab_to_linear, tint_px};
+pub use mask_memo::forget_kept_frames;
 use mask_memo::MaskChain;
 use masks::{MaskUnwarp, apply_masks};
 #[cfg(test)]

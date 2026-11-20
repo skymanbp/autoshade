@@ -3431,11 +3431,17 @@ the pass runs whole.
 
 A frame is copied from its second sight on (a 64-bit hint of 4096 of its
 pixels says it was seen before, and never says two frames are one), so a
-develop that does not come again copies no pixel. The kept frames hold
-96 MiB together at most, the least recently developed dropped first, and a
-frame whose two copies would not fit is not remembered at all: over
-4.19 MP, which is every export and the editor's 4096 px canvas — the drafts
-drawn while a slider is held are under it. The memory is one lock, held for
+develop that does not come again copies no pixel — a canvas-sized preview
+rendered once among them. The kept frames hold 416 MiB together at most:
+what one canvas and one draft of it need at their largest (a square photo,
+4096 px and 1024 px a side), each in its two copies at 12 bytes a pixel —
+384 MiB and 24 MiB — and 8 MiB for their keys; a 3:2 photo's canvas and
+draft take 272 MiB of it. The least recently developed is dropped first. A
+frame with a side over 4096 px is no canvas but an export of a larger
+photo, and is turned away before any text is made of it. The editor gives
+the kept frames back when the photo, the card or the resolution on its
+canvas changes (`render::forget_kept_frames`), and not when later frames
+have pushed them out. The memory is one lock, held for
 a lookup or a put and never for a build or a develop; a develop takes its
 frame's entry out and puts its own back, and one that finds it taken runs as
 a first sight.
