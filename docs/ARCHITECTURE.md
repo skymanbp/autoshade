@@ -1,6 +1,9 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.18.4 — a mask's Temp and Tint reach about twice as far and a
+> Status: **implemented** (v1.18.5 — the shape half of a raster mask's band read is kept between
+> develops and the colour field is read on all cores, the picture the same bytes; the desktop app
+> asks GitHub for the latest version, once a day at most, and downloads nothing;
+> v1.18.4 — a mask's Temp and Tint reach about twice as far and a
 > develop saved before draws as it was saved; a slow photo follows a slider in drafts and a
 > change to one mask draws from that mask on; an older build's .xmp is read on that build's scale;
 > v1.18.3 — an .xmp is an external source: read only on an import
