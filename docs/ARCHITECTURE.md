@@ -271,10 +271,10 @@
 > `scripts/roundtrip_gate.py` is an optional developer instrument (Photoshop
 > with Camera Raw, driven through `scripts/acr_render.ps1`), not part of the
 > release battery.
-> 2050 library + 30 CLI + 374 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 2027 pass + 23 `#[ignore]`d forensic probes and
-> the GUI result is 363 pass + eleven ignored (an explicit scratch-recipe export
-> probe, a table of a selected mask's row widths and the offline panel, window, mode-workspace, Settings, controls-width, library, Versions-section, .xmp-question and selected-mask screenshots) in the ordinary battery. One of the
+> 2077 library + 30 CLI + 383 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 2054 pass + 23 `#[ignore]`d forensic probes and
+> the GUI result is 371 pass + twelve ignored (an explicit scratch-recipe export
+> probe, a table of a selected mask's row widths and the offline panel, window, mode-workspace, Settings, controls-width, library, Versions-section, .xmp-question, selected-mask and Updates-row screenshots) in the ordinary battery. One of the
 > ignored library names is not a probe:
 > `the_real_reverse_fit_reproduces_a_stated_look_on_a_small_frame` is the production reverse fit end to
 > end on a small synthetic pair, ignored for its duration (most of an hour) and run by name for a
@@ -310,7 +310,19 @@
 > edit read as the edit, a maskless edit sending no mask and layering only
 > what changed, and the ignored tuning bench on real answers) and two GUI names
 > (no side-panel text runs under the scrollbar, and the ignored offline panel
-> screenshots). For v1.18.4, by name against the v1.18.3 battery: library
+> screenshots). For v1.18.5, by name against the v1.18.4 battery: library
+> +27 / −0 — sixteen in the renderer (fourteen on the planes the band read
+> keeps: a develop with them kept is the develop from nothing bit for bit,
+> each input a kept plane is kept under, the second sight, the bound on what
+> is held and its giving back; two on the colour field and its guide read
+> side by side being the serial read bit for bit) and eleven on the update
+> check (the version compared number by number, a tag or a reply that is
+> refused, the size bound, the timeout, the page kept inside the repository,
+> the request's two headers); the CLI list is v1.18.4's; GUI +9 / −0 — eight
+> on the update check's rules (the switch and the environment variable, once
+> a day, one notice, a skipped version, each outcome of Check now, an older
+> settings file, a late answer) and one ignored (the offline camera for the
+> Updates row). For v1.18.4, by name against the v1.18.3 battery: library
 > +37 / −0 — fourteen in the renderer (ten on the frames a mask resumes
 > from: a pass resumed from one is the pass from nothing bit for bit, what a
 > frame is kept with, the bound on what is held; four on a mask's Temp and
@@ -2496,6 +2508,8 @@ measured falloffs, rasters, Lightroom's stored mask frame, the brush),
 is owed and the layer fold; the read that finds it, v1.18.0),
 `mask_memo.rs` (what the mask pass keeps from one develop of a frame to the
 next: the lens map, and the frame the first changed mask finds),
+`mask_band_memo.rs` (the shape half of the band read, kept from one develop
+to the next, v1.18.5),
 `geometry.rs` (lens geometry), `orient.rs` (orientation and coordinate frames),
 `resample.rs` (flips, downscale, straightening, the bilinear fetches),
 `base_look.rs` (the camera-matched base look), `export.rs` (delivery colour
@@ -3584,6 +3598,49 @@ on every develop, as it did before the chain existed, and the chain serves
 it nothing past the masks before its first raster. Under test the loader's
 cache is one per test thread, as the chain's own memory is, so a test that
 develops twice does not depend on the rasters its neighbours load.
+
+**What the band read keeps** (v1.18.5; `render/mask_band_memo.rs`). Before
+it reads a pixel, the read of a raster layer's band (`mask_band::layer_band`)
+works out three planes for each strip of block rows: each block's mean
+coverage, that plane's 3 x 3 mean, and the mean's largest step to a
+neighbour. They read the layer's coverage and the strip's place and nothing
+of the picture, so every develop of a frame worked them out again to the
+same values. They are now kept, a strip at a time, under every input they
+are computed from, compared exactly: the layer's geometry by its exact
+`Debug` text; its raster as the kept frames know one — the decoded object's
+allocation, held weakly (a brush's raster is stamped from the geometry and
+the frame's size, both in the key); the lens map by every number of its
+tables; and the frame's size, the block edge and the strip's first block
+row, which with constants fix the strip's layout. A layer with an input the
+key does not know — a raster that is neither the snapshot's nor a brush's, a
+geometry holding a NaN — is read as it was before anything was kept. So a
+kept plane is the plane a fresh computation gives or it is not served, and a
+develop is the same bytes with the planes as without.
+
+A strip's planes are kept from the second time they are computed, the rule
+the kept frames follow, so a develop that does not come again keeps none;
+the third develop of a card is the first one served. They hold 256 MiB
+together at most, their keys counted in — a 3:2 photo's canvas and its
+draft, ten raster layers each with rasters at half the canvas's size, take
+233 MB of it — the least recently read dropped first, and the planes of a
+raster object that is gone dropped at the next put. They are kept only for a
+frame whose longer side is 4096 px at most (a
+larger frame is an export, developed once), and the editor gives them back
+with the kept frames (`render::forget_kept_frames`). The memory is one lock,
+held for a lookup or a put and never while a plane is computed; under test
+it is one per test thread. The rest of the read — the walks to each plateau
+and the statistics of the pixels there — is computed as before, on the same
+planes.
+
+**The colour field is read on all cores** (v1.18.5). The read
+(`render::apply_colour_field`) builds its guide and then, for each pixel,
+reads that pixel's place, its guide value, its partition value and the
+grid's eight corners, and writes that pixel alone. Both were one loop on one
+thread; the guide's three planes and the pixels' rows are now read side by
+side, every value by the same expressions in the same order, so the result
+is the serial read's bit for bit
+(`the_field_guide_read_side_by_side_is_the_serial_guide_bit_for_bit`,
+`the_colour_field_read_side_by_side_is_the_serial_read_bit_for_bit`).
 
 **The mask Color tint** (v1.17.0; `toning_amount` / `toning_hue`, Lightroom's
 mask 「颜色」 swatch, `crs:LocalToningSaturation` / `LocalToningHue`) is the last
@@ -8820,6 +8877,53 @@ The scenario script asserts that, and photographs the shipped install's
 registry entry, directory and Start Menu folder before and after to prove they
 did not move.
 
+### 4.13 The update check (v1.18.5) — `src/update.rs`, `src/bin/gui/update_check.rs`
+
+The desktop app asks one place one question: GitHub's latest-release record
+of this repository (`update::LATEST_API`). It never downloads or installs
+anything.
+
+The library's half (`update::fetch_latest`) sends one `GET` with two headers
+of its own, `User-Agent: AutoShade/<version>` and
+`Accept: application/vnd.github+json`; the HTTP client adds `Host` and
+`Accept-Encoding`. No key rides along — the advisor's request builders,
+which attach keys, are not used — and no identifier, nothing of the user's
+and nothing of a photo. Redirects are not followed: the address is fixed, so
+a redirect is an answer that was not asked for. The connection may take 5 s
+and the whole request 10 s. The reply is untrusted. At most 1 MiB of it is
+read, and a longer reply is refused, not cut and parsed. Two fields are
+used: `tag_name`, accepted only as `v?MAJOR.MINOR.PATCH` in plain digits and
+compared number by number (`update::Version`, so 1.18.10 is newer than
+1.18.9), and `html_url`, used only when it lies inside this repository on
+github.com — otherwise the fixed releases page (`update::RELEASES_PAGE`). No
+text of the reply reaches the screen. What went wrong is one of three things
+a person can act on (`update::CheckError`): no answer, a refusal, an answer
+that cannot be read.
+
+The window's half (`update_check.rs`) holds the rules. The AUTOMATIC check
+starts on the first frame, on its own thread, so it never delays startup or
+holds the UI thread. It runs when its switch is on
+(`UpdatePrefs::auto`, on by default, kept in the settings file), the
+environment variable `AUTOSHADE_NO_UPDATE_CHECK` is not set to something
+non-empty, and 24 hours have passed since the last automatic check started
+— stamped at the start, so a network that fails is not asked again at every
+launch. It is silent on every failure. A check that finds a newer version
+raises one notice, held until the workspace is showing (the mode page draws
+no notices), unless the user chose to skip that version. **Check now**
+(Settings → About) always asks, and the row states the outcome. With the
+environment variable set the switch is drawn off and disabled, and the
+stored choice is left as it was. The newest version found is kept in the
+settings file so the row can still name it after a restart inside the 24
+hours, and is dropped once the running build is that version or newer. The
+release page is handed to the system browser (`egui::Context::open_url`).
+
+Under `cfg(test)` the automatic check never starts, and a check nobody
+injected a fetch for answers "no connection" without touching the network.
+The window's tests drive every rule through an injected fetch and clock; the
+library's tests read the request's headers and each kind of reply on a stub
+bound to the loopback interface. The command line and the web server do not
+call the module.
+
 ## 5. Why Rust — and the whole stack, named
 
 Cross-platform, no GC pauses on large-image pipelines, first-class image crates,
@@ -8861,7 +8965,7 @@ comments are the source of these one-liners.
 | `serde` 1.0.228 (`derive`) + `serde_json` 1.0.150 | `EditRecipe`, `recipe.json`, `variants.json`, the style index, and every AI request/response body |
 | `thiserror` 2.0.18 | the typed error enums whose arms callers branch on — `advisor::AdvisorError` is the one that matters (a CLI envelope failure and a bad verdict are different recoveries) |
 | `tiny_http` 0.12.0 | the local web server behind `serve` (§4.9) |
-| `ureq` 2 (`json`) | the blocking HTTP client for every AI endpoint, including the SSE streaming arm |
+| `ureq` 2 (`json`) | the blocking HTTP client for every AI endpoint, including the SSE streaming arm, and for the update check's one request (§4.13) |
 
 **Native GUI**, behind the `gui` feature so a plain `cargo build` / `cargo test`
 never pulls in winit and the GL stack: `eframe` + `egui` **0.29** (the desktop

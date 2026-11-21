@@ -22,6 +22,7 @@ algorithms in [TECH_STACK.md](TECH_STACK.md).
 - [Lightroom and XMP interoperability](#lightroom-and-xmp-interoperability)
 - [Configure and use the AI features](#configure-and-use-the-ai-features)
 - [Privacy, trust, and paid-feature boundary](#privacy-trust-and-paid-feature-boundary)
+- [Check for updates](#check-for-updates)
 - [Install, upgrade, and uninstall on Windows](#install-upgrade-and-uninstall-on-windows)
 
 ## Choosing a mode
@@ -1370,7 +1371,8 @@ still recognised from the name the writer gives it (`sky`, `land`,
 listed on its left: **General** (language, theme, accent colour — these apply
 at once), **Folders** (the delivery folder and the develop store), **AI
 models** (the analysis model and the image model), **Advanced** (the Python
-interpreter and the segmentation helper) and **About** (the version). The
+interpreter and the segmentation helper) and **About** (the version, and
+whether a newer one is out — [Check for updates](#check-for-updates)). The
 **Save settings** button at the bottom of the Folders, AI models and Advanced
 pages saves those three pages' fields together.
 
@@ -1649,6 +1651,11 @@ the photos and the write is refused, so run AutoShade from another folder or
 pass `-o` with a folder outside the photos. "Export .xmp beside the photo" is
 the separate, confirmed per-photo sidecar exception.
 
+The desktop app asks GitHub, at most once a day, whether a newer AutoShade is
+out. That request carries the program's name and version and nothing of yours
+— no photo, no file name, no setting, no identifier — and it can be turned
+off ([Check for updates](#check-for-updates)).
+
 The Delivery folder holds exports only. The full-resolution images AI denoise,
 stacking, heal, clone, fill and AI edits produce — the masters their cards are
 built on — live in a `masters` folder inside the develop store, so cleaning out
@@ -1657,6 +1664,31 @@ that folder and opens it; delete a card before deleting its master. Masters
 made before v1.12.0 stay where they were written. If one of those is deleted,
 a ▣ Original card that used it goes back to the photo file itself and says so,
 and any other card built on it has nothing left to show and can be deleted.
+
+## Check for updates
+
+**Settings → About** has an **Updates** row (v1.18.5). It says what the last
+check found — that you have the latest version, or that a newer one is
+available — and **Check now** asks at once. When a newer version is out,
+**Open the download page** opens that version's release page in your browser,
+and **Skip this version** stops the automatic check mentioning that version
+again (the row still shows it). AutoShade never downloads or installs an
+update itself: upgrading is the installer or the archive from the release
+page.
+
+With **Check for updates automatically** ticked — it is by default — the
+desktop app asks once after its window is up, in the background, and at most
+once a day. A check that finds a newer version says so in one notice; a check
+that cannot reach GitHub says nothing.
+
+What is sent: one request to GitHub for this project's latest release. It
+carries the program's name and version and nothing else — no photo, no file
+name, no setting and no identifier.
+
+To turn the automatic check off, untick the box, or set the environment
+variable `AUTOSHADE_NO_UPDATE_CHECK` to any non-empty value; with it set the
+box is shown unticked and greyed. **Check now** still asks when you press it.
+The command line and the web UI never check.
 
 ## Install, upgrade, and uninstall on Windows
 
